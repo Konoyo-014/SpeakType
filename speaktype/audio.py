@@ -1,10 +1,17 @@
 """Audio recording module using sounddevice."""
 
+import time
 import threading
 import tempfile
+import logging
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+
+logger = logging.getLogger("speaktype.audio")
+
+MAX_RETRIES = 3
+RETRY_DELAY = 0.3
 
 
 class AudioRecorder:
@@ -21,14 +28,39 @@ class AudioRecorder:
                 return
             self._frames = []
             self.is_recording = True
-            self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="float32",
-                callback=self._callback,
-                blocksize=int(self.sample_rate * 0.1),  # 100ms blocks
-            )
-            self._stream.start()
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    # Reset PortAudio to pick up device changes
+                    if attempt > 0:
+                        try:
+                            sd._terminate()
+                            sd._initialize()
+                        except Exception:
+                            pass
+                        time.sleep(RETRY_DELAY)
+
+                    self._stream = sd.InputStream(
+                        samplerate=self.sample_rate,
+                        channels=1,
+                        dtype="float32",
+                        callback=self._callback,
+                        blocksize=int(self.sample_rate * 0.1),
+                    )
+                    self._stream.start()
+                    return  # success
+                except Exception as e:
+                    logger.warning(f"Audio open failed (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                    if self._stream:
+                        try:
+                            self._stream.close()
+                        except Exception:
+                            pass
+                        self._stream = None
+
+            # All retries failed
+            self.is_recording = False
+            logger.error("Could not open microphone after retries")
 
     def _callback(self, indata, frames, time_info, status):
         if self.is_recording:
@@ -41,10 +73,12 @@ class AudioRecorder:
                 return None
             self.is_recording = False
             if self._stream:
-                self._stream.stop()
-                self._stream.close()
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
                 self._stream = None
-            # Copy frames under lock to avoid race with callback
             frames = list(self._frames)
             self._frames = []
 
@@ -53,7 +87,6 @@ class AudioRecorder:
 
         audio_data = np.concatenate(frames, axis=0).flatten()
 
-        # Skip if too short (< 0.3 seconds) or too quiet
         if len(audio_data) < self.sample_rate * 0.3:
             return None
         if np.max(np.abs(audio_data)) < 0.01:

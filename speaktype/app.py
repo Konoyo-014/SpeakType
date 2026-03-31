@@ -305,12 +305,52 @@ def _play_sound(name: str):
         pass
 
 
+def _check_permissions():
+    """Check and prompt for required macOS permissions."""
+    issues = []
+
+    # Check microphone - try to open an audio stream briefly
+    try:
+        import sounddevice as sd
+        with sd.InputStream(samplerate=16000, channels=1, dtype="float32", blocksize=1600):
+            pass
+    except Exception:
+        issues.append("Microphone")
+
+    # Check accessibility - try to detect if pynput will work
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", 'tell application "System Events" to return name of first process whose frontmost is true'],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode != 0:
+            issues.append("Accessibility")
+    except Exception:
+        issues.append("Accessibility")
+
+    if issues:
+        missing = " and ".join(issues)
+        print(f"\n⚠️  Missing permissions: {missing}")
+        print(f"   Go to: System Settings → Privacy & Security → {missing}")
+        print(f"   Add your terminal app to the allowed list, then restart SpeakType.\n")
+        # Also show a system notification
+        subprocess.run([
+            "osascript", "-e",
+            f'display notification "Grant {missing} access in System Settings → Privacy & Security" with title "SpeakType Permissions Needed"'
+        ], capture_output=True)
+        # Open System Settings
+        subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy"], capture_output=True)
+
+
 def run():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    _check_permissions()
+
     logger.info("Starting SpeakType...")
     app = SpeakTypeApp()
     app.run()
