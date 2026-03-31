@@ -20,10 +20,11 @@ if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
     sleep 2
 fi
 
-echo "╔═══════════════════════════════════╗"
-echo "║  SpeakType v1.0                   ║"
-echo "║  Push-to-talk: Hold Right ⌘       ║"
-echo "╚═══════════════════════════════════╝"
+echo "╔═══════════════════════════════════════╗"
+echo "║  SpeakType v2.0                       ║"
+echo "║  Push-to-talk: Hold Right ⌘           ║"
+echo "║  Preferences: Click menubar icon → ⌘, ║"
+echo "╚═══════════════════════════════════════╝"
 echo ""
 
 python main.py "$@"

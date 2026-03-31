@@ -73,35 +73,54 @@ def get_tone_for_app(app_info: dict) -> str:
 
 
 def get_selected_text() -> str:
-    """Get currently selected text in the active application via Cmd+C."""
+    """Get currently selected text via Cmd+C using CGEvent + NSPasteboard."""
     import time
-    try:
-        # Save current clipboard
-        script_get = 'the clipboard as text'
-        result = subprocess.run(
-            ["osascript", "-e", script_get],
-            capture_output=True, text=True, timeout=2
-        )
-        old_clipboard = result.stdout.strip() if result.returncode == 0 else ""
+    import AppKit
+    import Quartz
 
-        # Simulate Cmd+C
-        script_copy = '''
-        tell application "System Events"
-            keystroke "c" using command down
-        end tell
-        '''
-        subprocess.run(["osascript", "-e", script_copy], timeout=2)
+    try:
+        pb = AppKit.NSPasteboard.generalPasteboard()
+
+        # Save current clipboard contents
+        old_types = pb.types()
+        old_data = {}
+        if old_types:
+            for t in old_types:
+                d = pb.dataForType_(t)
+                if d:
+                    old_data[t] = d
+
+        # Clear clipboard so we can detect new content
+        pb.clearContents()
+        pb.setString_forType_("", AppKit.NSPasteboardTypeString)
+
+        # Simulate Cmd+C via CGEvent
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        # C key = keycode 8
+        cmd_c_down = Quartz.CGEventCreateKeyboardEvent(src, 8, True)
+        Quartz.CGEventSetFlags(cmd_c_down, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_c_down)
+
+        cmd_c_up = Quartz.CGEventCreateKeyboardEvent(src, 8, False)
+        Quartz.CGEventSetFlags(cmd_c_up, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_c_up)
+
         time.sleep(0.15)
 
-        # Get new clipboard
-        result = subprocess.run(
-            ["osascript", "-e", script_get],
-            capture_output=True, text=True, timeout=2
-        )
-        new_clipboard = result.stdout.strip() if result.returncode == 0 else ""
+        # Read new clipboard
+        new_text = pb.stringForType_(AppKit.NSPasteboardTypeString) or ""
 
-        if new_clipboard and new_clipboard != old_clipboard:
-            return new_clipboard
+        # Restore old clipboard
+        if old_data:
+            pb.clearContents()
+            for t, d in old_data.items():
+                try:
+                    pb.setData_forType_(d, t)
+                except Exception:
+                    pass
+
+        if new_text.strip():
+            return new_text.strip()
 
     except Exception as e:
         logger.debug(f"Failed to get selected text: {e}")

@@ -7,8 +7,9 @@ import threading
 import logging
 import subprocess
 import rumps
+import AppKit
 
-from .config import load_config, save_config, load_custom_dictionary
+from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR
 from .audio import AudioRecorder
 from .asr import ASREngine
 from .polish import PolishEngine
@@ -17,10 +18,12 @@ from .hotkey import HotkeyListener
 from .history import DictationHistory
 from .context import get_active_app, get_tone_for_app, get_selected_text
 from .commands import process_punctuation_commands, detect_edit_command
+from .overlay import RecordingOverlay
+from .snippets import SnippetLibrary
 
 logger = logging.getLogger("speaktype")
 
-# Status icons (using emoji as menubar title)
+# Status icons
 ICON_IDLE = "🎙"
 ICON_RECORDING = "🔴"
 ICON_PROCESSING = "⏳"
@@ -42,10 +45,16 @@ class SpeakTypeApp(rumps.App):
             ollama_url=self.config["ollama_url"],
         )
         self.history = DictationHistory(max_entries=self.config["history_max_entries"])
+        self.snippets = SnippetLibrary()
         self.hotkey_listener = None
         self._recording_start_time = 0
         self._is_processing = False
         self._setup_done = False
+        self._first_launch = not (CONFIG_DIR / "config.json").exists()
+        self._settings_controller = None
+        self._overlay = RecordingOverlay()
+        self._level_timer = None
+
         self._status_item = rumps.MenuItem("Status: Initializing...")
 
         polish_item = rumps.MenuItem("Polish Text", callback=self._toggle_polish)
@@ -55,8 +64,22 @@ class SpeakTypeApp(rumps.App):
         tone_item = rumps.MenuItem("Context-Aware Tone", callback=self._toggle_context_tone)
         tone_item.state = self.config["context_aware_tone"]
 
+        # Language quick-switch submenu
+        lang_menu = rumps.MenuItem("Language")
+        lang_options = [
+            ("auto", "Auto Detect"),
+            ("en", "English"),
+            ("zh", "中文"),
+            ("ja", "日本語"),
+            ("ko", "한국어"),
+        ]
+        for code, name in lang_options:
+            item = rumps.MenuItem(name, callback=self._make_lang_callback(code))
+            item.state = self.config["language"] == code
+            lang_menu.add(item)
+
         self.menu = [
-            rumps.MenuItem("SpeakType v1.0"),
+            rumps.MenuItem("SpeakType v2.0"),
             None,
             rumps.MenuItem(f"Hotkey: {self._hotkey_display()}"),
             self._status_item,
@@ -64,14 +87,30 @@ class SpeakTypeApp(rumps.App):
             polish_item,
             voice_cmd_item,
             tone_item,
+            lang_menu,
             None,
+            rumps.MenuItem("Preferences...", callback=self._open_settings, key=","),
             rumps.MenuItem("History & Stats", callback=self._show_stats),
             rumps.MenuItem("Test Microphone", callback=self._test_mic),
-            rumps.MenuItem("Reload Config", callback=self._reload_config),
             None,
             rumps.MenuItem("Open Config Folder", callback=self._open_config),
-            rumps.MenuItem("Quit SpeakType", callback=self._quit),
+            rumps.MenuItem("Check for Updates", callback=self._check_updates),
+            rumps.MenuItem("About SpeakType", callback=self._show_about),
+            None,
+            rumps.MenuItem("Quit SpeakType", callback=self._quit, key="q"),
         ]
+
+    def _make_lang_callback(self, lang_code):
+        def callback(sender):
+            self.config["language"] = lang_code
+            save_config(self.config)
+            # Update checkmarks in language submenu
+            lang_menu = self.menu.get("Language")
+            if lang_menu:
+                for item in lang_menu.values():
+                    item.state = False
+                sender.state = True
+        return callback
 
     def _hotkey_display(self):
         mapping = {
@@ -97,15 +136,32 @@ class SpeakTypeApp(rumps.App):
         self._do_setup()
 
     def _do_setup(self):
+        # Setup overlay on main thread
+        try:
+            self._overlay.setup()
+        except Exception as e:
+            logger.warning(f"Overlay setup failed: {e}")
+
         def init_engines():
             logger.info("Loading ASR engine...")
             self._status_item.title = "Status: Loading ASR model..."
+
+            # Show onboarding on first launch
+            if self._first_launch:
+                rumps.notification(
+                    "Welcome to SpeakType!",
+                    "First-time Setup",
+                    f"Hold {self._hotkey_display()} to start dictating.\n"
+                    "Grant Microphone and Accessibility access when prompted.\n"
+                    "Use Preferences (⌘,) to customize settings.",
+                )
+
             try:
                 self.asr.load()
                 logger.info("ASR engine loaded")
             except Exception as e:
                 logger.error(f"ASR load failed: {e}")
-                self._status_item.title = f"Status: ASR Error"
+                self._status_item.title = "Status: ASR Error"
                 self.title = ICON_ERROR
                 rumps.notification("SpeakType", "ASR Load Failed", str(e))
                 return
@@ -122,7 +178,8 @@ class SpeakTypeApp(rumps.App):
 
             self._status_item.title = "Status: Ready ✓"
             self.title = ICON_IDLE
-            rumps.notification("SpeakType", "Ready!", f"Hold {self._hotkey_display()} to dictate.")
+            if not self._first_launch:
+                rumps.notification("SpeakType", "Ready!", f"Hold {self._hotkey_display()} to dictate.")
 
         threading.Thread(target=init_engines, daemon=True).start()
 
@@ -143,6 +200,12 @@ class SpeakTypeApp(rumps.App):
             _play_sound("Tink")
         self.recorder.start()
 
+        # Show overlay
+        _run_on_main(lambda: self._overlay.show_recording())
+
+        # Start audio level monitoring
+        self._start_level_monitor()
+
     def _on_hotkey_release(self):
         if not self.recorder.is_recording:
             return
@@ -152,17 +215,36 @@ class SpeakTypeApp(rumps.App):
             _play_sound("Pop")
         self.title = ICON_PROCESSING
         self._is_processing = True
+        self._stop_level_monitor()
+
+        # Show processing state on overlay
+        _run_on_main(lambda: self._overlay.show_processing())
+
         audio_path = self.recorder.stop()
         if not audio_path:
             logger.info("No audio captured")
             self.title = ICON_IDLE
             self._is_processing = False
+            _run_on_main(lambda: self._overlay.hide())
             return
         threading.Thread(
             target=self._process_audio,
             args=(audio_path, duration),
             daemon=True,
         ).start()
+
+    def _start_level_monitor(self):
+        """Start monitoring audio levels for overlay feedback."""
+        def monitor():
+            while self.recorder.is_recording:
+                level = self.recorder.get_level()
+                _run_on_main(lambda l=level: self._overlay.update_level(l))
+                time.sleep(0.05)
+        self._level_thread = threading.Thread(target=monitor, daemon=True)
+        self._level_thread.start()
+
+    def _stop_level_monitor(self):
+        pass  # Thread exits when is_recording becomes False
 
     def _process_audio(self, audio_path: str, duration: float):
         try:
@@ -177,6 +259,13 @@ class SpeakTypeApp(rumps.App):
                 return
 
             logger.info(f"Raw: {raw_text}")
+
+            # Check for snippet triggers
+            snippet_text = self.snippets.match(raw_text)
+            if snippet_text:
+                logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
+                insert_text(snippet_text, method=self.config["insert_method"])
+                return
 
             # Check for edit commands
             if self.config["voice_commands_enabled"]:
@@ -214,6 +303,7 @@ class SpeakTypeApp(rumps.App):
         finally:
             self.title = ICON_IDLE
             self._is_processing = False
+            _run_on_main(lambda: self._overlay.hide())
 
     def _handle_edit_command(self, command: str, tone: str):
         try:
@@ -231,6 +321,68 @@ class SpeakTypeApp(rumps.App):
         finally:
             self.title = ICON_IDLE
             self._is_processing = False
+            _run_on_main(lambda: self._overlay.hide())
+
+    def _open_settings(self, _):
+        """Open the native Settings window."""
+        from .settings_window import SettingsWindowController, is_auto_start_enabled
+
+        config_with_auto = dict(self.config)
+        config_with_auto["auto_start"] = is_auto_start_enabled()
+
+        self._settings_controller = SettingsWindowController(
+            config=config_with_auto,
+            on_save=self._apply_settings,
+        )
+        self._settings_controller.show()
+
+    def _apply_settings(self, new_config: dict):
+        """Apply new settings from the Settings window."""
+        old_hotkey = self.config.get("hotkey")
+        old_asr = self.config.get("asr_model")
+
+        self.config.update(new_config)
+        save_config(self.config)
+
+        # Update hotkey display
+        for item in self.menu.values():
+            if hasattr(item, 'title') and item.title.startswith("Hotkey:"):
+                item.title = f"Hotkey: {self._hotkey_display()}"
+                break
+
+        # Restart hotkey listener if hotkey changed
+        if new_config.get("hotkey") != old_hotkey:
+            if self.hotkey_listener:
+                self.hotkey_listener.stop()
+            self.hotkey_listener = HotkeyListener(
+                hotkey_name=self.config["hotkey"],
+                on_press=self._on_hotkey_press,
+                on_release=self._on_hotkey_release,
+            )
+            self.hotkey_listener.start()
+
+        # Reload ASR model if changed
+        if new_config.get("asr_model") != old_asr:
+            self.asr = ASREngine(model_name=self.config["asr_model"])
+            threading.Thread(target=self.asr.load, daemon=True).start()
+
+        # Update polish engine
+        self.polish_engine = PolishEngine(
+            model=self.config["llm_model"],
+            ollama_url=self.config["ollama_url"],
+        )
+
+        # Update toggle states in menu
+        for item in self.menu.values():
+            if hasattr(item, 'title'):
+                if item.title == "Polish Text":
+                    item.state = self.config["polish_enabled"]
+                elif item.title == "Voice Commands":
+                    item.state = self.config["voice_commands_enabled"]
+                elif item.title == "Context-Aware Tone":
+                    item.state = self.config["context_aware_tone"]
+
+        rumps.notification("SpeakType", "Settings Saved", "Your preferences have been updated.")
 
     def _toggle_polish(self, sender):
         sender.state = not sender.state
@@ -273,7 +425,6 @@ class SpeakTypeApp(rumps.App):
             time.sleep(2)
             path = test_recorder.stop()
             if path:
-                import os
                 size = os.path.getsize(path)
                 os.unlink(path)
                 rumps.notification("SpeakType", "Mic Test", f"✓ Recorded {size} bytes. Microphone is working!")
@@ -286,8 +437,19 @@ class SpeakTypeApp(rumps.App):
         rumps.notification("SpeakType", "Config Reloaded", "Settings updated.")
 
     def _open_config(self, _):
-        from .config import CONFIG_DIR
         subprocess.run(["open", str(CONFIG_DIR)])
+
+    def _check_updates(self, _):
+        rumps.notification("SpeakType", "Up to Date", "You are running the latest version (v2.0).")
+
+    def _show_about(self, _):
+        rumps.notification(
+            "About SpeakType",
+            "v2.0 — AI Voice Input for Mac",
+            "Powered by Qwen3-ASR + Qwen3.5\n"
+            "Push-to-talk voice dictation with AI polishing.\n"
+            "© 2025 SpeakType"
+        )
 
     def _quit(self, _):
         if self.hotkey_listener:
@@ -305,11 +467,19 @@ def _play_sound(name: str):
         pass
 
 
+def _run_on_main(fn):
+    """Schedule a function to run on the main thread."""
+    try:
+        fn()
+    except Exception as e:
+        logger.debug(f"Main thread callback error: {e}")
+
+
 def _check_permissions():
     """Check and prompt for required macOS permissions."""
     issues = []
 
-    # Check microphone - try to open an audio stream briefly
+    # Check microphone
     try:
         import sounddevice as sd
         with sd.InputStream(samplerate=16000, channels=1, dtype="float32", blocksize=1600):
@@ -317,7 +487,7 @@ def _check_permissions():
     except Exception:
         issues.append("Microphone")
 
-    # Check accessibility - try to detect if pynput will work
+    # Check accessibility
     try:
         result = subprocess.run(
             ["osascript", "-e", 'tell application "System Events" to return name of first process whose frontmost is true'],
@@ -333,12 +503,10 @@ def _check_permissions():
         print(f"\n⚠️  Missing permissions: {missing}")
         print(f"   Go to: System Settings → Privacy & Security → {missing}")
         print(f"   Add your terminal app to the allowed list, then restart SpeakType.\n")
-        # Also show a system notification
         subprocess.run([
             "osascript", "-e",
             f'display notification "Grant {missing} access in System Settings → Privacy & Security" with title "SpeakType Permissions Needed"'
         ], capture_output=True)
-        # Open System Settings
         subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy"], capture_output=True)
 
 
@@ -351,6 +519,6 @@ def run():
 
     _check_permissions()
 
-    logger.info("Starting SpeakType...")
+    logger.info("Starting SpeakType v2.0...")
     app = SpeakTypeApp()
     app.run()
