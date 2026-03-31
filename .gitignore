@@ -1,0 +1,9 @@
+venv/
+venv310/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+transcript.txt
+*.aiff
+*.wav

@@ -1,0 +1,13 @@
+mlx-audio>=0.1.0
+mlx-lm>=0.31.0
+mlx>=0.25.2
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.24.0
+rumps>=0.4.0
+pynput>=1.7.6
+pyobjc-framework-Cocoa>=9.0
+pyobjc-framework-Quartz>=9.0
+pyperclip>=1.8.2
+requests>=2.31.0
+huggingface_hub>=0.20.0
