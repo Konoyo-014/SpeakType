@@ -7,7 +7,7 @@ from pathlib import Path
 DEFAULT_CONFIG = {
     "hotkey": "right_cmd",  # Push-to-talk key: right_cmd, fn, ctrl+shift+space, etc.
     "asr_model": "mlx-community/Qwen3-ASR-1.7B-8bit",
-    "llm_model": "qwen3.5:4b",
+    "llm_model": "huihui_ai/qwen3.5-abliterated:9b-Claude",
     "ollama_url": "http://localhost:11434",
     "sample_rate": 16000,
     "polish_enabled": True,

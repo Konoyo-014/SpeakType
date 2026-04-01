@@ -7,8 +7,15 @@ import requests
 logger = logging.getLogger("speaktype.polish")
 
 
+FALLBACK_MODELS = [
+    "huihui_ai/qwen3.5-abliterated:9b-Claude",
+    "qwen3.5:4b",
+    "qwen3.5:9b",
+]
+
+
 class PolishEngine:
-    def __init__(self, model="qwen3.5:4b", ollama_url="http://localhost:11434"):
+    def __init__(self, model="huihui_ai/qwen3.5-abliterated:9b-Claude", ollama_url="http://localhost:11434"):
         self.model = model
         self.ollama_url = ollama_url.rstrip("/")
         self._available = None
@@ -20,13 +27,25 @@ class PolishEngine:
             if resp.status_code == 200:
                 models = resp.json().get("models", [])
                 model_names = [m.get("name", "") for m in models]
+
+                # Check if configured model is available
                 base_name = self.model.split(":")[0]
-                self._available = any(base_name in name for name in model_names)
-                if not self._available:
-                    logger.warning(
-                        f"Model {self.model} not found. Available: {model_names}"
-                    )
-                return self._available
+                if any(base_name in name for name in model_names):
+                    self._available = True
+                    return True
+
+                # Try fallback models
+                for fallback in FALLBACK_MODELS:
+                    fb_base = fallback.split(":")[0]
+                    if any(fb_base in name for name in model_names):
+                        logger.info(f"Model {self.model} not found, using fallback: {fallback}")
+                        self.model = fallback
+                        self._available = True
+                        return True
+
+                logger.warning(f"No LLM models found. Available: {model_names}")
+                self._available = False
+                return False
         except requests.ConnectionError:
             logger.warning("Ollama is not running. Start with: ollama serve")
             self._available = False

@@ -30,9 +30,10 @@ LANGUAGE_OPTIONS = [
 ]
 
 LLM_MODEL_OPTIONS = [
-    ("qwen3.5:4b", "Qwen 3.5 4B (Fast)"),
-    ("qwen3.5:9b", "Qwen 3.5 9B (Better)"),
-    ("qwen3.5:14b", "Qwen 3.5 14B (Best)"),
+    ("huihui_ai/qwen3.5-abliterated:9b-Claude", "Qwen 3.5 9B Abliterated (Default)"),
+    ("qwen3.5:4b", "Qwen 3.5 4B (Fast/Lightweight)"),
+    ("qwen3.5:9b", "Qwen 3.5 9B (Standard)"),
+    ("qwen3.5:14b", "Qwen 3.5 14B (Best Quality)"),
 ]
 
 ASR_MODEL_OPTIONS = [
