@@ -64,6 +64,25 @@ class SpeakTypeApp(rumps.App):
         tone_item = rumps.MenuItem("Context-Aware Tone", callback=self._toggle_context_tone)
         tone_item.state = self.config["context_aware_tone"]
 
+        # Translation toggle + target language submenu
+        translate_item = rumps.MenuItem("Translate After Transcription", callback=self._toggle_translate)
+        translate_item.state = self.config.get("translate_enabled", False)
+
+        translate_target_menu = rumps.MenuItem("Translate To")
+        translate_langs = [
+            ("en", "English"),
+            ("zh", "中文"),
+            ("ja", "日本語"),
+            ("ko", "한국어"),
+            ("es", "Español"),
+            ("fr", "Français"),
+            ("de", "Deutsch"),
+        ]
+        for code, name in translate_langs:
+            item = rumps.MenuItem(name, callback=self._make_translate_target_callback(code))
+            item.state = self.config.get("translate_target", "en") == code
+            translate_target_menu.add(item)
+
         # Language quick-switch submenu
         lang_menu = rumps.MenuItem("Language")
         lang_options = [
@@ -87,6 +106,8 @@ class SpeakTypeApp(rumps.App):
             polish_item,
             voice_cmd_item,
             tone_item,
+            translate_item,
+            translate_target_menu,
             lang_menu,
             None,
             rumps.MenuItem("Preferences...", callback=self._open_settings, key=","),
@@ -99,6 +120,22 @@ class SpeakTypeApp(rumps.App):
             None,
             rumps.MenuItem("Quit SpeakType", callback=self._quit, key="q"),
         ]
+
+    def _toggle_translate(self, sender):
+        sender.state = not sender.state
+        self.config["translate_enabled"] = bool(sender.state)
+        save_config(self.config)
+
+    def _make_translate_target_callback(self, lang_code):
+        def callback(sender):
+            self.config["translate_target"] = lang_code
+            save_config(self.config)
+            translate_menu = self.menu.get("Translate To")
+            if translate_menu:
+                for item in translate_menu.values():
+                    item.state = False
+                sender.state = True
+        return callback
 
     def _make_lang_callback(self, lang_code):
         def callback(sender):
@@ -136,11 +173,8 @@ class SpeakTypeApp(rumps.App):
         self._do_setup()
 
     def _do_setup(self):
-        # Setup overlay on main thread
-        try:
-            self._overlay.setup()
-        except Exception as e:
-            logger.warning(f"Overlay setup failed: {e}")
+        # Setup overlay on main thread (disabled for stability on macOS 13+)
+        # self._overlay.setup()  # Temporarily disabled until thread safety confirmed
 
         def init_engines():
             logger.info("Loading ASR engine...")
@@ -200,9 +234,6 @@ class SpeakTypeApp(rumps.App):
             _play_sound("Tink")
         self.recorder.start()
 
-        # Show overlay
-        _run_on_main(lambda: self._overlay.show_recording())
-
         # Start audio level monitoring
         self._start_level_monitor()
 
@@ -216,16 +247,12 @@ class SpeakTypeApp(rumps.App):
         self.title = ICON_PROCESSING
         self._is_processing = True
         self._stop_level_monitor()
-
-        # Show processing state on overlay
-        _run_on_main(lambda: self._overlay.show_processing())
-
         audio_path = self.recorder.stop()
         if not audio_path:
             logger.info("No audio captured")
             self.title = ICON_IDLE
             self._is_processing = False
-            _run_on_main(lambda: self._overlay.hide())
+            pass  # overlay disabled
             return
         threading.Thread(
             target=self._process_audio,
@@ -234,14 +261,7 @@ class SpeakTypeApp(rumps.App):
         ).start()
 
     def _start_level_monitor(self):
-        """Start monitoring audio levels for overlay feedback."""
-        def monitor():
-            while self.recorder.is_recording:
-                level = self.recorder.get_level()
-                _run_on_main(lambda l=level: self._overlay.update_level(l))
-                time.sleep(0.05)
-        self._level_thread = threading.Thread(target=monitor, daemon=True)
-        self._level_thread.start()
+        pass  # overlay disabled
 
     def _stop_level_monitor(self):
         pass  # Thread exits when is_recording becomes False
@@ -284,6 +304,12 @@ class SpeakTypeApp(rumps.App):
             else:
                 polished = text
 
+            # Translate if enabled
+            if self.config.get("translate_enabled", False):
+                target = self.config.get("translate_target", "en")
+                logger.info(f"Translating to {target}...")
+                polished = self.polish_engine.translate(polished, target_lang=target)
+
             logger.info(f"Final: {polished}")
 
             # Insert text at cursor
@@ -303,7 +329,7 @@ class SpeakTypeApp(rumps.App):
         finally:
             self.title = ICON_IDLE
             self._is_processing = False
-            _run_on_main(lambda: self._overlay.hide())
+            pass  # overlay disabled
 
     def _handle_edit_command(self, command: str, tone: str):
         try:
@@ -321,7 +347,7 @@ class SpeakTypeApp(rumps.App):
         finally:
             self.title = ICON_IDLE
             self._is_processing = False
-            _run_on_main(lambda: self._overlay.hide())
+            pass  # overlay disabled
 
     def _open_settings(self, _):
         """Open the native Settings window."""

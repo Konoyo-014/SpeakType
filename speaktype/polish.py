@@ -140,3 +140,39 @@ class PolishEngine:
 
         result = self._chat(messages, max_tokens=max(len(selected_text) * 3, 512))
         return result if result else selected_text
+
+    def translate(self, text: str, target_lang: str = "en") -> str:
+        """Translate text to target language."""
+        if not text.strip():
+            return text
+
+        if self._available is None:
+            self.check_available()
+        if not self._available:
+            return text
+
+        lang_names = {
+            "en": "English", "zh": "Chinese (Simplified)", "ja": "Japanese",
+            "ko": "Korean", "es": "Spanish", "fr": "French", "de": "German",
+            "ru": "Russian", "pt": "Portuguese", "ar": "Arabic",
+        }
+        target_name = lang_names.get(target_lang, target_lang)
+
+        messages = [
+            {
+                "role": "system",
+                "content": f"You are a translator. Translate the user's text into {target_name}. "
+                           f"Rules:\n"
+                           f"- Translate naturally, not word-by-word\n"
+                           f"- Preserve the original tone and intent\n"
+                           f"- If the text is already in {target_name}, return it unchanged\n"
+                           f"- Return ONLY the translated text, nothing else"
+            },
+            {
+                "role": "user",
+                "content": text,
+            },
+        ]
+
+        result = self._chat(messages, max_tokens=max(len(text) * 3, 512))
+        return result if result else text

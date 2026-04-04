@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
     "history_enabled": True,
     "history_max_entries": 1000,
     "insert_method": "paste",  # "paste" (clipboard+Cmd+V) or "type" (key-by-key)
+    "translate_enabled": False,
+    "translate_target": "en",  # Target language for translation: "en", "zh", "ja", "ko", etc.
 }
 
 CONFIG_DIR = Path.home() / ".speaktype"

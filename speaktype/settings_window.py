@@ -94,6 +94,8 @@ class SettingsWindowController:
         self.window.setTitle_("SpeakType Settings")
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
+        # Disable window tabbing to prevent crash on macOS 13+
+        self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
 
         content = self.window.contentView()
         y = 540
@@ -122,6 +124,10 @@ class SettingsWindowController:
         y = self._add_checkbox(content, "Context-Aware Tone", "context_aware_tone", y)
         y = self._add_checkbox(content, "Sound Feedback", "sound_feedback", y)
         y = self._add_checkbox(content, "Save Dictation History", "history_enabled", y)
+        y = self._add_checkbox(content, "Translate After Transcription", "translate_enabled", y)
+        y = self._add_popup(content, "Translate To:", "translate_target",
+                            [("en", "English"), ("zh", "中文"), ("ja", "日本語"),
+                             ("ko", "한국어"), ("es", "Español"), ("fr", "Français"), ("de", "Deutsch")], y)
 
         y -= 10
 

@@ -56,6 +56,8 @@ class RecordingOverlay:
             AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
             | AppKit.NSWindowCollectionBehaviorStationary
         )
+        # Disable window tabbing to prevent crash on macOS 13+
+        self._window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
         self._window.setAlphaValue_(0.0)
 
         # Create the dot view

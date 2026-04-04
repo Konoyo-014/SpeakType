@@ -83,13 +83,19 @@ class AudioRecorder:
             self._frames = []
 
         if not frames:
+            logger.warning("No audio frames captured at all")
             return None
 
         audio_data = np.concatenate(frames, axis=0).flatten()
+        duration = len(audio_data) / self.sample_rate
+        peak = float(np.max(np.abs(audio_data)))
+        logger.info(f"Audio: {len(frames)} frames, {duration:.1f}s, peak={peak:.4f}")
 
         if len(audio_data) < self.sample_rate * 0.3:
+            logger.warning(f"Audio too short: {duration:.2f}s < 0.3s")
             return None
-        if np.max(np.abs(audio_data)) < 0.01:
+        if peak < 0.005:
+            logger.warning(f"Audio too quiet: peak={peak:.4f} < 0.005")
             return None
 
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
