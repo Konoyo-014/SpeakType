@@ -71,7 +71,28 @@ python main.py
 
 ### 关于 ASR 模型
 
-语音识别模型（`mlx-community/Qwen3-ASR-1.7B-8bit`）会在首次运行时由 mlx-audio 自动下载，无需手动操作。首次听写时会有一次性的下载延迟（约 2 GB）。
+语音识别模型（`mlx-community/Qwen3-ASR-1.7B-8bit`）会在首次运行时由 mlx-audio 从 HuggingFace 自动下载（约 2 GB）。
+
+**中国大陆用户：** HuggingFace 在大陆无法直接访问，请设置镜像后再启动：
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+python main.py
+```
+
+建议将此环境变量写入 `~/.zshrc` 以永久生效：
+
+```bash
+echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Ollama 模型下载如遇网络问题，可尝试设置代理：
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890  # 替换为你的代理地址
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
 
 ### 构建 .app 包（可选）
 

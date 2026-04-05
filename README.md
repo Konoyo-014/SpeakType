@@ -71,7 +71,20 @@ Grant both in **System Settings > Privacy & Security**.
 
 ### About the ASR model
 
-The speech recognition model (`mlx-community/Qwen3-ASR-1.7B-8bit`) is downloaded automatically by mlx-audio on the first run. No manual step is needed -- just expect a one-time delay (~2 GB download) the first time you dictate.
+The speech recognition model (`mlx-community/Qwen3-ASR-1.7B-8bit`) is downloaded automatically by mlx-audio from HuggingFace on the first run (~2 GB download).
+
+**Users in mainland China:** HuggingFace is not accessible. Set the mirror before launching:
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+python main.py
+```
+
+Add to `~/.zshrc` to persist:
+
+```bash
+echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.zshrc
+```
 
 ### Build .app Bundle (optional)
 
