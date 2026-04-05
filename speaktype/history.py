@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime
-from .config import HISTORY_FILE, ensure_config_dir
+from .config import HISTORY_FILE, ensure_config_dir, write_json_file
 
 logger = logging.getLogger("speaktype.history")
 
@@ -25,8 +25,7 @@ class DictationHistory:
 
     def _save(self):
         try:
-            with open(HISTORY_FILE, "w") as f:
-                json.dump(self._entries[-self.max_entries:], f, indent=2, ensure_ascii=False)
+            write_json_file(HISTORY_FILE, self._entries[-self.max_entries:])
         except IOError as e:
             logger.error(f"Failed to save history: {e}")
 

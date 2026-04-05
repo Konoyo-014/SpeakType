@@ -70,6 +70,16 @@ class TestLoadSaveConfig:
             assert config["hotkey"] == "f6"
             assert "polish_enabled" in config  # merged from default
 
+    def test_save_config_cleans_up_temp_file_on_failure(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        with patch("speaktype.config.CONFIG_FILE", config_file), \
+             patch("speaktype.config.CONFIG_DIR", tmp_path):
+            from speaktype.config import save_config
+            with pytest.raises(TypeError):
+                save_config({"bad": object()})
+            assert not config_file.exists()
+            assert not list(tmp_path.glob(".config.json.*.tmp"))
+
 
 class TestCustomDictionary:
     def test_load_empty(self, tmp_path):

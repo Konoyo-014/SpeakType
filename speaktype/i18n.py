@@ -58,8 +58,8 @@ _STRINGS = {
     "notif_config_reloaded": {"zh": "配置已重载", "en": "Config Reloaded"},
     "notif_config_reloaded_body": {"zh": "设置已更新。", "en": "Settings updated."},
     "notif_up_to_date_title": {"zh": "已是最新版本", "en": "Up to Date"},
-    "notif_up_to_date_body": {"zh": "您正在运行最新版本 (v2.0)。", "en": "You are running the latest version (v2.0)."},
-    "notif_about_subtitle": {"zh": "v2.0 — Mac AI 语音输入法", "en": "v2.0 — AI Voice Input for Mac"},
+    "notif_up_to_date_body": {"zh": "您正在运行最新版本 (v{version})。", "en": "You are running the latest version (v{version})."},
+    "notif_about_subtitle": {"zh": "v{version} — Mac AI 语音输入法", "en": "v{version} — AI Voice Input for Mac"},
     "notif_cannot_test": {"zh": "录音/处理中，无法测试。", "en": "Cannot test while recording/processing."},
     "notif_error": {"zh": "错误", "en": "Error"},
 

@@ -8,18 +8,24 @@ import Quartz
 
 logger = logging.getLogger("speaktype.inserter")
 
+PASTEBOARD_SETTLE_DELAY = 0.08
+CLIPBOARD_RESTORE_DELAY = 0.75
+KEYCODE_V = 9
+KEYCODE_COMMAND = 55
 
-def insert_text(text: str, method: str = "paste"):
+
+def insert_text(text: str, method: str = "paste", app_name: str = ""):
     """Insert text at the current cursor position."""
     if not text:
         return
+    logger.info("Insert text via %s (%d chars) into %s", method, len(text), app_name or "Unknown")
     if method == "paste":
-        _insert_via_paste(text)
+        _insert_via_paste(text, app_name=app_name)
     else:
         _insert_via_keystroke(text)
 
 
-def _insert_via_paste(text: str):
+def _insert_via_paste(text: str, app_name: str = ""):
     """Insert text by setting pasteboard and simulating Cmd+V via CGEvent."""
     try:
         # Save current pasteboard
@@ -36,13 +42,15 @@ def _insert_via_paste(text: str):
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
 
-        time.sleep(0.03)
+        time.sleep(PASTEBOARD_SETTLE_DELAY)
 
-        # Simulate Cmd+V via CGEvent (no osascript needed)
-        _press_cmd_v()
+        # Some desktop shells handle UI scripting paste more reliably than raw
+        # CGEvents, especially when the editor is embedded inside Chromium.
+        _press_cmd_v(app_name=app_name)
 
-        # Restore old clipboard after a delay
-        time.sleep(0.2)
+        # Give the target app enough time to read the pasteboard before restoring
+        # the user's clipboard. Electron-based apps often paste asynchronously.
+        time.sleep(CLIPBOARD_RESTORE_DELAY)
         if old_data:
             pb.clearContents()
             for t, d in old_data.items():
@@ -50,26 +58,52 @@ def _insert_via_paste(text: str):
                     pb.setData_forType_(d, t)
                 except Exception:
                     pass
+        else:
+            pb.clearContents()
 
     except Exception as e:
         logger.error(f"Paste insertion failed: {e}")
         _insert_via_keystroke(text)
 
 
-def _press_cmd_v():
+def _press_cmd_v(app_name: str = ""):
     """Simulate Cmd+V keypress using Quartz CGEvent."""
-    # V key = keycode 9
+    if _press_cmd_v_via_osascript():
+        logger.info("Paste shortcut sent via System Events")
+        return
+
     src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    _post_key_event(src, KEYCODE_COMMAND, True, Quartz.kCGEventFlagMaskCommand)
+    _post_key_event(src, KEYCODE_V, True, Quartz.kCGEventFlagMaskCommand)
+    _post_key_event(src, KEYCODE_V, False, Quartz.kCGEventFlagMaskCommand)
+    _post_key_event(src, KEYCODE_COMMAND, False, 0)
+    logger.info("Paste shortcut sent via Quartz CGEvent")
 
-    # Cmd down + V down
-    cmd_v_down = Quartz.CGEventCreateKeyboardEvent(src, 9, True)
-    Quartz.CGEventSetFlags(cmd_v_down, Quartz.kCGEventFlagMaskCommand)
-    Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_v_down)
 
-    # Cmd up + V up
-    cmd_v_up = Quartz.CGEventCreateKeyboardEvent(src, 9, False)
-    Quartz.CGEventSetFlags(cmd_v_up, Quartz.kCGEventFlagMaskCommand)
-    Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_v_up)
+def _press_cmd_v_via_osascript() -> bool:
+    script = 'tell application "System Events" to keystroke "v" using command down'
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception as e:
+        logger.warning(f"System Events paste failed to launch: {e}")
+        return False
+
+    if result.returncode != 0:
+        logger.warning(f"System Events paste failed: {result.stderr.strip()}")
+        return False
+    return True
+
+
+def _post_key_event(source, keycode: int, is_down: bool, flags: int = 0):
+    event = Quartz.CGEventCreateKeyboardEvent(source, keycode, is_down)
+    if flags:
+        Quartz.CGEventSetFlags(event, flags)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
 def replace_selection(text: str):
@@ -77,7 +111,7 @@ def replace_selection(text: str):
     pb = AppKit.NSPasteboard.generalPasteboard()
     pb.clearContents()
     pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-    time.sleep(0.03)
+    time.sleep(PASTEBOARD_SETTLE_DELAY)
     _press_cmd_v()
 
 

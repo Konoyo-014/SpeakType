@@ -2,8 +2,7 @@
 
 import json
 import logging
-from pathlib import Path
-from .config import CONFIG_DIR, ensure_config_dir
+from .config import CONFIG_DIR, ensure_config_dir, write_json_file
 
 logger = logging.getLogger("speaktype.snippets")
 
@@ -37,8 +36,7 @@ class SnippetLibrary:
 
     def _save(self):
         try:
-            with open(SNIPPETS_FILE, "w") as f:
-                json.dump(self._snippets, f, indent=2, ensure_ascii=False)
+            write_json_file(SNIPPETS_FILE, self._snippets)
         except IOError as e:
             logger.error(f"Failed to save snippets: {e}")
 

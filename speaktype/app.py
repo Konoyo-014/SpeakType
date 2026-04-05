@@ -12,6 +12,7 @@ import objc
 from Foundation import NSObject
 
 from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR, ensure_config_dir
+from . import __version__
 from .i18n import t, set_language, get_language
 from .audio import AudioRecorder
 from .asr import ASREngine
@@ -184,7 +185,7 @@ class SpeakTypeApp(rumps.App):
         self._quit_item = rumps.MenuItem(t("menu_quit"), callback=self._quit, key="q")
 
         self.menu = [
-            rumps.MenuItem("SpeakType v2.0"),
+            rumps.MenuItem(f"SpeakType v{__version__}"),
             None,
             self._hotkey_item,
             self._status_item,
@@ -409,14 +410,16 @@ class SpeakTypeApp(rumps.App):
         def _delayed_perm_check():
             import time
             time.sleep(5)
-            if self.hotkey_listener and self.hotkey_listener._listener:
-                if not self.hotkey_listener._listener.running:
-                    logger.warning("Hotkey listener not running — accessibility may be missing")
-                    rumps.notification(
-                        "SpeakType",
-                        t("notif_perm_missing_title"),
-                        t("notif_perm_missing_body", missing=t("wizard_access_label")),
-                    )
+            if self.hotkey_listener and not self.hotkey_listener.is_running:
+                logger.warning(
+                    "Hotkey listener backend is not running (backend=%s) — accessibility may be missing",
+                    self.hotkey_listener.backend_name,
+                )
+                rumps.notification(
+                    "SpeakType",
+                    t("notif_perm_missing_title"),
+                    t("notif_perm_missing_body", missing=t("wizard_access_label")),
+                )
         threading.Thread(target=_delayed_perm_check, daemon=True).start()
 
     def _restart_hotkey_listener(self):
@@ -441,6 +444,7 @@ class SpeakTypeApp(rumps.App):
             )
 
         self.hotkey_listener.start()
+        logger.info("Hotkey backend active: %s", self.hotkey_listener.backend_name)
 
     # --- Push-to-talk handlers ---
 
@@ -562,7 +566,11 @@ class SpeakTypeApp(rumps.App):
             snippet_text = self.snippets.match(raw_text)
             if snippet_text:
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
-                insert_text(snippet_text, method=self.config["insert_method"])
+                insert_text(
+                    snippet_text,
+                    method=self.config["insert_method"],
+                    app_name=app_info.get("name", ""),
+                )
                 self._streaming_preview.hide(delay=0.3)
                 return
 
@@ -616,7 +624,16 @@ class SpeakTypeApp(rumps.App):
                     return
 
             # Insert text at cursor
-            insert_text(polished, method=self.config["insert_method"])
+            logger.info(
+                "Inserting text via %s into %s",
+                self.config["insert_method"],
+                app_info.get("name", "Unknown"),
+            )
+            insert_text(
+                polished,
+                method=self.config["insert_method"],
+                app_name=app_info.get("name", ""),
+            )
 
             # Plugin: post_insert
             if self.config.get("plugins_enabled"):
@@ -780,12 +797,16 @@ class SpeakTypeApp(rumps.App):
         subprocess.run(["open", str(CONFIG_DIR)])
 
     def _check_updates(self, _):
-        rumps.notification("SpeakType", t("notif_up_to_date_title"), t("notif_up_to_date_body"))
+        rumps.notification(
+            "SpeakType",
+            t("notif_up_to_date_title"),
+            t("notif_up_to_date_body", version=__version__),
+        )
 
     def _show_about(self, _):
         rumps.notification(
             t("menu_about"),
-            t("notif_about_subtitle"),
+            t("notif_about_subtitle", version=__version__),
             f"Backend: {self.asr.get_backend_info()}\n"
             "\u00a9 2025 SpeakType"
         )
@@ -854,6 +875,6 @@ def run():
 
     _check_permissions()
 
-    logger.info("Starting SpeakType v2.0...")
+    logger.info("Starting SpeakType v%s...", __version__)
     app = SpeakTypeApp()
     app.run()

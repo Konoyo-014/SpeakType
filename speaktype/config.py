@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 DEFAULT_CONFIG = {
@@ -44,11 +45,33 @@ def ensure_config_dir():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def write_json_file(path: Path, data):
+    """Write JSON atomically to avoid truncating user data on partial writes."""
+    ensure_config_dir()
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def load_config() -> dict:
     ensure_config_dir()
     if CONFIG_FILE.exists():
         try:
-            with open(CONFIG_FILE) as f:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
                 saved = json.load(f)
             config = {**DEFAULT_CONFIG, **saved}
             return config
@@ -58,15 +81,13 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
-    ensure_config_dir()
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    write_json_file(CONFIG_FILE, config)
 
 
 def load_custom_dictionary() -> list:
     if CUSTOM_DICT_FILE.exists():
         try:
-            with open(CUSTOM_DICT_FILE) as f:
+            with open(CUSTOM_DICT_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
@@ -74,6 +95,4 @@ def load_custom_dictionary() -> list:
 
 
 def save_custom_dictionary(words: list):
-    ensure_config_dir()
-    with open(CUSTOM_DICT_FILE, "w") as f:
-        json.dump(words, f, indent=2, ensure_ascii=False)
+    write_json_file(CUSTOM_DICT_FILE, words)
