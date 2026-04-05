@@ -173,13 +173,6 @@ class SpeakTypeApp(rumps.App):
         self._do_setup()
 
     def _do_setup(self):
-        # Hide Dock icon AFTER rumps has created the NSStatusItem
-        try:
-            AppKit.NSApplication.sharedApplication().setActivationPolicy_(
-                AppKit.NSApplicationActivationPolicyAccessory
-            )
-        except Exception:
-            pass
 
         def init_engines():
             logger.info("Loading ASR engine...")

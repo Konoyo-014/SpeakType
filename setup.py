@@ -14,7 +14,7 @@ OPTIONS = {
         "CFBundleIdentifier": "com.speaktype.app",
         "CFBundleVersion": "2.0.0",
         "CFBundleShortVersionString": "2.0",
-        "LSUIElement": True,  # Hide from Dock, menubar-only app
+        "LSUIElement": False,  # Must be False for NSStatusItem to show in menubar
         "NSMicrophoneUsageDescription": "SpeakType needs microphone access for voice dictation.",
         "NSAppleEventsUsageDescription": "SpeakType needs accessibility access to detect the active application and insert text.",
         "CFBundleDocumentTypes": [],

@@ -18,7 +18,7 @@ class DictationHistory:
         ensure_config_dir()
         if HISTORY_FILE.exists():
             try:
-                with open(HISTORY_FILE) as f:
+                with open(HISTORY_FILE, encoding="utf-8") as f:
                     self._entries = json.load(f)
             except (json.JSONDecodeError, IOError):
                 self._entries = []
