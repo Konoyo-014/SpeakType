@@ -1,0 +1,15 @@
+#!/bin/bash
+# SpeakType launcher - finds the project and runs via venv Python
+SCRIPT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Ensure Ollama is running
+OLLAMA_BIN="/opt/homebrew/opt/ollama/bin/ollama"
+[ ! -f "$OLLAMA_BIN" ] && OLLAMA_BIN="$(which ollama 2>/dev/null)"
+if [ -n "$OLLAMA_BIN" ] && ! curl -s http://localhost:11434/api/tags &>/dev/null; then
+    OLLAMA_FLASH_ATTENTION="1" OLLAMA_KV_CACHE_TYPE="q8_0" "$OLLAMA_BIN" serve &>/dev/null &
+    sleep 2
+fi
+
+cd "$PROJECT_DIR"
+exec "$PROJECT_DIR/venv/bin/python3" "$PROJECT_DIR/main.py"

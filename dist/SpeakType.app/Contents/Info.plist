@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>SpeakType</string>
+    <key>CFBundleDisplayName</key>
+    <string>SpeakType</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.speaktype.app</string>
+    <key>CFBundleVersion</key>
+    <string>2.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0</string>
+    <key>CFBundleExecutable</key>
+    <string>SpeakType</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SpeakType needs microphone access for voice dictation.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>SpeakType needs accessibility access to detect the active application and insert text.</string>
+</dict>
+</plist>
