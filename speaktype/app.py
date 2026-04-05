@@ -338,21 +338,30 @@ class SpeakTypeApp(rumps.App):
 
     def _check_permissions_and_setup(self):
         """Check permissions on every startup, warn if missing, then proceed."""
-        from .setup_wizard import _check_accessibility_permission, _check_mic_permission
-        issues = []
-        if not _check_accessibility_permission():
-            issues.append(t("wizard_access_label"))
-        if not _check_mic_permission():
-            issues.append(t("wizard_mic_label"))
-        if issues:
-            missing = ", ".join(issues)
-            rumps.notification(
-                "SpeakType",
-                t("notif_perm_missing_title"),
-                t("notif_perm_missing_body", missing=missing),
+        # Test accessibility by trying to create a CGEventTap
+        try:
+            import Quartz
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGSessionEventTap,
+                Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionListenOnly,
+                Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
+                lambda *a: None, None,
             )
-            # Open System Settings for the user
-            subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy"])
+            if tap:
+                Quartz.CFMachPortInvalidate(tap)
+                logger.info("Accessibility permission OK")
+            else:
+                logger.warning("Accessibility permission missing — CGEventTap failed")
+                rumps.notification(
+                    "SpeakType",
+                    t("notif_perm_missing_title"),
+                    t("notif_perm_missing_body", missing=t("wizard_access_label")),
+                )
+                subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+        except Exception as e:
+            logger.warning(f"Permission check failed: {e}")
+
         self._do_setup()
 
     def _on_wizard_complete(self):
