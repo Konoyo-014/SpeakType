@@ -8,6 +8,8 @@ import logging
 import subprocess
 import rumps
 import AppKit
+import objc
+from Foundation import NSObject
 
 from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR, ensure_config_dir
 from .i18n import t, set_language, get_language
@@ -34,6 +36,28 @@ ICON_PROCESSING = "\u231b"     # ⏳
 ICON_ERROR = "\u26a0\ufe0f"    # ⚠️
 
 
+class _MainThreadBridge(NSObject):
+    """Bridge for calling UI updates from background threads."""
+
+    def initWithApp_(self, app):
+        self = objc.super(_MainThreadBridge, self).init()
+        if self is not None:
+            self._app = app
+            self._status_text = ""
+            self._title_text = ""
+        return self
+
+    def setStatusTitle_(self, _):
+        self._app._status_item.title = self._status_text
+
+    def setAppTitle_(self, _):
+        self._app.title = self._title_text
+
+    def triggerSetup_(self, timer):
+        """Called by NSTimer to start setup after wizard closes."""
+        self._app._do_setup()
+
+
 class SpeakTypeApp(rumps.App):
     def __init__(self):
         super().__init__(
@@ -43,6 +67,7 @@ class SpeakTypeApp(rumps.App):
         )
         self.config = load_config()
         set_language(self.config.get("ui_language", "zh"))
+        self._bridge = _MainThreadBridge.alloc().initWithApp_(self)
 
         # Resolve audio device
         device = validate_device(self.config.get("audio_device"))
@@ -65,7 +90,7 @@ class SpeakTypeApp(rumps.App):
         self._recording_start_time = 0
         self._is_processing = False
         self._setup_done = False
-        self._first_launch = not (CONFIG_DIR / "config.json").exists()
+        self._first_launch = not self.config.get("setup_completed", False)
         self._settings_controller = None
         self._stats_controller = None
         self._dict_controller = None
@@ -295,27 +320,59 @@ class SpeakTypeApp(rumps.App):
             return
         self._setup_done = True
         timer.stop()
-        self._do_setup()
+
+        if self._first_launch:
+            self._show_setup_wizard()
+        else:
+            self._do_setup()
+
+    def _show_setup_wizard(self):
+        """Show first-launch setup wizard."""
+        from .setup_wizard import SetupWizardController
+        self._wizard_controller = SetupWizardController(
+            config=self.config,
+            asr_engine=self.asr,
+            on_complete=self._on_wizard_complete,
+        )
+        self._wizard_controller.show()
+
+    def _on_wizard_complete(self):
+        """Called when setup wizard finishes. Relaunch the app for clean startup."""
+        import os
+        app_path = "/Applications/SpeakType.app"
+        if os.path.exists(app_path):
+            subprocess.Popen(["open", app_path])
+        rumps.quit_application()
+
+    def _set_status(self, text):
+        """Thread-safe: update status menu item title from any thread."""
+        self._bridge._status_text = text
+        self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+            b"setStatusTitle:", None, False
+        )
+
+    def _set_title(self, text):
+        """Thread-safe: update menubar icon title from any thread."""
+        self._bridge._title_text = text
+        self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+            b"setAppTitle:", None, False
+        )
 
     def _do_setup(self):
         def init_engines():
             logger.info("Loading ASR engine...")
-            self._status_item.title = t("status_loading_asr")
+            self._set_status(t("status_loading_asr"))
 
-            if self._first_launch:
-                rumps.notification(
-                    t("notif_welcome_title"),
-                    t("notif_welcome_subtitle"),
-                    t("notif_welcome_body", hotkey=self._hotkey_display()),
-                )
+            def _asr_progress(pct, status):
+                self._set_status(t("status_downloading_asr", pct=pct, size=status))
 
             try:
-                self.asr.load()
+                self.asr.load(progress_callback=_asr_progress)
                 logger.info(f"ASR engine loaded: {self.asr.get_backend_info()}")
             except Exception as e:
                 logger.error(f"ASR load failed: {e}")
-                self._status_item.title = t("status_asr_error")
-                self.title = ICON_ERROR
+                self._set_status(t("status_asr_error"))
+                self._set_title(ICON_ERROR)
                 rumps.notification("SpeakType", t("notif_asr_failed"), str(e))
                 return
 
@@ -336,11 +393,10 @@ class SpeakTypeApp(rumps.App):
                 except Exception as e:
                     logger.warning(f"Plugin loading failed: {e}")
 
-            self._status_item.title = t("status_ready")
-            self.title = ICON_IDLE
-            if not self._first_launch:
-                mode_str = t("notif_ready_mode_toggle") if self.config.get("dictation_mode") == "toggle" else t("notif_ready_mode_hold")
-                rumps.notification("SpeakType", t("notif_ready_title"), t("notif_ready_body", mode_str=mode_str, hotkey=self._hotkey_display()))
+            self._set_status(t("status_ready"))
+            self._set_title(ICON_IDLE)
+            mode_str = t("notif_ready_mode_toggle") if self.config.get("dictation_mode") == "toggle" else t("notif_ready_mode_hold")
+            rumps.notification("SpeakType", t("notif_ready_title"), t("notif_ready_body", mode_str=mode_str, hotkey=self._hotkey_display()))
 
         threading.Thread(target=init_engines, daemon=True).start()
         self._restart_hotkey_listener()

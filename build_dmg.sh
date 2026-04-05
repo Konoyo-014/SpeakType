@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="SpeakType"
-VERSION="2.0.0"
+VERSION="2.0.1"
 DMG_NAME="${APP_NAME}-${VERSION}"
 DIST_DIR="dist"
 APP_PATH="${DIST_DIR}/${APP_NAME}.app"
@@ -41,12 +41,7 @@ mkdir -p "${DIST_DIR}"
 echo "[3/5] Building ${APP_NAME}.app with py2app..."
 python3 setup.py py2app --alias 2>&1 | tail -5
 
-# Remove site.py if it causes circular import (known py2app alias bug)
-SITE_PY="${APP_PATH}/Contents/Resources/site.py"
-if [ -f "$SITE_PY" ]; then
-    rm "$SITE_PY"
-    echo "  Removed problematic site.py"
-fi
+# site.py circular import fix is handled automatically by setup.py's atexit hook
 
 echo "  Built: ${APP_PATH}"
 

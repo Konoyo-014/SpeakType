@@ -22,21 +22,29 @@ class ASREngine:
         self.model = None
         self._loaded = False
 
-    def load(self):
+    def load(self, progress_callback=None):
+        """Load the ASR model. progress_callback(pct, status_str) for download progress."""
         if self._loaded:
             return
 
         if self.backend == "whisper":
             self._load_whisper()
         else:
-            self._load_qwen()
+            self._load_qwen(progress_callback=progress_callback)
 
-    def _load_qwen(self):
-        """Load Qwen3-ASR via mlx-audio."""
+    def _load_qwen(self, progress_callback=None):
+        """Load Qwen3-ASR via mlx-audio, with optional download progress."""
+        from .model_download import is_model_cached, download_model_with_progress
+
         models_to_try = [self.model_name] + [m for m in ASR_MODELS if m != self.model_name]
 
         for model_name in models_to_try:
             try:
+                # Pre-download with progress if not cached
+                if not is_model_cached(model_name) and progress_callback:
+                    logger.info(f"Downloading ASR model: {model_name}")
+                    download_model_with_progress(model_name, callback=progress_callback)
+
                 logger.info(f"Loading ASR model: {model_name}")
                 from mlx_audio.stt.utils import load_model
                 self.model = load_model(model_name)

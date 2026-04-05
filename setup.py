@@ -44,8 +44,8 @@ OPTIONS = {
         "CFBundleName": "SpeakType",
         "CFBundleDisplayName": "SpeakType",
         "CFBundleIdentifier": "com.speaktype.app",
-        "CFBundleVersion": "2.0.0",
-        "CFBundleShortVersionString": "2.0",
+        "CFBundleVersion": "2.0.1",
+        "CFBundleShortVersionString": "2.0.1",
         "LSUIElement": False,  # Must be False for NSStatusItem to show in menubar
         "NSMicrophoneUsageDescription": "SpeakType needs microphone access for voice dictation.",
         "NSAppleEventsUsageDescription": "SpeakType needs accessibility access to detect the active application and insert text.",

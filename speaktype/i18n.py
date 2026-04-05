@@ -140,6 +140,64 @@ _STRINGS = {
     "dict_btn_close": {"zh": "关闭", "en": "Close"},
     "dict_no_words": {"zh": "（无自定义词语）", "en": "(no custom words)"},
     "dict_no_snippets": {"zh": "（无快捷短语）", "en": "(no snippets)"},
+
+    # --- Download status (app.py status bar) ---
+    "status_downloading_asr": {"zh": "下载语音模型 {pct:.0f}% ({size})", "en": "Downloading ASR {pct:.0f}% ({size})"},
+    "status_loading_model": {"zh": "状态：加载模型中...", "en": "Status: Loading model..."},
+
+    # --- Setup wizard (setup_wizard.py) ---
+    "wizard_title": {"zh": "SpeakType 初始设置", "en": "SpeakType Setup"},
+    "wizard_welcome_title": {"zh": "欢迎使用 SpeakType", "en": "Welcome to SpeakType"},
+    "wizard_welcome_body": {
+        "zh": "SpeakType 是一款 Mac 本地 AI 语音输入法。\n按住快捷键说话，润色后的文字即刻出现在光标处。\n\n接下来我们将完成几项初始设置。",
+        "en": "SpeakType is an on-device AI voice input method for Mac.\nHold a key, speak, and polished text appears at the cursor.\n\nLet's walk through a few setup steps.",
+    },
+    "wizard_btn_start": {"zh": "开始设置", "en": "Get Started"},
+    "wizard_btn_next": {"zh": "下一步", "en": "Next"},
+    "wizard_btn_skip": {"zh": "跳过", "en": "Skip"},
+    "wizard_btn_done": {"zh": "开始使用 SpeakType", "en": "Start Using SpeakType"},
+    "wizard_btn_refresh": {"zh": "刷新状态", "en": "Refresh"},
+    "wizard_btn_open_settings": {"zh": "打开系统设置", "en": "Open System Settings"},
+    "wizard_btn_copy": {"zh": "复制命令", "en": "Copy Command"},
+
+    "wizard_step_permissions": {"zh": "权限设置", "en": "Permissions"},
+    "wizard_step_asr": {"zh": "语音识别模型", "en": "Speech Recognition Model"},
+    "wizard_step_llm": {"zh": "文本润色（可选）", "en": "Text Polishing (Optional)"},
+    "wizard_step_complete": {"zh": "设置完成", "en": "Setup Complete"},
+
+    "wizard_mic_label": {"zh": "麦克风权限", "en": "Microphone Access"},
+    "wizard_access_label": {"zh": "辅助功能权限", "en": "Accessibility Access"},
+    "wizard_perm_ok": {"zh": "✓ 已授权", "en": "✓ Granted"},
+    "wizard_perm_missing": {"zh": "✗ 未授权", "en": "✗ Not Granted"},
+    "wizard_perm_body": {
+        "zh": "SpeakType 需要以下权限才能正常工作：\n• 麦克风 — 录制语音\n• 辅助功能 — 在光标处插入文字",
+        "en": "SpeakType needs these permissions to work:\n• Microphone — to record your voice\n• Accessibility — to insert text at the cursor",
+    },
+
+    "wizard_asr_body": {
+        "zh": "首次使用需要下载语音识别模型（约 2 GB）。\n下载完成后将自动缓存，之后无需再次下载。",
+        "en": "A speech recognition model (~2 GB) needs to be downloaded.\nIt will be cached locally after the first download.",
+    },
+    "wizard_asr_cached": {"zh": "✓ 模型已缓存，无需下载", "en": "✓ Model cached, no download needed"},
+    "wizard_asr_downloading": {"zh": "正在下载... {pct:.0f}% ({size})", "en": "Downloading... {pct:.0f}% ({size})"},
+    "wizard_asr_done": {"zh": "✓ 下载完成", "en": "✓ Download complete"},
+    "wizard_asr_error": {"zh": "✗ 下载失败：{error}", "en": "✗ Download failed: {error}"},
+
+    "wizard_llm_body": {
+        "zh": "文本润色使用本地大语言模型（通过 Ollama）。\n这是可选功能 — 不安装也能正常使用语音输入。",
+        "en": "Text polishing uses a local LLM via Ollama.\nThis is optional — voice input works without it.",
+    },
+    "wizard_ollama_ok": {"zh": "✓ Ollama 已安装", "en": "✓ Ollama installed"},
+    "wizard_ollama_missing": {"zh": "✗ 未检测到 Ollama", "en": "✗ Ollama not detected"},
+    "wizard_ollama_install_hint": {"zh": "安装命令：", "en": "Install command:"},
+    "wizard_model_ok": {"zh": "✓ LLM 模型已就绪", "en": "✓ LLM model ready"},
+    "wizard_model_missing": {"zh": "✗ 未检测到 LLM 模型", "en": "✗ LLM model not found"},
+    "wizard_model_pull_hint": {"zh": "拉取命令：", "en": "Pull command:"},
+
+    "wizard_complete_body": {
+        "zh": "初始设置已完成！\n\n按住 {hotkey} 开始语音输入。\n可在菜单栏点击 🎙 图标进入偏好设置。",
+        "en": "Setup is complete!\n\nHold {hotkey} to start dictating.\nClick the 🎙 icon in the menubar for preferences.",
+    },
 }
 
 _current_lang = "zh"
