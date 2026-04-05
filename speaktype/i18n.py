@@ -142,6 +142,12 @@ _STRINGS = {
     "dict_no_snippets": {"zh": "（无快捷短语）", "en": "(no snippets)"},
 
     # --- Download status (app.py status bar) ---
+    "notif_perm_missing_title": {"zh": "权限缺失", "en": "Missing Permissions"},
+    "notif_perm_missing_body": {
+        "zh": "SpeakType 缺少以下权限，无法正常工作：{missing}\n请在系统设置中授权。",
+        "en": "SpeakType is missing required permissions: {missing}\nPlease grant access in System Settings.",
+    },
+
     "status_downloading_asr": {"zh": "下载语音模型 {pct:.0f}% ({size})", "en": "Downloading ASR {pct:.0f}% ({size})"},
     "status_loading_model": {"zh": "状态：加载模型中...", "en": "Status: Loading model..."},
 

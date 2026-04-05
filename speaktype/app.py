@@ -324,7 +324,7 @@ class SpeakTypeApp(rumps.App):
         if self._first_launch:
             self._show_setup_wizard()
         else:
-            self._do_setup()
+            self._check_permissions_and_setup()
 
     def _show_setup_wizard(self):
         """Show first-launch setup wizard."""
@@ -335,6 +335,25 @@ class SpeakTypeApp(rumps.App):
             on_complete=self._on_wizard_complete,
         )
         self._wizard_controller.show()
+
+    def _check_permissions_and_setup(self):
+        """Check permissions on every startup, warn if missing, then proceed."""
+        from .setup_wizard import _check_accessibility_permission, _check_mic_permission
+        issues = []
+        if not _check_accessibility_permission():
+            issues.append(t("wizard_access_label"))
+        if not _check_mic_permission():
+            issues.append(t("wizard_mic_label"))
+        if issues:
+            missing = ", ".join(issues)
+            rumps.notification(
+                "SpeakType",
+                t("notif_perm_missing_title"),
+                t("notif_perm_missing_body", missing=missing),
+            )
+            # Open System Settings for the user
+            subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy"])
+        self._do_setup()
 
     def _on_wizard_complete(self):
         """Called when setup wizard finishes. Relaunch the app for clean startup."""
