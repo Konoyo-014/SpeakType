@@ -6,10 +6,14 @@ from pathlib import Path
 
 DEFAULT_CONFIG = {
     "hotkey": "right_cmd",  # Push-to-talk key: right_cmd, fn, ctrl+shift+space, etc.
+    "dictation_mode": "push_to_talk",  # "push_to_talk" or "toggle"
     "asr_model": "mlx-community/Qwen3-ASR-1.7B-8bit",
+    "asr_backend": "qwen",  # "qwen" (mlx-audio) or "whisper" (openai-whisper / mlx-whisper)
+    "whisper_model": "base",  # Whisper model size: tiny, base, small, medium, large
     "llm_model": "huihui_ai/qwen3.5-abliterated:9b-Claude",
     "ollama_url": "http://localhost:11434",
     "sample_rate": 16000,
+    "audio_device": None,  # None = system default, or device name/index
     "polish_enabled": True,
     "auto_punctuation": True,
     "filler_removal": True,
@@ -23,6 +27,9 @@ DEFAULT_CONFIG = {
     "insert_method": "paste",  # "paste" (clipboard+Cmd+V) or "type" (key-by-key)
     "translate_enabled": False,
     "translate_target": "en",  # Target language for translation: "en", "zh", "ja", "ko", etc.
+    "streaming_preview": False,  # Show real-time transcription preview while recording
+    "plugins_enabled": False,  # Enable plugin system
+    "plugins_dir": "",  # Custom plugins directory (empty = use default ~/.speaktype/plugins/)
 }
 
 CONFIG_DIR = Path.home() / ".speaktype"

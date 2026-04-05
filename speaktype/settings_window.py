@@ -9,23 +9,28 @@ logger = logging.getLogger("speaktype.settings")
 
 # Hotkey options
 HOTKEY_OPTIONS = [
-    ("right_cmd", "Right ⌘ (Hold)"),
-    ("left_cmd", "Left ⌘ (Hold)"),
-    ("right_alt", "Right ⌥ (Hold)"),
-    ("right_ctrl", "Right ⌃ (Hold)"),
-    ("ctrl+shift+space", "⌃⇧Space (Hold)"),
+    ("right_cmd", "Right \u2318 (Hold)"),
+    ("left_cmd", "Left \u2318 (Hold)"),
+    ("right_alt", "Right \u2325 (Hold)"),
+    ("right_ctrl", "Right \u2303 (Hold)"),
+    ("ctrl+shift+space", "\u2303\u21e7Space (Hold)"),
     ("f5", "F5 (Hold)"),
     ("f6", "F6 (Hold)"),
+]
+
+DICTATION_MODE_OPTIONS = [
+    ("push_to_talk", "Push-to-Talk (Hold key)"),
+    ("toggle", "Toggle (Press to start/stop)"),
 ]
 
 LANGUAGE_OPTIONS = [
     ("auto", "Auto Detect"),
     ("en", "English"),
-    ("zh", "中文 (Chinese)"),
-    ("ja", "日本語 (Japanese)"),
-    ("ko", "한국어 (Korean)"),
-    ("es", "Español (Spanish)"),
-    ("fr", "Français (French)"),
+    ("zh", "\u4e2d\u6587 (Chinese)"),
+    ("ja", "\u65e5\u672c\u8a9e (Japanese)"),
+    ("ko", "\ud55c\uad6d\uc5b4 (Korean)"),
+    ("es", "Espa\u00f1ol (Spanish)"),
+    ("fr", "Fran\u00e7ais (French)"),
     ("de", "Deutsch (German)"),
 ]
 
@@ -36,9 +41,27 @@ LLM_MODEL_OPTIONS = [
     ("qwen3.5:14b", "Qwen 3.5 14B (Best Quality)"),
 ]
 
+ASR_BACKEND_OPTIONS = [
+    ("qwen", "Qwen3-ASR (mlx-audio)"),
+    ("whisper", "Whisper (OpenAI / mlx-whisper)"),
+]
+
 ASR_MODEL_OPTIONS = [
     ("mlx-community/Qwen3-ASR-1.7B-8bit", "Qwen3-ASR 1.7B (Recommended)"),
     ("mlx-community/Qwen3-ASR-0.6B-4bit", "Qwen3-ASR 0.6B (Faster)"),
+]
+
+WHISPER_MODEL_OPTIONS = [
+    ("tiny", "Whisper Tiny (fastest, least accurate)"),
+    ("base", "Whisper Base (good balance)"),
+    ("small", "Whisper Small (better accuracy)"),
+    ("medium", "Whisper Medium (high accuracy)"),
+    ("large", "Whisper Large (best accuracy, slow)"),
+]
+
+TRANSLATE_LANG_OPTIONS = [
+    ("en", "English"), ("zh", "\u4e2d\u6587"), ("ja", "\u65e5\u672c\u8a9e"),
+    ("ko", "\ud55c\uad6d\uc5b4"), ("es", "Espa\u00f1ol"), ("fr", "Fran\u00e7ais"), ("de", "Deutsch"),
 ]
 
 
@@ -82,7 +105,7 @@ class SettingsWindowController:
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
     def _build_window(self):
-        frame = NSMakeRect(0, 0, 520, 580)
+        frame = NSMakeRect(0, 0, 520, 740)
         style = (
             AppKit.NSTitledWindowMask
             | AppKit.NSClosableWindowMask
@@ -94,24 +117,33 @@ class SettingsWindowController:
         self.window.setTitle_("SpeakType Settings")
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
-        # Disable window tabbing to prevent crash on macOS 13+
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
 
         content = self.window.contentView()
-        y = 540
+        y = 700
 
         # --- General Section ---
         y = self._add_section_header(content, "General", y)
         y = self._add_popup(content, "Hotkey:", "hotkey", HOTKEY_OPTIONS, y)
+        y = self._add_popup(content, "Dictation Mode:", "dictation_mode", DICTATION_MODE_OPTIONS, y)
         y = self._add_popup(content, "Language:", "language", LANGUAGE_OPTIONS, y)
         y = self._add_popup(content, "Insert Method:", "insert_method",
-                            [("paste", "Paste (Cmd+V) — Fast"), ("type", "Keystroke — Compatible")], y)
+                            [("paste", "Paste (Cmd+V) \u2014 Fast"), ("type", "Keystroke \u2014 Compatible")], y)
+
+        # Audio device
+        from .devices import list_input_devices
+        device_options = [("", "System Default")]
+        for dev in list_input_devices():
+            device_options.append((dev["name"], dev["name"]))
+        y = self._add_popup(content, "Audio Device:", "audio_device", device_options, y)
 
         y -= 10
 
         # --- AI Models Section ---
         y = self._add_section_header(content, "AI Models", y)
-        y = self._add_popup(content, "ASR Model:", "asr_model", ASR_MODEL_OPTIONS, y)
+        y = self._add_popup(content, "ASR Backend:", "asr_backend", ASR_BACKEND_OPTIONS, y)
+        y = self._add_popup(content, "Qwen ASR Model:", "asr_model", ASR_MODEL_OPTIONS, y)
+        y = self._add_popup(content, "Whisper Model:", "whisper_model", WHISPER_MODEL_OPTIONS, y)
         y = self._add_popup(content, "LLM Model:", "llm_model", LLM_MODEL_OPTIONS, y)
         y = self._add_text_field(content, "Ollama URL:", "ollama_url", y)
 
@@ -124,10 +156,15 @@ class SettingsWindowController:
         y = self._add_checkbox(content, "Context-Aware Tone", "context_aware_tone", y)
         y = self._add_checkbox(content, "Sound Feedback", "sound_feedback", y)
         y = self._add_checkbox(content, "Save Dictation History", "history_enabled", y)
+        y = self._add_checkbox(content, "Streaming Preview (real-time transcription)", "streaming_preview", y)
         y = self._add_checkbox(content, "Translate After Transcription", "translate_enabled", y)
-        y = self._add_popup(content, "Translate To:", "translate_target",
-                            [("en", "English"), ("zh", "中文"), ("ja", "日本語"),
-                             ("ko", "한국어"), ("es", "Español"), ("fr", "Français"), ("de", "Deutsch")], y)
+        y = self._add_popup(content, "Translate To:", "translate_target", TRANSLATE_LANG_OPTIONS, y)
+
+        y -= 10
+
+        # --- Plugins Section ---
+        y = self._add_section_header(content, "Plugins", y)
+        y = self._add_checkbox(content, "Enable Plugin System", "plugins_enabled", y)
 
         y -= 10
 
@@ -186,6 +223,8 @@ class SettingsWindowController:
 
         popup = AppKit.NSPopUpButton.alloc().initWithFrame_(NSMakeRect(175, y - 28, 310, 26))
         current_val = self.config.get(key, "")
+        if current_val is None:
+            current_val = ""
         selected_idx = 0
         for i, (val, display) in enumerate(options):
             popup.addItemWithTitle_(display)
@@ -230,7 +269,8 @@ class SettingsWindowController:
                 options = extra
                 idx = ctrl.indexOfSelectedItem()
                 if 0 <= idx < len(options):
-                    result[key] = options[idx][0]
+                    val = options[idx][0]
+                    result[key] = val if val != "" else None
             elif ctrl_type == "checkbox":
                 result[key] = bool(ctrl.state())
             elif ctrl_type == "text":
