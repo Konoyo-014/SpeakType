@@ -337,31 +337,7 @@ class SpeakTypeApp(rumps.App):
         self._wizard_controller.show()
 
     def _check_permissions_and_setup(self):
-        """Check permissions on every startup, warn if missing, then proceed."""
-        # Test accessibility by trying to create a CGEventTap
-        try:
-            import Quartz
-            tap = Quartz.CGEventTapCreate(
-                Quartz.kCGSessionEventTap,
-                Quartz.kCGHeadInsertEventTap,
-                Quartz.kCGEventTapOptionListenOnly,
-                Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown),
-                lambda *a: None, None,
-            )
-            if tap:
-                Quartz.CFMachPortInvalidate(tap)
-                logger.info("Accessibility permission OK")
-            else:
-                logger.warning("Accessibility permission missing — CGEventTap failed")
-                rumps.notification(
-                    "SpeakType",
-                    t("notif_perm_missing_title"),
-                    t("notif_perm_missing_body", missing=t("wizard_access_label")),
-                )
-                subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
-        except Exception as e:
-            logger.warning(f"Permission check failed: {e}")
-
+        """Proceed with setup. Check accessibility after hotkey listener starts."""
         self._do_setup()
 
     def _on_wizard_complete(self):
@@ -428,6 +404,20 @@ class SpeakTypeApp(rumps.App):
 
         threading.Thread(target=init_engines, daemon=True).start()
         self._restart_hotkey_listener()
+
+        # Delayed accessibility check — warn if pynput can't listen
+        def _delayed_perm_check():
+            import time
+            time.sleep(5)
+            if self.hotkey_listener and self.hotkey_listener._listener:
+                if not self.hotkey_listener._listener.running:
+                    logger.warning("Hotkey listener not running — accessibility may be missing")
+                    rumps.notification(
+                        "SpeakType",
+                        t("notif_perm_missing_title"),
+                        t("notif_perm_missing_body", missing=t("wizard_access_label")),
+                    )
+        threading.Thread(target=_delayed_perm_check, daemon=True).start()
 
     def _restart_hotkey_listener(self):
         """(Re)start the hotkey listener with current config."""
