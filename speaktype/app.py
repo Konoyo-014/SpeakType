@@ -83,16 +83,16 @@ class SpeakTypeApp(rumps.App):
 
         self._status_item = rumps.MenuItem(t("status_init"))
 
-        polish_item = rumps.MenuItem(t("menu_polish"), callback=self._toggle_polish)
-        polish_item.state = self.config["polish_enabled"]
-        voice_cmd_item = rumps.MenuItem(t("menu_voice_cmd"), callback=self._toggle_voice_commands)
-        voice_cmd_item.state = self.config["voice_commands_enabled"]
-        tone_item = rumps.MenuItem(t("menu_context_tone"), callback=self._toggle_context_tone)
-        tone_item.state = self.config["context_aware_tone"]
+        self._polish_item = rumps.MenuItem(t("menu_polish"), callback=self._toggle_polish)
+        self._polish_item.state = self.config["polish_enabled"]
+        self._voice_cmd_item = rumps.MenuItem(t("menu_voice_cmd"), callback=self._toggle_voice_commands)
+        self._voice_cmd_item.state = self.config["voice_commands_enabled"]
+        self._tone_item = rumps.MenuItem(t("menu_context_tone"), callback=self._toggle_context_tone)
+        self._tone_item.state = self.config["context_aware_tone"]
 
         # Translation toggle + target language submenu
-        translate_item = rumps.MenuItem(t("menu_translate"), callback=self._toggle_translate)
-        translate_item.state = self.config.get("translate_enabled", False)
+        self._translate_item = rumps.MenuItem(t("menu_translate"), callback=self._toggle_translate)
+        self._translate_item.state = self.config.get("translate_enabled", False)
 
         self._translate_menu = rumps.MenuItem(t("menu_translate_to"))
         translate_langs = [
@@ -111,30 +111,28 @@ class SpeakTypeApp(rumps.App):
 
         # Dictation mode submenu
         self._mode_menu = rumps.MenuItem(t("menu_dictation_mode"))
+        self._mode_items = {}
         for mode_id, mode_key in [("push_to_talk", "mode_push_to_talk"), ("toggle", "mode_toggle")]:
             item = rumps.MenuItem(t(mode_key), callback=self._make_mode_callback(mode_id))
             item.state = self.config.get("dictation_mode", "push_to_talk") == mode_id
             self._mode_menu.add(item)
+            self._mode_items[mode_id] = (item, mode_key)
 
-        # Language quick-switch submenu
+        # Dictation language quick-switch submenu
         self._lang_menu = rumps.MenuItem(t("menu_dictation_lang"))
-        lang_options = [
-            ("auto", t("lang_auto")),
-            ("en", "English"),
-            ("zh", "中文"),
-            ("ja", "日本語"),
-            ("ko", "한국어"),
-        ]
-        for code, name in lang_options:
+        self._lang_auto_item = rumps.MenuItem(t("lang_auto"), callback=self._make_lang_callback("auto"))
+        self._lang_auto_item.state = self.config["language"] == "auto"
+        self._lang_menu.add(self._lang_auto_item)
+        for code, name in [("en", "English"), ("zh", "中文"), ("ja", "日本語"), ("ko", "한국어")]:
             item = rumps.MenuItem(name, callback=self._make_lang_callback(code))
             item.state = self.config["language"] == code
             self._lang_menu.add(item)
 
         # Audio device submenu
         self._device_menu = rumps.MenuItem(t("menu_audio_device"))
-        default_item = rumps.MenuItem(t("device_default"), callback=self._make_device_callback(None))
-        default_item.state = self.config.get("audio_device") is None
-        self._device_menu.add(default_item)
+        self._device_default_item = rumps.MenuItem(t("device_default"), callback=self._make_device_callback(None))
+        self._device_default_item.state = self.config.get("audio_device") is None
+        self._device_menu.add(self._device_default_item)
         for dev in list_input_devices():
             dev_item = rumps.MenuItem(dev["name"], callback=self._make_device_callback(dev["name"]))
             dev_item.state = self.config.get("audio_device") == dev["name"]
@@ -142,12 +140,23 @@ class SpeakTypeApp(rumps.App):
 
         # UI Language submenu
         self._ui_lang_menu = rumps.MenuItem(t("menu_ui_language"))
+        self._ui_lang_items = {}
         for lang_code, lang_key in [("zh", "ui_lang_zh"), ("en", "ui_lang_en")]:
             item = rumps.MenuItem(t(lang_key), callback=self._make_ui_lang_callback(lang_code))
             item.state = self.config.get("ui_language", "zh") == lang_code
             self._ui_lang_menu.add(item)
+            self._ui_lang_items[lang_code] = (item, lang_key)
 
         self._hotkey_item = rumps.MenuItem(t("hotkey_prefix") + self._hotkey_display())
+
+        self._prefs_item = rumps.MenuItem(t("menu_preferences"), callback=self._open_settings, key=",")
+        self._dict_item = rumps.MenuItem(t("menu_dict_snippets"), callback=self._open_dict)
+        self._stats_item = rumps.MenuItem(t("menu_history_stats"), callback=self._show_stats)
+        self._mic_item = rumps.MenuItem(t("menu_test_mic"), callback=self._test_mic)
+        self._config_item = rumps.MenuItem(t("menu_open_config"), callback=self._open_config)
+        self._updates_item = rumps.MenuItem(t("menu_check_updates"), callback=self._check_updates)
+        self._about_item = rumps.MenuItem(t("menu_about"), callback=self._show_about)
+        self._quit_item = rumps.MenuItem(t("menu_quit"), callback=self._quit, key="q")
 
         self.menu = [
             rumps.MenuItem("SpeakType v2.0"),
@@ -155,27 +164,54 @@ class SpeakTypeApp(rumps.App):
             self._hotkey_item,
             self._status_item,
             None,
-            polish_item,
-            voice_cmd_item,
-            tone_item,
-            translate_item,
+            self._polish_item,
+            self._voice_cmd_item,
+            self._tone_item,
+            self._translate_item,
             self._translate_menu,
             self._mode_menu,
             self._lang_menu,
             self._device_menu,
             self._ui_lang_menu,
             None,
-            rumps.MenuItem(t("menu_preferences"), callback=self._open_settings, key=","),
-            rumps.MenuItem(t("menu_dict_snippets"), callback=self._open_dict),
-            rumps.MenuItem(t("menu_history_stats"), callback=self._show_stats),
-            rumps.MenuItem(t("menu_test_mic"), callback=self._test_mic),
+            self._prefs_item,
+            self._dict_item,
+            self._stats_item,
+            self._mic_item,
             None,
-            rumps.MenuItem(t("menu_open_config"), callback=self._open_config),
-            rumps.MenuItem(t("menu_check_updates"), callback=self._check_updates),
-            rumps.MenuItem(t("menu_about"), callback=self._show_about),
+            self._config_item,
+            self._updates_item,
+            self._about_item,
             None,
-            rumps.MenuItem(t("menu_quit"), callback=self._quit, key="q"),
+            self._quit_item,
         ]
+
+    def _refresh_menu_titles(self):
+        """Update all menu item titles after UI language change."""
+        self._hotkey_item.title = t("hotkey_prefix") + self._hotkey_display()
+        self._polish_item.title = t("menu_polish")
+        self._voice_cmd_item.title = t("menu_voice_cmd")
+        self._tone_item.title = t("menu_context_tone")
+        self._translate_item.title = t("menu_translate")
+        self._translate_menu.title = t("menu_translate_to")
+        self._mode_menu.title = t("menu_dictation_mode")
+        for mode_id, (item, key) in self._mode_items.items():
+            item.title = t(key)
+        self._lang_menu.title = t("menu_dictation_lang")
+        self._lang_auto_item.title = t("lang_auto")
+        self._device_menu.title = t("menu_audio_device")
+        self._device_default_item.title = t("device_default")
+        self._ui_lang_menu.title = t("menu_ui_language")
+        for lang_code, (item, key) in self._ui_lang_items.items():
+            item.title = t(key)
+        self._prefs_item.title = t("menu_preferences")
+        self._dict_item.title = t("menu_dict_snippets")
+        self._stats_item.title = t("menu_history_stats")
+        self._mic_item.title = t("menu_test_mic")
+        self._config_item.title = t("menu_open_config")
+        self._updates_item.title = t("menu_check_updates")
+        self._about_item.title = t("menu_about")
+        self._quit_item.title = t("menu_quit")
 
     def _toggle_translate(self, sender):
         sender.state = not sender.state
@@ -231,15 +267,11 @@ class SpeakTypeApp(rumps.App):
             self.config["ui_language"] = lang_code
             save_config(self.config)
             set_language(lang_code)
-            if self._ui_lang_menu:
-                for item in self._ui_lang_menu.values():
-                    item.state = False
-                sender.state = True
-            rumps.notification(
-                "SpeakType",
-                t("notif_settings_saved_title"),
-                t("notif_settings_saved_body"),
-            )
+            # Update checkmarks
+            for lc, (item, _) in self._ui_lang_items.items():
+                item.state = lc == lang_code
+            # Refresh all menu titles to new language
+            self._refresh_menu_titles()
         return callback
 
     def _hotkey_display(self):
@@ -586,9 +618,11 @@ class SpeakTypeApp(rumps.App):
         new_ui_lang = new_config.get("ui_language", old_ui_lang)
         if new_ui_lang != old_ui_lang:
             set_language(new_ui_lang)
-
-        # Update hotkey display
-        self._hotkey_item.title = t("hotkey_prefix") + self._hotkey_display()
+            self._refresh_menu_titles()
+            for lc, (item, _) in self._ui_lang_items.items():
+                item.state = lc == new_ui_lang
+        else:
+            self._hotkey_item.title = t("hotkey_prefix") + self._hotkey_display()
 
         # Restart hotkey listener if hotkey or mode changed
         if (new_config.get("hotkey") != old_hotkey or
@@ -615,18 +649,10 @@ class SpeakTypeApp(rumps.App):
         # Update recorder device
         self.recorder.device = validate_device(self.config.get("audio_device"))
 
-        # Update toggle states in menu using t() for matching
-        polish_title = t("menu_polish")
-        voice_cmd_title = t("menu_voice_cmd")
-        tone_title = t("menu_context_tone")
-        for item in self.menu.values():
-            if hasattr(item, 'title'):
-                if item.title == polish_title:
-                    item.state = self.config["polish_enabled"]
-                elif item.title == voice_cmd_title:
-                    item.state = self.config["voice_commands_enabled"]
-                elif item.title == tone_title:
-                    item.state = self.config["context_aware_tone"]
+        # Update toggle states directly via instance vars
+        self._polish_item.state = self.config["polish_enabled"]
+        self._voice_cmd_item.state = self.config["voice_commands_enabled"]
+        self._tone_item.state = self.config["context_aware_tone"]
 
         rumps.notification("SpeakType", t("notif_settings_saved_title"), t("notif_settings_saved_body"))
 
