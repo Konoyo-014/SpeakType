@@ -12,15 +12,6 @@ def main():
     if "--test" in sys.argv:
         test_pipeline()
     else:
-        # Set NSApplication activation policy BEFORE rumps initializes
-        # This hides the Dock icon while keeping the menubar status item
-        try:
-            import AppKit
-            AppKit.NSApplication.sharedApplication().setActivationPolicy_(
-                AppKit.NSApplicationActivationPolicyAccessory  # 1 = Accessory
-            )
-        except Exception:
-            pass
         from speaktype.app import run
         run()
 
