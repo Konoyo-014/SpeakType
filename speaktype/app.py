@@ -10,6 +10,7 @@ import rumps
 import AppKit
 
 from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR, ensure_config_dir
+from .i18n import t, set_language, get_language
 from .audio import AudioRecorder
 from .asr import ASREngine
 from .polish import PolishEngine
@@ -41,6 +42,7 @@ class SpeakTypeApp(rumps.App):
             quit_button=None,
         )
         self.config = load_config()
+        set_language(self.config.get("ui_language", "zh"))
 
         # Resolve audio device
         device = validate_device(self.config.get("audio_device"))
@@ -79,20 +81,20 @@ class SpeakTypeApp(rumps.App):
             plugins_dir=self.config.get("plugins_dir", "")
         )
 
-        self._status_item = rumps.MenuItem("状态：初始化中...")
+        self._status_item = rumps.MenuItem(t("status_init"))
 
-        polish_item = rumps.MenuItem("文本润色", callback=self._toggle_polish)
+        polish_item = rumps.MenuItem(t("menu_polish"), callback=self._toggle_polish)
         polish_item.state = self.config["polish_enabled"]
-        voice_cmd_item = rumps.MenuItem("语音指令", callback=self._toggle_voice_commands)
+        voice_cmd_item = rumps.MenuItem(t("menu_voice_cmd"), callback=self._toggle_voice_commands)
         voice_cmd_item.state = self.config["voice_commands_enabled"]
-        tone_item = rumps.MenuItem("智能语气", callback=self._toggle_context_tone)
+        tone_item = rumps.MenuItem(t("menu_context_tone"), callback=self._toggle_context_tone)
         tone_item.state = self.config["context_aware_tone"]
 
         # Translation toggle + target language submenu
-        translate_item = rumps.MenuItem("转写后翻译", callback=self._toggle_translate)
+        translate_item = rumps.MenuItem(t("menu_translate"), callback=self._toggle_translate)
         translate_item.state = self.config.get("translate_enabled", False)
 
-        translate_target_menu = rumps.MenuItem("翻译目标语言")
+        self._translate_menu = rumps.MenuItem(t("menu_translate_to"))
         translate_langs = [
             ("en", "English"),
             ("zh", "中文"),
@@ -105,19 +107,19 @@ class SpeakTypeApp(rumps.App):
         for code, name in translate_langs:
             item = rumps.MenuItem(name, callback=self._make_translate_target_callback(code))
             item.state = self.config.get("translate_target", "en") == code
-            translate_target_menu.add(item)
+            self._translate_menu.add(item)
 
         # Dictation mode submenu
-        mode_menu = rumps.MenuItem("听写模式")
-        for mode_id, mode_name in [("push_to_talk", "按住说话"), ("toggle", "按下开关")]:
-            item = rumps.MenuItem(mode_name, callback=self._make_mode_callback(mode_id))
+        self._mode_menu = rumps.MenuItem(t("menu_dictation_mode"))
+        for mode_id, mode_key in [("push_to_talk", "mode_push_to_talk"), ("toggle", "mode_toggle")]:
+            item = rumps.MenuItem(t(mode_key), callback=self._make_mode_callback(mode_id))
             item.state = self.config.get("dictation_mode", "push_to_talk") == mode_id
-            mode_menu.add(item)
+            self._mode_menu.add(item)
 
         # Language quick-switch submenu
-        lang_menu = rumps.MenuItem("语言")
+        self._lang_menu = rumps.MenuItem(t("menu_dictation_lang"))
         lang_options = [
-            ("auto", "自动检测"),
+            ("auto", t("lang_auto")),
             ("en", "English"),
             ("zh", "中文"),
             ("ja", "日本語"),
@@ -126,43 +128,53 @@ class SpeakTypeApp(rumps.App):
         for code, name in lang_options:
             item = rumps.MenuItem(name, callback=self._make_lang_callback(code))
             item.state = self.config["language"] == code
-            lang_menu.add(item)
+            self._lang_menu.add(item)
 
         # Audio device submenu
-        device_menu = rumps.MenuItem("音频设备")
-        default_item = rumps.MenuItem("系统默认", callback=self._make_device_callback(None))
+        self._device_menu = rumps.MenuItem(t("menu_audio_device"))
+        default_item = rumps.MenuItem(t("device_default"), callback=self._make_device_callback(None))
         default_item.state = self.config.get("audio_device") is None
-        device_menu.add(default_item)
+        self._device_menu.add(default_item)
         for dev in list_input_devices():
             dev_item = rumps.MenuItem(dev["name"], callback=self._make_device_callback(dev["name"]))
             dev_item.state = self.config.get("audio_device") == dev["name"]
-            device_menu.add(dev_item)
+            self._device_menu.add(dev_item)
+
+        # UI Language submenu
+        self._ui_lang_menu = rumps.MenuItem(t("menu_ui_language"))
+        for lang_code, lang_key in [("zh", "ui_lang_zh"), ("en", "ui_lang_en")]:
+            item = rumps.MenuItem(t(lang_key), callback=self._make_ui_lang_callback(lang_code))
+            item.state = self.config.get("ui_language", "zh") == lang_code
+            self._ui_lang_menu.add(item)
+
+        self._hotkey_item = rumps.MenuItem(t("hotkey_prefix") + self._hotkey_display())
 
         self.menu = [
             rumps.MenuItem("SpeakType v2.0"),
             None,
-            rumps.MenuItem(f"快捷键：{self._hotkey_display()}"),
+            self._hotkey_item,
             self._status_item,
             None,
             polish_item,
             voice_cmd_item,
             tone_item,
             translate_item,
-            translate_target_menu,
-            mode_menu,
-            lang_menu,
-            device_menu,
+            self._translate_menu,
+            self._mode_menu,
+            self._lang_menu,
+            self._device_menu,
+            self._ui_lang_menu,
             None,
-            rumps.MenuItem("偏好设置...", callback=self._open_settings, key=","),
-            rumps.MenuItem("词典与快捷短语...", callback=self._open_dict),
-            rumps.MenuItem("历史与统计", callback=self._show_stats),
-            rumps.MenuItem("测试麦克风", callback=self._test_mic),
+            rumps.MenuItem(t("menu_preferences"), callback=self._open_settings, key=","),
+            rumps.MenuItem(t("menu_dict_snippets"), callback=self._open_dict),
+            rumps.MenuItem(t("menu_history_stats"), callback=self._show_stats),
+            rumps.MenuItem(t("menu_test_mic"), callback=self._test_mic),
             None,
-            rumps.MenuItem("打开配置文件夹", callback=self._open_config),
-            rumps.MenuItem("检查更新", callback=self._check_updates),
-            rumps.MenuItem("关于 SpeakType", callback=self._show_about),
+            rumps.MenuItem(t("menu_open_config"), callback=self._open_config),
+            rumps.MenuItem(t("menu_check_updates"), callback=self._check_updates),
+            rumps.MenuItem(t("menu_about"), callback=self._show_about),
             None,
-            rumps.MenuItem("退出 SpeakType", callback=self._quit, key="q"),
+            rumps.MenuItem(t("menu_quit"), callback=self._quit, key="q"),
         ]
 
     def _toggle_translate(self, sender):
@@ -174,9 +186,8 @@ class SpeakTypeApp(rumps.App):
         def callback(sender):
             self.config["translate_target"] = lang_code
             save_config(self.config)
-            translate_menu = self.menu.get("翻译目标语言")
-            if translate_menu:
-                for item in translate_menu.values():
+            if self._translate_menu:
+                for item in self._translate_menu.values():
                     item.state = False
                 sender.state = True
         return callback
@@ -185,9 +196,8 @@ class SpeakTypeApp(rumps.App):
         def callback(sender):
             self.config["language"] = lang_code
             save_config(self.config)
-            lang_menu = self.menu.get("语言")
-            if lang_menu:
-                for item in lang_menu.values():
+            if self._lang_menu:
+                for item in self._lang_menu.values():
                     item.state = False
                 sender.state = True
         return callback
@@ -196,9 +206,8 @@ class SpeakTypeApp(rumps.App):
         def callback(sender):
             self.config["dictation_mode"] = mode_id
             save_config(self.config)
-            mode_menu = self.menu.get("听写模式")
-            if mode_menu:
-                for item in mode_menu.values():
+            if self._mode_menu:
+                for item in self._mode_menu.values():
                     item.state = False
                 sender.state = True
             # Restart hotkey listener with new mode
@@ -209,13 +218,28 @@ class SpeakTypeApp(rumps.App):
         def callback(sender):
             self.config["audio_device"] = device_name
             save_config(self.config)
-            device_menu = self.menu.get("音频设备")
-            if device_menu:
-                for item in device_menu.values():
+            if self._device_menu:
+                for item in self._device_menu.values():
                     item.state = False
                 sender.state = True
             # Update recorder device
             self.recorder.device = validate_device(device_name)
+        return callback
+
+    def _make_ui_lang_callback(self, lang_code):
+        def callback(sender):
+            self.config["ui_language"] = lang_code
+            save_config(self.config)
+            set_language(lang_code)
+            if self._ui_lang_menu:
+                for item in self._ui_lang_menu.values():
+                    item.state = False
+                sender.state = True
+            rumps.notification(
+                "SpeakType",
+                t("notif_settings_saved_title"),
+                t("notif_settings_saved_body"),
+            )
         return callback
 
     def _hotkey_display(self):
@@ -244,15 +268,13 @@ class SpeakTypeApp(rumps.App):
     def _do_setup(self):
         def init_engines():
             logger.info("Loading ASR engine...")
-            self._status_item.title = "状态：加载语音识别模型..."
+            self._status_item.title = t("status_loading_asr")
 
             if self._first_launch:
                 rumps.notification(
-                    "欢迎使用 SpeakType！",
-                    "首次设置",
-                    f"按住 {self._hotkey_display()} 开始听写。\n"
-                    "请在弹出提示时授予麦克风和辅助功能权限。\n"
-                    "使用偏好设置 (\u2318,) 自定义选项。",
+                    t("notif_welcome_title"),
+                    t("notif_welcome_subtitle"),
+                    t("notif_welcome_body", hotkey=self._hotkey_display()),
                 )
 
             try:
@@ -260,9 +282,9 @@ class SpeakTypeApp(rumps.App):
                 logger.info(f"ASR engine loaded: {self.asr.get_backend_info()}")
             except Exception as e:
                 logger.error(f"ASR load failed: {e}")
-                self._status_item.title = "状态：语音识别错误"
+                self._status_item.title = t("status_asr_error")
                 self.title = ICON_ERROR
-                rumps.notification("SpeakType", "语音识别加载失败", str(e))
+                rumps.notification("SpeakType", t("notif_asr_failed"), str(e))
                 return
 
             if self.config["polish_enabled"]:
@@ -271,8 +293,8 @@ class SpeakTypeApp(rumps.App):
                 else:
                     logger.warning("LLM not available")
                     rumps.notification(
-                        "SpeakType", "LLM 不可用",
-                        f"请运行: ollama pull {self.config['llm_model']}\n文本润色已禁用。"
+                        "SpeakType", t("notif_llm_unavail_title"),
+                        t("notif_llm_unavail_body", model=self.config['llm_model']),
                     )
 
             # Load plugins
@@ -282,11 +304,11 @@ class SpeakTypeApp(rumps.App):
                 except Exception as e:
                     logger.warning(f"Plugin loading failed: {e}")
 
-            self._status_item.title = "状态：就绪 \u2713"
+            self._status_item.title = t("status_ready")
             self.title = ICON_IDLE
             if not self._first_launch:
-                mode_str = "切换" if self.config.get("dictation_mode") == "toggle" else "按住"
-                rumps.notification("SpeakType", "就绪！", f"{mode_str} {self._hotkey_display()} 开始听写。")
+                mode_str = t("notif_ready_mode_toggle") if self.config.get("dictation_mode") == "toggle" else t("notif_ready_mode_hold")
+                rumps.notification("SpeakType", t("notif_ready_title"), t("notif_ready_body", mode_str=mode_str, hotkey=self._hotkey_display()))
 
         threading.Thread(target=init_engines, daemon=True).start()
         self._restart_hotkey_listener()
@@ -507,7 +529,7 @@ class SpeakTypeApp(rumps.App):
                 )
         except Exception as e:
             logger.error(f"Processing failed: {e}")
-            rumps.notification("SpeakType", "Error", str(e))
+            rumps.notification("SpeakType", t("notif_error"), str(e))
         finally:
             self.title = ICON_IDLE
             self._is_processing = False
@@ -555,15 +577,18 @@ class SpeakTypeApp(rumps.App):
         old_backend = self.config.get("asr_backend")
         old_whisper = self.config.get("whisper_model")
         old_mode = self.config.get("dictation_mode")
+        old_ui_lang = self.config.get("ui_language", "zh")
 
         self.config.update(new_config)
         save_config(self.config)
 
+        # Update UI language if changed
+        new_ui_lang = new_config.get("ui_language", old_ui_lang)
+        if new_ui_lang != old_ui_lang:
+            set_language(new_ui_lang)
+
         # Update hotkey display
-        for item in self.menu.values():
-            if hasattr(item, 'title') and item.title.startswith("快捷键"):
-                item.title = f"快捷键：{self._hotkey_display()}"
-                break
+        self._hotkey_item.title = t("hotkey_prefix") + self._hotkey_display()
 
         # Restart hotkey listener if hotkey or mode changed
         if (new_config.get("hotkey") != old_hotkey or
@@ -590,17 +615,20 @@ class SpeakTypeApp(rumps.App):
         # Update recorder device
         self.recorder.device = validate_device(self.config.get("audio_device"))
 
-        # Update toggle states in menu
+        # Update toggle states in menu using t() for matching
+        polish_title = t("menu_polish")
+        voice_cmd_title = t("menu_voice_cmd")
+        tone_title = t("menu_context_tone")
         for item in self.menu.values():
             if hasattr(item, 'title'):
-                if item.title == "文本润色":
+                if item.title == polish_title:
                     item.state = self.config["polish_enabled"]
-                elif item.title == "语音指令":
+                elif item.title == voice_cmd_title:
                     item.state = self.config["voice_commands_enabled"]
-                elif item.title == "智能语气":
+                elif item.title == tone_title:
                     item.state = self.config["context_aware_tone"]
 
-        rumps.notification("SpeakType", "设置已保存", "偏好设置已更新。")
+        rumps.notification("SpeakType", t("notif_settings_saved_title"), t("notif_settings_saved_body"))
 
     def _toggle_polish(self, sender):
         sender.state = not sender.state
@@ -625,9 +653,9 @@ class SpeakTypeApp(rumps.App):
     def _test_mic(self, _):
         def _do_test():
             if self.recorder.is_recording or self._is_processing:
-                rumps.notification("SpeakType", "麦克风测试", "录音/处理中，无法测试。")
+                rumps.notification("SpeakType", t("notif_mic_test"), t("notif_cannot_test"))
                 return
-            rumps.notification("SpeakType", "麦克风测试", "正在录音 2 秒...")
+            rumps.notification("SpeakType", t("notif_mic_test"), t("notif_mic_recording"))
             device = validate_device(self.config.get("audio_device"))
             test_recorder = AudioRecorder(
                 sample_rate=self.config["sample_rate"],
@@ -639,27 +667,26 @@ class SpeakTypeApp(rumps.App):
             if path:
                 size = os.path.getsize(path)
                 os.unlink(path)
-                rumps.notification("SpeakType", "麦克风测试", f"\u2713 录制了 {size} 字节，麦克风工作正常！")
+                rumps.notification("SpeakType", t("notif_mic_test"), t("notif_mic_ok", size=size))
             else:
-                rumps.notification("SpeakType", "麦克风测试", "\u2717 未录到音频，请检查麦克风权限。")
+                rumps.notification("SpeakType", t("notif_mic_test"), t("notif_mic_fail"))
         threading.Thread(target=_do_test, daemon=True).start()
 
     def _reload_config(self, _):
         self.config = load_config()
-        rumps.notification("SpeakType", "配置已重载", "设置已更新。")
+        rumps.notification("SpeakType", t("notif_config_reloaded"), t("notif_config_reloaded_body"))
 
     def _open_config(self, _):
         subprocess.run(["open", str(CONFIG_DIR)])
 
     def _check_updates(self, _):
-        rumps.notification("SpeakType", "已是最新版本", "您正在运行最新版本 (v2.0)。")
+        rumps.notification("SpeakType", t("notif_up_to_date_title"), t("notif_up_to_date_body"))
 
     def _show_about(self, _):
         rumps.notification(
-            "关于 SpeakType",
-            "v2.0 \u2014 Mac AI 语音输入法",
-            f"后端引擎：{self.asr.get_backend_info()}\n"
-            "按键语音听写，AI 智能润色。\n"
+            t("menu_about"),
+            t("notif_about_subtitle"),
+            f"Backend: {self.asr.get_backend_info()}\n"
             "\u00a9 2025 SpeakType"
         )
 

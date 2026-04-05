@@ -4,35 +4,55 @@ import logging
 import AppKit
 import objc
 from Foundation import NSObject, NSMakeRect
+from .i18n import t
 
 logger = logging.getLogger("speaktype.settings")
 
-# Hotkey options
-HOTKEY_OPTIONS = [
-    ("right_cmd", "右 \u2318（按住）"),
-    ("left_cmd", "左 \u2318（按住）"),
-    ("right_alt", "右 \u2325（按住）"),
-    ("right_ctrl", "右 \u2303（按住）"),
-    ("ctrl+shift+space", "\u2303\u21e7Space（按住）"),
-    ("f5", "F5（按住）"),
-    ("f6", "F6（按住）"),
-]
+def _hotkey_options():
+    return [
+        ("right_cmd", t("hotkey_right_cmd")),
+        ("left_cmd", t("hotkey_left_cmd")),
+        ("right_alt", t("hotkey_right_alt")),
+        ("right_ctrl", t("hotkey_right_ctrl")),
+        ("ctrl+shift+space", t("hotkey_ctrl_shift_space")),
+        ("f5", t("hotkey_f5")),
+        ("f6", t("hotkey_f6")),
+    ]
 
-DICTATION_MODE_OPTIONS = [
-    ("push_to_talk", "按住说话"),
-    ("toggle", "按下开关"),
-]
 
-LANGUAGE_OPTIONS = [
-    ("auto", "自动检测"),
-    ("en", "English"),
-    ("zh", "\u4e2d\u6587 (Chinese)"),
-    ("ja", "\u65e5\u672c\u8a9e (Japanese)"),
-    ("ko", "\ud55c\uad6d\uc5b4 (Korean)"),
-    ("es", "Espa\u00f1ol (Spanish)"),
-    ("fr", "Fran\u00e7ais (French)"),
-    ("de", "Deutsch (German)"),
-]
+def _dictation_mode_options():
+    return [
+        ("push_to_talk", t("mode_opt_push")),
+        ("toggle", t("mode_opt_toggle")),
+    ]
+
+
+def _language_options():
+    return [
+        ("auto", t("lang_auto")),
+        ("en", "English"),
+        ("zh", "\u4e2d\u6587 (Chinese)"),
+        ("ja", "\u65e5\u672c\u8a9e (Japanese)"),
+        ("ko", "\ud55c\uad6d\uc5b4 (Korean)"),
+        ("es", "Espa\u00f1ol (Spanish)"),
+        ("fr", "Fran\u00e7ais (French)"),
+        ("de", "Deutsch (German)"),
+    ]
+
+
+def _insert_method_options():
+    return [
+        ("paste", t("settings_insert_paste")),
+        ("type", t("settings_insert_type")),
+    ]
+
+
+def _ui_language_options():
+    return [
+        ("zh", t("ui_lang_zh")),
+        ("en", t("ui_lang_en")),
+    ]
+
 
 LLM_MODEL_OPTIONS = [
     ("huihui_ai/qwen3.5-abliterated:9b-Claude", "Qwen 3.5 9B Abliterated (Default)"),
@@ -105,7 +125,7 @@ class SettingsWindowController:
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
     def _build_window(self):
-        frame = NSMakeRect(0, 0, 520, 740)
+        frame = NSMakeRect(0, 0, 520, 780)
         style = (
             AppKit.NSTitledWindowMask
             | AppKit.NSClosableWindowMask
@@ -114,62 +134,62 @@ class SettingsWindowController:
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, AppKit.NSBackingStoreBuffered, False
         )
-        self.window.setTitle_("SpeakType 偏好设置")
+        self.window.setTitle_(t("settings_title"))
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
 
         content = self.window.contentView()
-        y = 700
+        y = 740
 
         # --- General Section ---
-        y = self._add_section_header(content, "通用", y)
-        y = self._add_popup(content, "快捷键：", "hotkey", HOTKEY_OPTIONS, y)
-        y = self._add_popup(content, "听写模式：", "dictation_mode", DICTATION_MODE_OPTIONS, y)
-        y = self._add_popup(content, "语言：", "language", LANGUAGE_OPTIONS, y)
-        y = self._add_popup(content, "输入方式：", "insert_method",
-                            [("paste", "粘贴 (\u2318V) \u2014 快速"), ("type", "逐字输入 \u2014 兼容")], y)
+        y = self._add_section_header(content, t("settings_section_general"), y)
+        y = self._add_popup(content, t("settings_hotkey"), "hotkey", _hotkey_options(), y)
+        y = self._add_popup(content, t("settings_dictation_mode"), "dictation_mode", _dictation_mode_options(), y)
+        y = self._add_popup(content, t("settings_language"), "language", _language_options(), y)
+        y = self._add_popup(content, t("settings_insert_method"), "insert_method", _insert_method_options(), y)
 
         # Audio device
         from .devices import list_input_devices
-        device_options = [("", "系统默认")]
+        device_options = [("", t("device_default"))]
         for dev in list_input_devices():
             device_options.append((dev["name"], dev["name"]))
-        y = self._add_popup(content, "音频设备：", "audio_device", device_options, y)
+        y = self._add_popup(content, t("settings_audio_device"), "audio_device", device_options, y)
+        y = self._add_popup(content, t("settings_ui_language"), "ui_language", _ui_language_options(), y)
 
         y -= 10
 
         # --- AI Models Section ---
-        y = self._add_section_header(content, "AI 模型", y)
-        y = self._add_popup(content, "语音识别后端：", "asr_backend", ASR_BACKEND_OPTIONS, y)
-        y = self._add_popup(content, "Qwen ASR 模型：", "asr_model", ASR_MODEL_OPTIONS, y)
-        y = self._add_popup(content, "Whisper 模型：", "whisper_model", WHISPER_MODEL_OPTIONS, y)
-        y = self._add_popup(content, "大语言模型：", "llm_model", LLM_MODEL_OPTIONS, y)
-        y = self._add_text_field(content, "Ollama 地址：", "ollama_url", y)
+        y = self._add_section_header(content, t("settings_section_ai"), y)
+        y = self._add_popup(content, t("settings_asr_backend"), "asr_backend", ASR_BACKEND_OPTIONS, y)
+        y = self._add_popup(content, t("settings_qwen_model"), "asr_model", ASR_MODEL_OPTIONS, y)
+        y = self._add_popup(content, t("settings_whisper_model"), "whisper_model", WHISPER_MODEL_OPTIONS, y)
+        y = self._add_popup(content, t("settings_llm_model"), "llm_model", LLM_MODEL_OPTIONS, y)
+        y = self._add_text_field(content, t("settings_ollama_url"), "ollama_url", y)
 
         y -= 10
 
         # --- Features Section ---
-        y = self._add_section_header(content, "功能", y)
-        y = self._add_checkbox(content, "启用文本润色 (LLM)", "polish_enabled", y)
-        y = self._add_checkbox(content, "启用语音指令", "voice_commands_enabled", y)
-        y = self._add_checkbox(content, "智能语气", "context_aware_tone", y)
-        y = self._add_checkbox(content, "声音反馈", "sound_feedback", y)
-        y = self._add_checkbox(content, "保存听写历史", "history_enabled", y)
-        y = self._add_checkbox(content, "转写后翻译", "translate_enabled", y)
-        y = self._add_popup(content, "翻译目标语言：", "translate_target", TRANSLATE_LANG_OPTIONS, y)
+        y = self._add_section_header(content, t("settings_section_features"), y)
+        y = self._add_checkbox(content, t("settings_cb_polish"), "polish_enabled", y)
+        y = self._add_checkbox(content, t("settings_cb_voice_cmd"), "voice_commands_enabled", y)
+        y = self._add_checkbox(content, t("settings_cb_tone"), "context_aware_tone", y)
+        y = self._add_checkbox(content, t("settings_cb_sound"), "sound_feedback", y)
+        y = self._add_checkbox(content, t("settings_cb_history"), "history_enabled", y)
+        y = self._add_checkbox(content, t("settings_cb_translate"), "translate_enabled", y)
+        y = self._add_popup(content, t("settings_translate_to"), "translate_target", TRANSLATE_LANG_OPTIONS, y)
 
         y -= 10
 
         # --- Plugins Section ---
-        y = self._add_section_header(content, "插件", y)
-        y = self._add_checkbox(content, "启用插件系统", "plugins_enabled", y)
+        y = self._add_section_header(content, t("settings_section_plugins"), y)
+        y = self._add_checkbox(content, t("settings_cb_plugins"), "plugins_enabled", y)
 
         y -= 10
 
         # --- System Section ---
-        y = self._add_section_header(content, "系统", y)
-        y = self._add_checkbox(content, "登录时启动", "auto_start", y)
+        y = self._add_section_header(content, t("settings_section_system"), y)
+        y = self._add_checkbox(content, t("settings_cb_auto_start"), "auto_start", y)
 
         y -= 20
 
@@ -179,7 +199,7 @@ class SettingsWindowController:
         )
 
         save_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(310, 15, 90, 32))
-        save_btn.setTitle_("保存")
+        save_btn.setTitle_(t("settings_btn_save"))
         save_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         save_btn.setKeyEquivalent_("\r")
         save_btn.setTarget_(self._delegate)
@@ -187,7 +207,7 @@ class SettingsWindowController:
         content.addSubview_(save_btn)
 
         cancel_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(410, 15, 90, 32))
-        cancel_btn.setTitle_("取消")
+        cancel_btn.setTitle_(t("settings_btn_cancel"))
         cancel_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         cancel_btn.setKeyEquivalent_("\x1b")
         cancel_btn.setTarget_(self._delegate)

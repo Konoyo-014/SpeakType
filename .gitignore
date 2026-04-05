@@ -12,3 +12,4 @@ dist/
 *.egg-info/
 .pytest_cache/
 *.dmg
+Gemini_Generated_Image_*

@@ -6,6 +6,7 @@ import objc
 from Foundation import NSObject, NSMakeRect
 from .config import load_custom_dictionary, save_custom_dictionary
 from .snippets import SnippetLibrary, SNIPPETS_FILE
+from .i18n import t
 
 logger = logging.getLogger("speaktype.dict_window")
 
@@ -73,7 +74,7 @@ class DictWindowController:
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, AppKit.NSBackingStoreBuffered, False
         )
-        self.window.setTitle_("SpeakType — 词典与快捷短语")
+        self.window.setTitle_(t("dict_title"))
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -83,24 +84,24 @@ class DictWindowController:
         y = 570
 
         # === Custom Dictionary Section ===
-        y = self._section(content, "自定义词典（确保正确识别的词语）", y)
+        y = self._section(content, t("dict_section_words"), y)
 
         # Word input field + add button
         self._word_field = AppKit.NSTextField.alloc().initWithFrame_(
             NSMakeRect(30, y - 28, 380, 24)
         )
-        self._word_field.setPlaceholderString_("输入词语...")
+        self._word_field.setPlaceholderString_(t("dict_placeholder_word"))
         content.addSubview_(self._word_field)
 
         add_word_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(420, y - 28, 60, 24))
-        add_word_btn.setTitle_("添加")
+        add_word_btn.setTitle_(t("dict_btn_add"))
         add_word_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         add_word_btn.setTarget_(self._delegate)
         add_word_btn.setAction_(b"onAddWord:")
         content.addSubview_(add_word_btn)
 
         remove_word_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(485, y - 28, 60, 24))
-        remove_word_btn.setTitle_("删除")
+        remove_word_btn.setTitle_(t("dict_btn_remove"))
         remove_word_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         remove_word_btn.setTarget_(self._delegate)
         remove_word_btn.setAction_(b"onRemoveWord:")
@@ -125,22 +126,22 @@ class DictWindowController:
 
         # === Snippets Section ===
         y -= 10
-        y = self._section(content, "快捷短语（说出触发词插入文本）", y)
+        y = self._section(content, t("dict_section_snippets"), y)
 
         # Trigger field
-        lbl1 = self._label(content, "触发词：", 30, y - 24)
+        lbl1 = self._label(content, t("dict_trigger"), 30, y - 24)
         self._snippet_trigger_field = AppKit.NSTextField.alloc().initWithFrame_(
             NSMakeRect(100, y - 26, 200, 24)
         )
-        self._snippet_trigger_field.setPlaceholderString_("例如：我的邮箱")
+        self._snippet_trigger_field.setPlaceholderString_(t("dict_placeholder_trigger"))
         content.addSubview_(self._snippet_trigger_field)
 
         # Text field
-        lbl2 = self._label(content, "文本：", 310, y - 24)
+        lbl2 = self._label(content, t("dict_text"), 310, y - 24)
         self._snippet_text_field = AppKit.NSTextField.alloc().initWithFrame_(
             NSMakeRect(350, y - 26, 135, 24)
         )
-        self._snippet_text_field.setPlaceholderString_("例如：user@mail.com")
+        self._snippet_text_field.setPlaceholderString_(t("dict_placeholder_text"))
         content.addSubview_(self._snippet_text_field)
 
         add_snip_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(495, y - 26, 50, 24))
@@ -168,7 +169,7 @@ class DictWindowController:
         y -= 170
 
         remove_snip_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(30, y - 4, 140, 24))
-        remove_snip_btn.setTitle_("删除选中")
+        remove_snip_btn.setTitle_(t("dict_btn_remove_selected"))
         remove_snip_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         remove_snip_btn.setTarget_(self._delegate)
         remove_snip_btn.setAction_(b"onRemoveSnippet:")
@@ -177,7 +178,7 @@ class DictWindowController:
         # Save / Close buttons
         y -= 40
         save_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(350, 15, 90, 32))
-        save_btn.setTitle_("保存")
+        save_btn.setTitle_(t("dict_btn_save"))
         save_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         save_btn.setKeyEquivalent_("\r")
         save_btn.setTarget_(self._delegate)
@@ -185,7 +186,7 @@ class DictWindowController:
         content.addSubview_(save_btn)
 
         close_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(450, 15, 90, 32))
-        close_btn.setTitle_("关闭")
+        close_btn.setTitle_(t("dict_btn_close"))
         close_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         close_btn.setKeyEquivalent_("\x1b")
         close_btn.setTarget_(self._delegate)
@@ -221,7 +222,7 @@ class DictWindowController:
 
     def _update_word_list(self):
         if self._word_list_view:
-            text = "\n".join(f"  {w}" for w in self._words) if self._words else "  （无自定义词语）"
+            text = "\n".join(f"  {w}" for w in self._words) if self._words else f"  {t('dict_no_words')}"
             self._word_list_view.setString_(text)
 
     def _update_snippet_list(self):
@@ -232,7 +233,7 @@ class DictWindowController:
                 text = s.get("text", "")[:50]
                 desc = s.get("description", "")
                 lines.append(f"  [{i}] \"{trigger}\" -> {text}" + (f"  ({desc})" if desc else ""))
-            text = "\n".join(lines) if lines else "  （无快捷短语）"
+            text = "\n".join(lines) if lines else f"  {t('dict_no_snippets')}"
             self._snippet_list_view.setString_(text)
 
     def _add_word(self):

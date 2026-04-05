@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "streaming_preview": False,  # Show real-time transcription preview while recording
     "plugins_enabled": False,  # Enable plugin system
     "plugins_dir": "",  # Custom plugins directory (empty = use default ~/.speaktype/plugins/)
+    "ui_language": "zh",  # UI language: "zh" (Chinese) or "en" (English)
 }
 
 CONFIG_DIR = Path.home() / ".speaktype"
