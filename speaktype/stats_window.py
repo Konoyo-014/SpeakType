@@ -36,7 +36,7 @@ class StatsWindowController:
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, AppKit.NSBackingStoreBuffered, False
         )
-        self.window.setTitle_("SpeakType — Dictation Statistics")
+        self.window.setTitle_("SpeakType — 听写统计")
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -47,19 +47,19 @@ class StatsWindowController:
         y = 530
 
         # --- Overview Section ---
-        y = self._section(content, "Overview", y)
-        y = self._stat_row(content, "Total Dictations", str(stats["total_entries"]), y)
-        y = self._stat_row(content, "Total Words", f"{stats['total_words']:,}", y)
-        y = self._stat_row(content, "Total Duration", f"{stats['total_duration_min']:.1f} min", y)
+        y = self._section(content, "概览", y)
+        y = self._stat_row(content, "总听写次数", str(stats["total_entries"]), y)
+        y = self._stat_row(content, "总字数", f"{stats['total_words']:,}", y)
+        y = self._stat_row(content, "总时长", f"{stats['total_duration_min']:.1f} min", y)
 
         avg_words = round(stats["total_words"] / max(stats["total_entries"], 1), 1)
         avg_dur = round(stats["total_duration_min"] * 60 / max(stats["total_entries"], 1), 1)
-        y = self._stat_row(content, "Avg Words / Dictation", str(avg_words), y)
-        y = self._stat_row(content, "Avg Duration / Dictation", f"{avg_dur:.1f}s", y)
+        y = self._stat_row(content, "平均字数/次", str(avg_words), y)
+        y = self._stat_row(content, "平均时长/次", f"{avg_dur:.1f}s", y)
 
         # --- Activity Section ---
         y -= 10
-        y = self._section(content, "Activity (Last 7 Days)", y)
+        y = self._section(content, "活动（最近 7 天）", y)
         day_counts = self._count_by_day(entries, 7)
         for day_str, count in day_counts:
             bar = self._bar_str(count, max(c for _, c in day_counts) if day_counts else 1)
@@ -67,14 +67,14 @@ class StatsWindowController:
 
         # --- Top Apps Section ---
         y -= 10
-        y = self._section(content, "Top Apps", y)
+        y = self._section(content, "常用应用", y)
         app_counts = Counter(e.get("app", "Unknown") for e in entries if e.get("app"))
         for app_name, count in app_counts.most_common(5):
             y = self._stat_row(content, app_name, str(count), y)
 
         # --- Recent Dictations ---
         y -= 10
-        y = self._section(content, "Recent Dictations", y)
+        y = self._section(content, "最近听写", y)
         for entry in reversed(entries[-8:]):
             text = entry.get("polished", entry.get("raw", ""))[:60]
             ts = entry.get("timestamp", "")[:16].replace("T", " ")

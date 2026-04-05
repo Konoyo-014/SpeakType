@@ -8,6 +8,7 @@ transcript.txt
 *.aiff
 *.wav
 build/
+dist/
 *.egg-info/
 .pytest_cache/
 *.dmg

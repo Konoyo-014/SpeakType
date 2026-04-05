@@ -9,22 +9,22 @@ logger = logging.getLogger("speaktype.settings")
 
 # Hotkey options
 HOTKEY_OPTIONS = [
-    ("right_cmd", "Right \u2318 (Hold)"),
-    ("left_cmd", "Left \u2318 (Hold)"),
-    ("right_alt", "Right \u2325 (Hold)"),
-    ("right_ctrl", "Right \u2303 (Hold)"),
-    ("ctrl+shift+space", "\u2303\u21e7Space (Hold)"),
-    ("f5", "F5 (Hold)"),
-    ("f6", "F6 (Hold)"),
+    ("right_cmd", "右 \u2318（按住）"),
+    ("left_cmd", "左 \u2318（按住）"),
+    ("right_alt", "右 \u2325（按住）"),
+    ("right_ctrl", "右 \u2303（按住）"),
+    ("ctrl+shift+space", "\u2303\u21e7Space（按住）"),
+    ("f5", "F5（按住）"),
+    ("f6", "F6（按住）"),
 ]
 
 DICTATION_MODE_OPTIONS = [
-    ("push_to_talk", "Push-to-Talk (Hold key)"),
-    ("toggle", "Toggle (Press to start/stop)"),
+    ("push_to_talk", "按住说话"),
+    ("toggle", "按下开关"),
 ]
 
 LANGUAGE_OPTIONS = [
-    ("auto", "Auto Detect"),
+    ("auto", "自动检测"),
     ("en", "English"),
     ("zh", "\u4e2d\u6587 (Chinese)"),
     ("ja", "\u65e5\u672c\u8a9e (Japanese)"),
@@ -114,7 +114,7 @@ class SettingsWindowController:
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, AppKit.NSBackingStoreBuffered, False
         )
-        self.window.setTitle_("SpeakType Settings")
+        self.window.setTitle_("SpeakType 偏好设置")
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -123,54 +123,53 @@ class SettingsWindowController:
         y = 700
 
         # --- General Section ---
-        y = self._add_section_header(content, "General", y)
-        y = self._add_popup(content, "Hotkey:", "hotkey", HOTKEY_OPTIONS, y)
-        y = self._add_popup(content, "Dictation Mode:", "dictation_mode", DICTATION_MODE_OPTIONS, y)
-        y = self._add_popup(content, "Language:", "language", LANGUAGE_OPTIONS, y)
-        y = self._add_popup(content, "Insert Method:", "insert_method",
-                            [("paste", "Paste (Cmd+V) \u2014 Fast"), ("type", "Keystroke \u2014 Compatible")], y)
+        y = self._add_section_header(content, "通用", y)
+        y = self._add_popup(content, "快捷键：", "hotkey", HOTKEY_OPTIONS, y)
+        y = self._add_popup(content, "听写模式：", "dictation_mode", DICTATION_MODE_OPTIONS, y)
+        y = self._add_popup(content, "语言：", "language", LANGUAGE_OPTIONS, y)
+        y = self._add_popup(content, "输入方式：", "insert_method",
+                            [("paste", "粘贴 (\u2318V) \u2014 快速"), ("type", "逐字输入 \u2014 兼容")], y)
 
         # Audio device
         from .devices import list_input_devices
-        device_options = [("", "System Default")]
+        device_options = [("", "系统默认")]
         for dev in list_input_devices():
             device_options.append((dev["name"], dev["name"]))
-        y = self._add_popup(content, "Audio Device:", "audio_device", device_options, y)
+        y = self._add_popup(content, "音频设备：", "audio_device", device_options, y)
 
         y -= 10
 
         # --- AI Models Section ---
-        y = self._add_section_header(content, "AI Models", y)
-        y = self._add_popup(content, "ASR Backend:", "asr_backend", ASR_BACKEND_OPTIONS, y)
-        y = self._add_popup(content, "Qwen ASR Model:", "asr_model", ASR_MODEL_OPTIONS, y)
-        y = self._add_popup(content, "Whisper Model:", "whisper_model", WHISPER_MODEL_OPTIONS, y)
-        y = self._add_popup(content, "LLM Model:", "llm_model", LLM_MODEL_OPTIONS, y)
-        y = self._add_text_field(content, "Ollama URL:", "ollama_url", y)
+        y = self._add_section_header(content, "AI 模型", y)
+        y = self._add_popup(content, "语音识别后端：", "asr_backend", ASR_BACKEND_OPTIONS, y)
+        y = self._add_popup(content, "Qwen ASR 模型：", "asr_model", ASR_MODEL_OPTIONS, y)
+        y = self._add_popup(content, "Whisper 模型：", "whisper_model", WHISPER_MODEL_OPTIONS, y)
+        y = self._add_popup(content, "大语言模型：", "llm_model", LLM_MODEL_OPTIONS, y)
+        y = self._add_text_field(content, "Ollama 地址：", "ollama_url", y)
 
         y -= 10
 
         # --- Features Section ---
-        y = self._add_section_header(content, "Features", y)
-        y = self._add_checkbox(content, "Enable Text Polishing (LLM)", "polish_enabled", y)
-        y = self._add_checkbox(content, "Enable Voice Commands", "voice_commands_enabled", y)
-        y = self._add_checkbox(content, "Context-Aware Tone", "context_aware_tone", y)
-        y = self._add_checkbox(content, "Sound Feedback", "sound_feedback", y)
-        y = self._add_checkbox(content, "Save Dictation History", "history_enabled", y)
-        y = self._add_checkbox(content, "Streaming Preview (real-time transcription)", "streaming_preview", y)
-        y = self._add_checkbox(content, "Translate After Transcription", "translate_enabled", y)
-        y = self._add_popup(content, "Translate To:", "translate_target", TRANSLATE_LANG_OPTIONS, y)
+        y = self._add_section_header(content, "功能", y)
+        y = self._add_checkbox(content, "启用文本润色 (LLM)", "polish_enabled", y)
+        y = self._add_checkbox(content, "启用语音指令", "voice_commands_enabled", y)
+        y = self._add_checkbox(content, "智能语气", "context_aware_tone", y)
+        y = self._add_checkbox(content, "声音反馈", "sound_feedback", y)
+        y = self._add_checkbox(content, "保存听写历史", "history_enabled", y)
+        y = self._add_checkbox(content, "转写后翻译", "translate_enabled", y)
+        y = self._add_popup(content, "翻译目标语言：", "translate_target", TRANSLATE_LANG_OPTIONS, y)
 
         y -= 10
 
         # --- Plugins Section ---
-        y = self._add_section_header(content, "Plugins", y)
-        y = self._add_checkbox(content, "Enable Plugin System", "plugins_enabled", y)
+        y = self._add_section_header(content, "插件", y)
+        y = self._add_checkbox(content, "启用插件系统", "plugins_enabled", y)
 
         y -= 10
 
         # --- System Section ---
-        y = self._add_section_header(content, "System", y)
-        y = self._add_checkbox(content, "Start at Login", "auto_start", y)
+        y = self._add_section_header(content, "系统", y)
+        y = self._add_checkbox(content, "登录时启动", "auto_start", y)
 
         y -= 20
 
@@ -180,7 +179,7 @@ class SettingsWindowController:
         )
 
         save_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(310, 15, 90, 32))
-        save_btn.setTitle_("Save")
+        save_btn.setTitle_("保存")
         save_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         save_btn.setKeyEquivalent_("\r")
         save_btn.setTarget_(self._delegate)
@@ -188,7 +187,7 @@ class SettingsWindowController:
         content.addSubview_(save_btn)
 
         cancel_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(410, 15, 90, 32))
-        cancel_btn.setTitle_("Cancel")
+        cancel_btn.setTitle_("取消")
         cancel_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         cancel_btn.setKeyEquivalent_("\x1b")
         cancel_btn.setTarget_(self._delegate)
