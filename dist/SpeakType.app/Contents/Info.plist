@@ -14,6 +14,8 @@
     <string>2.0</string>
     <key>CFBundleExecutable</key>
     <string>SpeakType</string>
+    <key>CFBundleIconFile</key>
+    <string>SpeakType</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>

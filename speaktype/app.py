@@ -9,7 +9,7 @@ import subprocess
 import rumps
 import AppKit
 
-from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR
+from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR, ensure_config_dir
 from .audio import AudioRecorder
 from .asr import ASREngine
 from .polish import PolishEngine
@@ -502,45 +502,45 @@ def _run_on_main(fn):
 
 
 def _check_permissions():
-    """Check and prompt for required macOS permissions."""
-    issues = []
-
-    # Check microphone
+    """Check and prompt for required macOS permissions (non-blocking)."""
     try:
-        import sounddevice as sd
-        with sd.InputStream(samplerate=16000, channels=1, dtype="float32", blocksize=1600):
-            pass
-    except Exception:
-        issues.append("Microphone")
+        issues = []
 
-    # Check accessibility
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to return name of first process whose frontmost is true'],
-            capture_output=True, text=True, timeout=3
-        )
-        if result.returncode != 0:
+        # Check accessibility only (mic check can crash on some systems)
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'tell application "System Events" to return name of first process whose frontmost is true'],
+                capture_output=True, text=True, timeout=3
+            )
+            if result.returncode != 0:
+                issues.append("Accessibility")
+        except Exception:
             issues.append("Accessibility")
-    except Exception:
-        issues.append("Accessibility")
 
-    if issues:
-        missing = " and ".join(issues)
-        print(f"\n⚠️  Missing permissions: {missing}")
-        print(f"   Go to: System Settings → Privacy & Security → {missing}")
-        print(f"   Add your terminal app to the allowed list, then restart SpeakType.\n")
-        subprocess.run([
-            "osascript", "-e",
-            f'display notification "Grant {missing} access in System Settings → Privacy & Security" with title "SpeakType Permissions Needed"'
-        ], capture_output=True)
-        subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy"], capture_output=True)
+        if issues:
+            missing = " and ".join(issues)
+            logger.warning(f"Missing permissions: {missing}")
+            subprocess.run([
+                "osascript", "-e",
+                f'display notification "Grant {missing} access in System Settings → Privacy & Security" with title "SpeakType Permissions Needed"'
+            ], capture_output=True)
+    except Exception as e:
+        logger.warning(f"Permission check failed: {e}")
 
 
 def run():
+    # Log to both stderr and file
+    log_file = CONFIG_DIR / "speaktype.log"
+    ensure_config_dir()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(str(log_file), mode="w"),
+        ],
+        force=True,
     )
 
     _check_permissions()
