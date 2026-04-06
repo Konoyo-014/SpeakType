@@ -11,7 +11,14 @@ import AppKit
 import objc
 from Foundation import NSObject
 
-from .config import load_config, save_config, load_custom_dictionary, CONFIG_DIR, ensure_config_dir
+from .config import (
+    load_config,
+    save_config,
+    load_custom_dictionary,
+    CONFIG_DIR,
+    CONFIG_FILE,
+    ensure_config_dir,
+)
 from . import __version__
 from .i18n import t, set_language, get_language
 from .audio import AudioRecorder
@@ -28,7 +35,12 @@ from .devices import list_input_devices, validate_device
 from .plugins import PluginManager
 from .streaming import StreamingPreviewWindow, StreamingTranscriber
 from .applescript import run_osascript
-from .permissions import get_permission_status, request_missing_permissions
+from .permissions import (
+    get_permission_status,
+    request_missing_permissions,
+    refresh_permissions_for_update,
+)
+from .runtime import BUNDLE_IDENTIFIER, get_running_bundle_path
 
 logger = logging.getLogger("speaktype")
 
@@ -898,6 +910,49 @@ def _check_permissions():
         logger.warning(f"Permission check failed: {e}")
 
 
+def _refresh_permissions_after_version_update(config: dict):
+    """Force a permission re-request once per bundled app version update."""
+    current_version = __version__
+    previous_version = str(config.get("last_seen_version") or "")
+    running_bundle = get_running_bundle_path()
+    existing_config = CONFIG_FILE.exists()
+
+    if not previous_version:
+        config["last_seen_version"] = current_version
+        save_config(config)
+        if running_bundle and existing_config:
+            logger.info(
+                "Existing config has no version marker; forcing one-time permission refresh for %s",
+                current_version,
+            )
+            refresh_permissions_for_update(BUNDLE_IDENTIFIER)
+            return
+        logger.info("Recording current version for permission refresh tracking: %s", current_version)
+        return
+
+    if previous_version == current_version:
+        return
+
+    config["last_seen_version"] = current_version
+    save_config(config)
+
+    if not running_bundle:
+        logger.info(
+            "Detected version change outside bundled app (%s -> %s); skipping permission reset",
+            previous_version,
+            current_version,
+        )
+        return
+
+    logger.info(
+        "Detected bundled app update %s -> %s; resetting permissions for %s",
+        previous_version,
+        current_version,
+        BUNDLE_IDENTIFIER,
+    )
+    refresh_permissions_for_update(BUNDLE_IDENTIFIER)
+
+
 def run():
     # Ensure UTF-8 I/O when launched from py2app (Finder sets ASCII encoding)
     import io
@@ -919,6 +974,8 @@ def run():
         force=True,
     )
 
+    config = load_config()
+    _refresh_permissions_after_version_update(config)
     _check_permissions()
 
     logger.info("Starting SpeakType v%s...", __version__)

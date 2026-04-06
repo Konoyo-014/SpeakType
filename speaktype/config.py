@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "plugins_dir": "",  # Custom plugins directory (empty = use default ~/.speaktype/plugins/)
     "ui_language": "zh",  # UI language: "zh" (Chinese) or "en" (English)
     "setup_completed": False,  # True after first-launch wizard is completed
+    "last_seen_version": "",  # Last app version that completed startup
 }
 
 CONFIG_DIR = Path.home() / ".speaktype"

@@ -1,5 +1,7 @@
 """Tests for macOS permission helpers."""
 
+from types import SimpleNamespace
+
 from speaktype import permissions
 
 
@@ -46,4 +48,45 @@ def test_request_missing_permissions_only_requests_missing(monkeypatch):
     assert calls == [
         ("ax", {permissions.kAXTrustedCheckOptionPrompt: True}),
         ("post", None),
+    ]
+
+
+def test_reset_permissions_resets_all_supported_services(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        permissions.subprocess,
+        "run",
+        lambda cmd, capture_output, text: calls.append((cmd, capture_output, text))
+        or SimpleNamespace(returncode=0, stderr=""),
+    )
+
+    permissions.reset_permissions("com.speaktype.app")
+
+    assert calls == [
+        (["tccutil", "reset", "Accessibility", "com.speaktype.app"], True, True),
+        (["tccutil", "reset", "ListenEvent", "com.speaktype.app"], True, True),
+        (["tccutil", "reset", "PostEvent", "com.speaktype.app"], True, True),
+    ]
+
+
+def test_refresh_permissions_for_update_forces_clean_reprompt(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        permissions,
+        "reset_permissions",
+        lambda bundle_id: calls.append(("reset", bundle_id)),
+    )
+    monkeypatch.setattr(
+        permissions,
+        "request_missing_permissions",
+        lambda status=None: calls.append(("request", status)),
+    )
+
+    permissions.refresh_permissions_for_update("com.speaktype.app")
+
+    assert calls == [
+        ("reset", "com.speaktype.app"),
+        ("request", permissions.PermissionStatus(False, False, False)),
     ]

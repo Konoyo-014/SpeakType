@@ -17,6 +17,7 @@ class TestDefaultConfig:
             "voice_commands_enabled", "insert_method",
             "dictation_mode", "asr_backend", "whisper_model",
             "audio_device", "streaming_preview", "plugins_enabled",
+            "last_seen_version",
         ]
         for key in required:
             assert key in DEFAULT_CONFIG, f"Missing config key: {key}"
@@ -29,6 +30,7 @@ class TestDefaultConfig:
         assert DEFAULT_CONFIG["audio_device"] is None
         assert DEFAULT_CONFIG["streaming_preview"] is False
         assert DEFAULT_CONFIG["plugins_enabled"] is False
+        assert DEFAULT_CONFIG["last_seen_version"] == ""
 
 
 class TestLoadSaveConfig:
