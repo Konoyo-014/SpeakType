@@ -25,6 +25,25 @@ def get_running_bundle_path() -> str:
     return ""
 
 
+def get_runtime_version(default_version: str) -> str:
+    """Return the bundled build version when available, else the package version."""
+    bundle_path = get_running_bundle_path()
+    if not bundle_path:
+        return default_version
+
+    try:
+        import AppKit
+
+        bundle = AppKit.NSBundle.mainBundle()
+        if not bundle:
+            return default_version
+        info = bundle.infoDictionary() or {}
+        build_version = str(info.get("CFBundleVersion") or "").strip()
+        return build_version or default_version
+    except Exception:
+        return default_version
+
+
 def get_launch_program_args(module_file: str, bundle_path: str | None = None) -> tuple[list[str], str]:
     """Resolve the correct LaunchAgent command for source or bundled runs."""
     active_bundle = bundle_path if bundle_path is not None else get_running_bundle_path()

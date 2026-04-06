@@ -59,10 +59,7 @@ if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
 fi
 
 # Pull LLM model
-LLM_MODEL="qwen3.5:4b"
-if [ "$1" = "--pro" ]; then
-    LLM_MODEL="qwen3.5:9b"
-fi
+LLM_MODEL="huihui_ai/qwen3.5-abliterated:9b-Claude"
 echo "  Pulling $LLM_MODEL..."
 if $OLLAMA_BIN list 2>/dev/null | grep -q "$LLM_MODEL"; then
     echo "  ✓ LLM model ready"
@@ -97,12 +94,11 @@ echo "║  REQUIRED macOS permissions:                     ║"
 echo "║  System Settings → Privacy & Security →          ║"
 echo "║    ✓ Microphone   (for Terminal/iTerm)           ║"
 echo "║    ✓ Accessibility (for Terminal/iTerm)          ║"
+echo "║    ✓ Input Monitoring (for Terminal/iTerm)       ║"
 echo "║                                                  ║"
 echo "║  To start:  ./start.sh                           ║"
 echo "║  To test:   ./start.sh --test                    ║"
 echo "║                                                  ║"
 echo "║  Push-to-talk: Hold Right ⌘ key, speak, release  ║"
-echo "║                                                  ║"
-echo "║  Upgrade LLM: ./setup.sh --pro  (uses 9B model)  ║"
 echo "║                                                  ║"
 echo "╚══════════════════════════════════════════════════╝"

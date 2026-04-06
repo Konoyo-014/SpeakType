@@ -10,6 +10,12 @@ if [ ! -f "venv/bin/activate" ]; then
 fi
 source venv/bin/activate
 
+VERSION="$(./venv/bin/python - <<'PY'
+from speaktype import __version__
+print(__version__)
+PY
+)"
+
 # Ensure Ollama is running
 OLLAMA_BIN="/opt/homebrew/opt/ollama/bin/ollama"
 [ ! -f "$OLLAMA_BIN" ] && OLLAMA_BIN="ollama"
@@ -21,7 +27,7 @@ if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
 fi
 
 echo "╔═══════════════════════════════════════╗"
-echo "║  SpeakType v2.0                       ║"
+echo "║  SpeakType v${VERSION}                    ║"
 echo "║  Push-to-talk: Hold Right ⌘           ║"
 echo "║  Preferences: Click menubar icon → ⌘, ║"
 echo "╚═══════════════════════════════════════╝"

@@ -4,6 +4,7 @@
 # Usage:
 #   ./build_dmg.sh          # Build .app + .dmg
 #   ./build_dmg.sh --app    # Build .app only (skip DMG)
+#   SPEAKTYPE_BUILD_VERSION=2.0.1d1 ./build_dmg.sh --app  # Build a uniquely versioned debug app
 #
 # Prerequisites:
 #   - Python 3.10 virtual environment at ./venv
@@ -16,13 +17,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="SpeakType"
-VERSION="2.0.1"
-DMG_NAME="${APP_NAME}-${VERSION}"
+BASE_VERSION="$(awk -F'"' '/__version__ =/ {print $2}' speaktype/__init__.py)"
+BUILD_VERSION="${SPEAKTYPE_BUILD_VERSION:-$BASE_VERSION}"
+DMG_NAME="${APP_NAME}-${BUILD_VERSION}"
 DIST_DIR="dist"
 APP_PATH="${DIST_DIR}/${APP_NAME}.app"
 SIGNING_IDENTITY_COUNT="$(security find-identity -v -p codesigning 2>/dev/null | awk '/valid identities found/{print $1}')"
 
-echo "=== Building ${APP_NAME} v${VERSION} ==="
+echo "=== Building ${APP_NAME} v${BUILD_VERSION} ==="
 
 if [ "${SIGNING_IDENTITY_COUNT:-0}" = "0" ]; then
     echo "WARNING: No local code signing identity found."
@@ -46,7 +48,7 @@ mkdir -p "${DIST_DIR}"
 
 # --- Step 3: Build standalone .app with py2app ---
 echo "[3/5] Building standalone ${APP_NAME}.app with py2app..."
-python3 setup.py py2app 2>&1 | tail -5
+SPEAKTYPE_BUILD_VERSION="${BUILD_VERSION}" python3 setup.py py2app 2>&1 | tail -5
 
 # site.py circular import fix is handled automatically by setup.py's atexit hook
 

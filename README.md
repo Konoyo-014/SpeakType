@@ -66,8 +66,9 @@ python main.py
 On first launch, macOS will prompt for:
 - **Microphone access** -- for voice recording
 - **Accessibility access** -- for text insertion via keyboard simulation
+- **Input Monitoring** -- for the global push-to-talk hotkey
 
-Grant both in **System Settings > Privacy & Security**.
+Grant all three in **System Settings > Privacy & Security**. If you are running from source, macOS may ask you to authorize Terminal, iTerm, or your IDE instead of SpeakType.app.
 
 ### About the ASR model
 
@@ -89,11 +90,10 @@ echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.zshrc
 ### Build .app Bundle (optional)
 
 ```bash
-source venv/bin/activate
-python setup.py py2app --alias
+./build_dmg.sh --app
 ```
 
-The app bundle is created at `dist/SpeakType.app`.
+The standalone app bundle is created at `dist/SpeakType.app`.
 
 ## Usage
 
@@ -233,7 +233,7 @@ All processing runs locally on-device. Audio files are deleted immediately after
 
 ### SpeakType does not appear in the menubar
 
-Make sure you granted Accessibility access. Go to **System Settings > Privacy & Security > Accessibility** and add SpeakType (or Terminal / your IDE if running from source).
+Make sure you granted both **Accessibility** and **Input Monitoring**. Go to **System Settings > Privacy & Security** and allow SpeakType (or Terminal / your IDE if running from source) in both sections.
 
 ### Microphone not working
 
@@ -273,7 +273,7 @@ python main.py --test
 python -m pytest tests/ -v
 
 # Build .app bundle
-python setup.py py2app --alias
+./build_dmg.sh --app
 ```
 
 ## Contributing

@@ -40,9 +40,10 @@ from .permissions import (
     request_missing_permissions,
     refresh_permissions_for_update,
 )
-from .runtime import BUNDLE_IDENTIFIER, get_running_bundle_path
+from .runtime import BUNDLE_IDENTIFIER, get_running_bundle_path, get_runtime_version
 
 logger = logging.getLogger("speaktype")
+APP_VERSION = get_runtime_version(__version__)
 
 # Status icons
 ICON_IDLE = "\U0001f399"      # 🎙
@@ -199,7 +200,7 @@ class SpeakTypeApp(rumps.App):
         self._quit_item = rumps.MenuItem(t("menu_quit"), callback=self._quit, key="q")
 
         self.menu = [
-            rumps.MenuItem(f"SpeakType v{__version__}"),
+            rumps.MenuItem(f"SpeakType v{APP_VERSION}"),
             None,
             self._hotkey_item,
             self._status_item,
@@ -833,13 +834,13 @@ class SpeakTypeApp(rumps.App):
         rumps.notification(
             "SpeakType",
             t("notif_up_to_date_title"),
-            t("notif_up_to_date_body", version=__version__),
+            t("notif_up_to_date_body", version=APP_VERSION),
         )
 
     def _show_about(self, _):
         rumps.notification(
             t("menu_about"),
-            t("notif_about_subtitle", version=__version__),
+            t("notif_about_subtitle", version=APP_VERSION),
             f"Backend: {self.asr.get_backend_info()}\n"
             "\u00a9 2025 SpeakType"
         )
@@ -912,7 +913,7 @@ def _check_permissions():
 
 def _refresh_permissions_after_version_update(config: dict):
     """Force a permission re-request once per bundled app version update."""
-    current_version = __version__
+    current_version = APP_VERSION
     previous_version = str(config.get("last_seen_version") or "")
     running_bundle = get_running_bundle_path()
     existing_config = CONFIG_FILE.exists()
@@ -978,6 +979,6 @@ def run():
     _refresh_permissions_after_version_update(config)
     _check_permissions()
 
-    logger.info("Starting SpeakType v%s...", __version__)
+    logger.info("Starting SpeakType v%s...", APP_VERSION)
     app = SpeakTypeApp()
     app.run()

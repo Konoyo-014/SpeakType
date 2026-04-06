@@ -66,8 +66,9 @@ python main.py
 首次启动时，macOS 会请求以下权限：
 - **麦克风权限** -- 用于语音录制
 - **辅助功能权限** -- 用于通过键盘模拟插入文字
+- **输入监控权限** -- 用于监听全局按键热键
 
-请在 **系统设置 > 隐私与安全性** 中授予这两项权限。
+请在 **系统设置 > 隐私与安全性** 中授予这三项权限。如果你是从源码运行，macOS 可能要求你给终端、iTerm 或 IDE 授权，而不是 SpeakType.app。
 
 ### 关于 ASR 模型
 
@@ -97,11 +98,10 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 ### 构建 .app 包（可选）
 
 ```bash
-source venv/bin/activate
-python setup.py py2app --alias
+./build_dmg.sh --app
 ```
 
-应用包将创建在 `dist/SpeakType.app`。
+独立的应用包将创建在 `dist/SpeakType.app`。
 
 ## 使用方法
 
@@ -239,7 +239,7 @@ def post_transcribe(text):
 
 ### SpeakType 没有出现在菜单栏
 
-请确保已授予辅助功能权限。前往 **系统设置 > 隐私与安全性 > 辅助功能**，添加 SpeakType（如果从源码运行，则添加终端 / 你的 IDE）。
+请确保已经授予 **辅助功能** 和 **输入监控**。前往 **系统设置 > 隐私与安全性**，在这两个分区里允许 SpeakType；如果从源码运行，则允许终端、iTerm 或你的 IDE。
 
 ### 麦克风无法工作
 
@@ -279,7 +279,7 @@ python main.py --test
 python -m pytest tests/ -v
 
 # 构建 .app 包
-python setup.py py2app --alias
+./build_dmg.sh --app
 ```
 
 ## 贡献

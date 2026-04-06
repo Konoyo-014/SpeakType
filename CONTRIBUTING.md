@@ -36,11 +36,14 @@ cd speaktype
 ### Building the App
 
 ```bash
-# Build .app bundle (alias mode for development)
-./venv/bin/python3 setup.py py2app --alias
+# Build a standalone .app bundle
+./build_dmg.sh --app
 
 # Build DMG installer
 ./build_dmg.sh
+
+# Build a uniquely versioned debug bundle
+SPEAKTYPE_BUILD_VERSION=2.0.1d1 ./build_dmg.sh --app
 ```
 
 ## Project Structure

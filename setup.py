@@ -2,9 +2,27 @@
 
 import atexit
 import importlib.util
+import os
 from pathlib import Path
+import re
 import shutil
 from setuptools import setup
+
+
+def _read_base_version() -> str:
+    namespace = {}
+    exec(Path("speaktype/__init__.py").read_text(encoding="utf-8"), namespace)
+    return namespace["__version__"]
+
+
+BASE_VERSION = _read_base_version()
+BUILD_VERSION = os.environ.get("SPEAKTYPE_BUILD_VERSION", BASE_VERSION)
+
+if not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:d|a|b|fc)\d+)?", BUILD_VERSION):
+    raise SystemExit(
+        "Invalid SPEAKTYPE_BUILD_VERSION. Use a macOS-friendly build string such as "
+        "'2.0.1', '2.0.1d1', or '2.0.1b3'."
+    )
 
 
 def _patch_site_py():
@@ -117,8 +135,8 @@ OPTIONS = {
         "CFBundleName": "SpeakType",
         "CFBundleDisplayName": "SpeakType",
         "CFBundleIdentifier": "com.speaktype.app",
-        "CFBundleVersion": "2.0.1",
-        "CFBundleShortVersionString": "2.0.1",
+        "CFBundleVersion": BUILD_VERSION,
+        "CFBundleShortVersionString": BASE_VERSION,
         "LSUIElement": False,  # Must be False for NSStatusItem to show in menubar
         "NSMicrophoneUsageDescription": "SpeakType needs microphone access for voice dictation.",
         "NSAppleEventsUsageDescription": "SpeakType needs accessibility access to detect the active application and insert text.",
@@ -133,6 +151,7 @@ OPTIONS = {
 
 setup(
     name="SpeakType",
+    version=BASE_VERSION,
     app=APP,
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
