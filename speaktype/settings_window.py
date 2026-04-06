@@ -1,10 +1,12 @@
 """Native macOS Settings window using PyObjC."""
 
 import logging
+from pathlib import Path
 import AppKit
 import objc
 from Foundation import NSObject, NSMakeRect
 from .i18n import t
+from .runtime import get_launch_program_args
 
 logger = logging.getLogger("speaktype.settings")
 
@@ -310,24 +312,12 @@ class SettingsWindowController:
 
 def _set_auto_start(enabled: bool):
     """Enable/disable auto-start at login via LaunchAgent."""
-    import os
-    from pathlib import Path
-
     launch_agents_dir = Path.home() / "Library" / "LaunchAgents"
     plist_path = launch_agents_dir / "com.speaktype.app.plist"
 
     if enabled:
         launch_agents_dir.mkdir(parents=True, exist_ok=True)
-        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        python_path = os.path.join(project_dir, "venv", "bin", "python3")
-        main_path = os.path.join(project_dir, "main.py")
-
-        app_path = os.path.join(project_dir, "dist", "SpeakType.app")
-        if os.path.exists(app_path):
-            program_args = ["open", app_path]
-        else:
-            program_args = [python_path, main_path]
-
+        program_args, working_dir = get_launch_program_args(__file__)
         args_xml = "\n        ".join(f"<string>{arg}</string>" for arg in program_args)
         plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -344,11 +334,10 @@ def _set_auto_start(enabled: bool):
     <key>KeepAlive</key>
     <false/>
     <key>WorkingDirectory</key>
-    <string>{project_dir}</string>
+    <string>{working_dir}</string>
 </dict>
 </plist>"""
-        with open(plist_path, "w") as f:
-            f.write(plist_content)
+        plist_path.write_text(plist_content, encoding="utf-8")
         logger.info(f"Auto-start enabled: {plist_path}")
     else:
         if plist_path.exists():

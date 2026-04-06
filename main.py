@@ -7,6 +7,22 @@ Usage:
 """
 
 import sys
+from pathlib import Path
+
+
+def _prefer_unzipped_bundle_packages():
+    """Prefer filesystem packages over python310.zip inside bundled apps."""
+    resources_dir = Path(__file__).resolve().parent
+    bundle_lib = resources_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    if not bundle_lib.exists():
+        return
+    bundle_lib_str = str(bundle_lib)
+    if bundle_lib_str in sys.path:
+        sys.path.remove(bundle_lib_str)
+    sys.path.insert(0, bundle_lib_str)
+
+
+_prefer_unzipped_bundle_packages()
 
 def main():
     if "--test" in sys.argv:

@@ -49,6 +49,7 @@ class PluginManager:
 
     def load_all(self):
         """Discover and load all plugins from the plugins directory."""
+        self.clear()
         ensure_config_dir()
         self._plugins_dir.mkdir(parents=True, exist_ok=True)
 
@@ -76,6 +77,15 @@ class PluginManager:
         names = [p.name for p in self._plugins if p.enabled]
         if names:
             logger.info(f"Loaded {len(names)} plugin(s): {', '.join(names)}")
+
+    def clear(self):
+        """Unload all plugins and clear registered hooks."""
+        self._plugins = []
+        self._hooks = {h: [] for h in HOOK_POINTS}
+
+    def reload_all(self):
+        """Reload plugins from disk, rebuilding the hook chain."""
+        self.load_all()
 
     def _load_plugin(self, path: Path):
         """Load a single plugin from a .py file."""

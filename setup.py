@@ -1,7 +1,9 @@
 """py2app setup for building SpeakType.app bundle."""
 
 import atexit
+import importlib.util
 from pathlib import Path
+import shutil
 from setuptools import setup
 
 
@@ -32,7 +34,78 @@ def _patch_site_py():
     print("*** patched site.py: moved PREFIXES before sitecustomize import ***")
 
 
+def _copy_runtime_support():
+    """Copy binary-backed packages out of the zip archive for bundled imports."""
+    dest_root = Path("dist/SpeakType.app/Contents/Resources/lib/python3.10")
+    if not dest_root.exists():
+        return
+
+    lib_dynload_root = dest_root / "lib-dynload"
+    site_packages_root = None
+    skip_dynload_packages = {
+        "AppKit",
+        "CoreFoundation",
+        "CoreText",
+        "Foundation",
+        "HIServices",
+        "Quartz",
+        "objc",
+    }
+    dynload_packages = []
+    if lib_dynload_root.exists():
+        dynload_packages = sorted(
+            path.name
+            for path in lib_dynload_root.iterdir()
+            if path.is_dir() and path.name not in skip_dynload_packages
+        )
+
+    for module_name in (
+        "sounddevice",
+        "_sounddevice_data",
+        *dynload_packages,
+    ):
+        spec = importlib.util.find_spec(module_name)
+        if spec is None:
+            continue
+
+        if spec.submodule_search_locations:
+            src = Path(next(iter(spec.submodule_search_locations))).resolve()
+            if site_packages_root is None:
+                site_packages_root = src.parent
+            dest = dest_root / src.name
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+
+            if module_name == "mlx" and not (dest / "__init__.py").exists():
+                (dest / "__init__.py").write_text(
+                    "# Force bundled MLX imports to resolve from lib/python3.10.\n",
+                    encoding="utf-8",
+                )
+
+            shim_dir = lib_dynload_root / module_name
+            if shim_dir.exists():
+                for shim in shim_dir.iterdir():
+                    if shim.is_file():
+                        shutil.copy2(shim, dest / shim.name)
+        elif spec.origin:
+            src = Path(spec.origin).resolve()
+            if site_packages_root is None:
+                site_packages_root = src.parent
+            shutil.copy2(src, dest_root / src.name)
+
+    if site_packages_root is not None:
+        for helper in site_packages_root.glob("*__mypyc*.so"):
+            shutil.copy2(helper, dest_root / helper.name)
+        for ext in site_packages_root.iterdir():
+            if ext.is_file() and ext.suffix in {".so", ".dylib"}:
+                shutil.copy2(ext, dest_root / ext.name)
+
+    print("*** copied binary-backed runtime packages into lib/python3.10 ***")
+
+
 atexit.register(_patch_site_py)
+atexit.register(_copy_runtime_support)
 
 APP = ["main.py"]
 DATA_FILES = []

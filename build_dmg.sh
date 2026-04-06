@@ -20,8 +20,15 @@ VERSION="2.0.1"
 DMG_NAME="${APP_NAME}-${VERSION}"
 DIST_DIR="dist"
 APP_PATH="${DIST_DIR}/${APP_NAME}.app"
+SIGNING_IDENTITY_COUNT="$(security find-identity -v -p codesigning 2>/dev/null | awk '/valid identities found/{print $1}')"
 
 echo "=== Building ${APP_NAME} v${VERSION} ==="
+
+if [ "${SIGNING_IDENTITY_COUNT:-0}" = "0" ]; then
+    echo "WARNING: No local code signing identity found."
+    echo "         py2app will produce an ad-hoc signed app, and macOS may require"
+    echo "         re-granting Accessibility/Input Monitoring after rebuilding."
+fi
 
 # --- Step 1: Activate venv ---
 if [ -f "./venv/bin/activate" ]; then
@@ -37,9 +44,9 @@ echo "[2/5] Cleaning previous build..."
 rm -rf build/ "${DIST_DIR}/"
 mkdir -p "${DIST_DIR}"
 
-# --- Step 3: Build .app with py2app ---
-echo "[3/5] Building ${APP_NAME}.app with py2app..."
-python3 setup.py py2app --alias 2>&1 | tail -5
+# --- Step 3: Build standalone .app with py2app ---
+echo "[3/5] Building standalone ${APP_NAME}.app with py2app..."
+python3 setup.py py2app 2>&1 | tail -5
 
 # site.py circular import fix is handled automatically by setup.py's atexit hook
 
@@ -53,10 +60,15 @@ fi
 # --- Step 4: Create DMG ---
 echo "[4/5] Creating DMG installer..."
 
+STAGING_DIR=$(mktemp -d)
+trap 'rm -rf "${STAGING_DIR}"' EXIT
+ditto "${APP_PATH}" "${STAGING_DIR}/${APP_NAME}.app"
+ln -s /Applications "${STAGING_DIR}/Applications"
+
 if command -v create-dmg &>/dev/null; then
     create-dmg \
         --volname "${APP_NAME}" \
-        --volicon "resources/icon.icns" \
+        --volicon "resources/SpeakType.icns" \
         --window-pos 200 120 \
         --window-size 600 400 \
         --icon-size 100 \
@@ -65,22 +77,19 @@ if command -v create-dmg &>/dev/null; then
         --app-drop-link 425 190 \
         --no-internet-enable \
         "${DIST_DIR}/${DMG_NAME}.dmg" \
-        "${APP_PATH}" \
+        "${STAGING_DIR}" \
         2>&1 | tail -3
 else
     # Fallback: use hdiutil directly
     echo "  create-dmg not found, using hdiutil fallback..."
-    STAGING_DIR=$(mktemp -d)
-    cp -R "${APP_PATH}" "${STAGING_DIR}/"
-    ln -s /Applications "${STAGING_DIR}/Applications"
-
     hdiutil create -volname "${APP_NAME}" \
         -srcfolder "${STAGING_DIR}" \
         -ov -format UDZO \
         "${DIST_DIR}/${DMG_NAME}.dmg"
-
-    rm -rf "${STAGING_DIR}"
 fi
+
+rm -rf "${STAGING_DIR}"
+trap - EXIT
 
 echo "  Created: ${DIST_DIR}/${DMG_NAME}.dmg"
 

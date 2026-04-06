@@ -27,6 +27,8 @@ from .snippets import SnippetLibrary
 from .devices import list_input_devices, validate_device
 from .plugins import PluginManager
 from .streaming import StreamingPreviewWindow, StreamingTranscriber
+from .applescript import run_osascript
+from .permissions import get_permission_status, request_missing_permissions
 
 logger = logging.getLogger("speaktype")
 
@@ -394,7 +396,7 @@ class SpeakTypeApp(rumps.App):
             # Load plugins
             if self.config.get("plugins_enabled", False):
                 try:
-                    self._plugin_manager.load_all()
+                    self._plugin_manager.reload_all()
                 except Exception as e:
                     logger.warning(f"Plugin loading failed: {e}")
 
@@ -570,6 +572,7 @@ class SpeakTypeApp(rumps.App):
                     snippet_text,
                     method=self.config["insert_method"],
                     app_name=app_info.get("name", ""),
+                    bundle_id=app_info.get("bundle_id", ""),
                 )
                 self._streaming_preview.hide(delay=0.3)
                 return
@@ -633,6 +636,7 @@ class SpeakTypeApp(rumps.App):
                 polished,
                 method=self.config["insert_method"],
                 app_name=app_info.get("name", ""),
+                bundle_id=app_info.get("bundle_id", ""),
             )
 
             # Plugin: post_insert
@@ -701,6 +705,8 @@ class SpeakTypeApp(rumps.App):
         old_whisper = self.config.get("whisper_model")
         old_mode = self.config.get("dictation_mode")
         old_ui_lang = self.config.get("ui_language", "zh")
+        old_plugins_enabled = self.config.get("plugins_enabled", False)
+        old_plugins_dir = self.config.get("plugins_dir", "")
 
         self.config.update(new_config)
         save_config(self.config)
@@ -739,6 +745,21 @@ class SpeakTypeApp(rumps.App):
 
         # Update recorder device
         self.recorder.device = validate_device(self.config.get("audio_device"))
+
+        plugins_enabled_changed = self.config.get("plugins_enabled", False) != old_plugins_enabled
+        plugins_dir_changed = self.config.get("plugins_dir", "") != old_plugins_dir
+        if plugins_dir_changed:
+            self._plugin_manager = PluginManager(
+                plugins_dir=self.config.get("plugins_dir", "")
+            )
+        if plugins_enabled_changed or plugins_dir_changed:
+            if self.config.get("plugins_enabled", False):
+                try:
+                    self._plugin_manager.reload_all()
+                except Exception as e:
+                    logger.warning(f"Plugin reload failed: {e}")
+            else:
+                self._plugin_manager.clear()
 
         # Update toggle states directly via instance vars
         self._polish_item.state = self.config["polish_enabled"]
@@ -830,16 +851,41 @@ def _play_sound(name: str):
 def _check_permissions():
     """Check and prompt for required macOS permissions (non-blocking)."""
     try:
+        status = get_permission_status()
+        logger.info(
+            "Permission status: accessibility=%s listen_event=%s post_event=%s",
+            status.accessibility,
+            status.listen_event,
+            status.post_event,
+        )
+
         issues = []
+        if not status.accessibility or not status.post_event:
+            issues.append("Accessibility")
+        if not status.listen_event:
+            issues.append("Input Monitoring")
+
+        if issues:
+            request_missing_permissions(status)
+            refreshed = get_permission_status()
+            logger.info(
+                "Permission status after request: accessibility=%s listen_event=%s post_event=%s",
+                refreshed.accessibility,
+                refreshed.listen_event,
+                refreshed.post_event,
+            )
+
         try:
-            result = subprocess.run(
-                ["osascript", "-e", 'tell application "System Events" to return name of first process whose frontmost is true'],
-                capture_output=True, text=True, timeout=3
+            result = run_osascript(
+                'tell application "System Events" to return name of first process whose frontmost is true',
+                timeout=3,
             )
             if result.returncode != 0:
-                issues.append("Accessibility")
+                if "Accessibility" not in issues:
+                    issues.append("Accessibility")
         except Exception:
-            issues.append("Accessibility")
+            if "Accessibility" not in issues:
+                issues.append("Accessibility")
 
         if issues:
             missing = " and ".join(issues)

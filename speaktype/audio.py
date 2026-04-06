@@ -5,6 +5,9 @@ import threading
 import tempfile
 import logging
 import numpy as np
+from .sounddevice_compat import prepare_sounddevice_import
+
+prepare_sounddevice_import()
 import sounddevice as sd
 import soundfile as sf
 

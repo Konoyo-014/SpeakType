@@ -90,6 +90,30 @@ def post_transcribe(text):
         pm.set_enabled("upper", False)
         assert pm.run_hook("post_transcribe", "hello") == "hello"
 
+    def test_reload_all_does_not_duplicate_plugins(self, tmp_path):
+        (tmp_path / "upper.py").write_text('''
+def post_transcribe(text):
+    return text.upper()
+''')
+        pm = PluginManager(plugins_dir=str(tmp_path))
+        pm.load_all()
+        pm.reload_all()
+
+        assert len(pm.get_plugins()) == 1
+        assert pm.run_hook("post_transcribe", "hello") == "HELLO"
+
+    def test_clear_unloads_plugins(self, tmp_path):
+        (tmp_path / "upper.py").write_text('''
+def post_transcribe(text):
+    return text.upper()
+''')
+        pm = PluginManager(plugins_dir=str(tmp_path))
+        pm.load_all()
+        pm.clear()
+
+        assert pm.get_plugins() == []
+        assert pm.run_hook("post_transcribe", "hello") == "hello"
+
     def test_broken_plugin_does_not_crash(self, tmp_path):
         (tmp_path / "broken.py").write_text('''
 def post_transcribe(text):

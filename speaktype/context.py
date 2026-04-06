@@ -1,7 +1,8 @@
 """Detect the active application for context-aware tone adjustment."""
 
-import subprocess
 import logging
+
+from .applescript import run_osascript
 
 logger = logging.getLogger("speaktype.context")
 
@@ -44,10 +45,7 @@ def get_active_app() -> dict:
             return appName & "|" & appID
         end tell
         '''
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=2
-        )
+        result = run_osascript(script, timeout=2)
         if result.returncode == 0 and "|" in result.stdout.strip():
             name, bundle_id = result.stdout.strip().split("|", 1)
             return {"name": name, "bundle_id": bundle_id}

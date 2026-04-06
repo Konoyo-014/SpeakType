@@ -11,6 +11,8 @@ from Foundation import NSObject, NSMakeRect
 
 from .i18n import t
 from .config import save_config
+from .applescript import run_osascript
+from .permissions import get_permission_status, request_missing_permissions
 
 logger = logging.getLogger("speaktype.setup_wizard")
 
@@ -27,26 +29,21 @@ def _check_mic_permission() -> bool:
 
 def _check_accessibility_permission() -> bool:
     """Check if accessibility permission is granted."""
+    status = get_permission_status()
+    if status.all_granted:
+        return True
+
+    request_missing_permissions(status)
+    refreshed = get_permission_status()
+    if refreshed.all_granted:
+        return True
+
     try:
-        # Try PyObjC ApplicationServices first
-        from ApplicationServices import AXIsProcessTrusted
-        return AXIsProcessTrusted()
-    except ImportError:
-        pass
-    try:
-        # Fallback: try Quartz-based check
-        import Quartz
-        trusted = Quartz.CGRequestPostEventAccess()
-        return bool(trusted)
-    except Exception:
-        pass
-    try:
-        # Last resort: osascript
-        result = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to return name of first process'],
-            capture_output=True, timeout=3,
+        result = run_osascript(
+            'tell application "System Events" to return name of first process',
+            timeout=3,
         )
-        return result.returncode == 0
+        return result.returncode == 0 and refreshed.post_event and refreshed.listen_event
     except Exception:
         return False
 
@@ -83,7 +80,12 @@ def _check_ollama_model(model_name: str) -> bool:
         return False
     try:
         result = subprocess.run(
-            [ollama, "list"], capture_output=True, text=True, timeout=5,
+            [ollama, "list"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
         )
         if result.returncode == 0:
             base = model_name.split(":")[0]
