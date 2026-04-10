@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from speaktype import inserter
 
 
@@ -166,3 +168,38 @@ def test_insert_via_keystroke_rejects_unchanged_ax_value(monkeypatch):
 
     assert inserter._insert_via_keystroke("hi") is False
     assert len(posted) == 4
+
+
+def test_replace_selection_restores_clipboard_on_failure(monkeypatch):
+    class _Pasteboard:
+        def __init__(self):
+            self._store = {"public.utf8-plain-text": b"before"}
+
+        def types(self):
+            return list(self._store.keys())
+
+        def dataForType_(self, paste_type):
+            return self._store.get(paste_type)
+
+        def clearContents(self):
+            self._store = {}
+
+        def setString_forType_(self, text, paste_type):
+            self._store[paste_type] = text.encode("utf-8")
+
+        def setData_forType_(self, data, paste_type):
+            self._store[paste_type] = data
+
+    pb = _Pasteboard()
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+
+    def fail_paste(app_name=""):
+        raise RuntimeError("paste failed")
+
+    monkeypatch.setattr(inserter, "_press_cmd_v", fail_paste)
+
+    with pytest.raises(RuntimeError):
+        inserter.replace_selection("after")
+
+    assert pb.dataForType_("public.utf8-plain-text") == b"before"

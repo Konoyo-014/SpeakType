@@ -56,15 +56,36 @@ echo "  Built: ${APP_PATH}"
 
 if [ "${1:-}" = "--app" ]; then
     echo "=== Done (--app mode, skipping DMG) ==="
+    echo "  Note: ${APP_PATH} is the raw workspace build artifact."
+    echo "        For a distributable bundle with clean ad-hoc signing,"
+    echo "        use ./build_dmg.sh and ship the generated DMG."
     exit 0
 fi
 
-# --- Step 4: Create DMG ---
-echo "[4/5] Creating DMG installer..."
+# --- Step 4: Prepare clean release bundle ---
+echo "[4/6] Preparing clean release bundle..."
+
+RELEASE_STAGE_DIR=$(mktemp -d /tmp/speaktype-release.XXXXXX)
+RELEASE_APP_PATH="${RELEASE_STAGE_DIR}/${APP_NAME}.app"
+
+# Desktop/iCloud-backed workspaces can attach Finder/File Provider xattrs to the
+# bundle root, which breaks codesign verification. Build the release app from a
+# clean temporary copy outside the workspace, then ad-hoc re-sign after py2app's
+# post-build runtime-copy step has finished mutating the bundle.
+ditto --norsrc --noextattr --noqtn "${APP_PATH}" "${RELEASE_APP_PATH}"
+xattr -cr "${RELEASE_APP_PATH}" 2>/dev/null || true
+codesign --remove-signature "${RELEASE_APP_PATH}" 2>/dev/null || true
+codesign --force --deep --sign - "${RELEASE_APP_PATH}" >/dev/null
+codesign --verify --deep --strict --verbose=2 "${RELEASE_APP_PATH}" >/dev/null
+
+echo "  Prepared clean ad-hoc signed release bundle"
+
+# --- Step 5: Create DMG ---
+echo "[5/6] Creating DMG installer..."
 
 STAGING_DIR=$(mktemp -d)
-trap 'rm -rf "${STAGING_DIR}"' EXIT
-ditto "${APP_PATH}" "${STAGING_DIR}/${APP_NAME}.app"
+trap 'rm -rf "${STAGING_DIR}" "${RELEASE_STAGE_DIR}"' EXIT
+ditto --norsrc --noextattr --noqtn "${RELEASE_APP_PATH}" "${STAGING_DIR}/${APP_NAME}.app"
 ln -s /Applications "${STAGING_DIR}/Applications"
 
 if command -v create-dmg &>/dev/null; then
@@ -91,11 +112,12 @@ else
 fi
 
 rm -rf "${STAGING_DIR}"
+rm -rf "${RELEASE_STAGE_DIR}"
 trap - EXIT
 
 echo "  Created: ${DIST_DIR}/${DMG_NAME}.dmg"
 
-# --- Step 5: Summary ---
+# --- Step 6: Summary ---
 echo ""
 echo "=== Build Complete ==="
 echo "  App:  ${APP_PATH}"

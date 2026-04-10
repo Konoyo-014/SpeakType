@@ -24,16 +24,17 @@ from .i18n import t, set_language, get_language
 from .audio import AudioRecorder
 from .asr import ASREngine
 from .polish import PolishEngine
-from .inserter import insert_text, replace_selection
+from .inserter import insert_text, replace_selection, delete_chars
 from .hotkey import HotkeyListener
 from .history import DictationHistory
-from .context import get_active_app, get_tone_for_app, get_selected_text
-from .commands import process_punctuation_commands, detect_edit_command
-from .overlay import RecordingOverlay
+from .context import get_active_app, get_tone_for_app, get_scene_for_app, get_selected_text
+from .commands import process_punctuation_commands, detect_edit_command, detect_action_command
+from .status_overlay import StatusOverlay
 from .snippets import SnippetLibrary
 from .devices import list_input_devices, validate_device
 from .plugins import PluginManager
-from .streaming import StreamingPreviewWindow, StreamingTranscriber
+from .streaming import StreamingTranscriber
+from .corrections import CorrectionStore
 from .applescript import run_osascript
 from .permissions import (
     get_permission_status,
@@ -45,11 +46,15 @@ from .runtime import BUNDLE_IDENTIFIER, get_running_bundle_path, get_runtime_ver
 logger = logging.getLogger("speaktype")
 APP_VERSION = get_runtime_version(__version__)
 
-# Status icons
-ICON_IDLE = "\U0001f399"      # 🎙
-ICON_RECORDING = "\U0001f534"  # 🔴
-ICON_PROCESSING = "\u231b"     # ⏳
-ICON_ERROR = "\u26a0\ufe0f"    # ⚠️
+# The menubar shows a single stable icon. All state feedback
+# (recording / transcribing / polishing / done) lives in the unified
+# status overlay. Previously we swapped between emoji for each state
+# which made the menubar item visibly jump because 🎙 / 🔴 / ⏳ / ⚠️ all
+# have different effective metrics.
+ICON_IDLE = "\U0001f399"      # 🎙 (studio microphone)
+ICON_RECORDING = ICON_IDLE
+ICON_PROCESSING = ICON_IDLE
+ICON_ERROR = ICON_IDLE
 
 
 class _MainThreadBridge(NSObject):
@@ -73,6 +78,15 @@ class _MainThreadBridge(NSObject):
         """Called by NSTimer to start setup after wizard closes."""
         self._app._do_setup()
 
+    def startLevelMonitor_(self, _):
+        self._app._start_level_monitor_main()
+
+    def stopLevelMonitor_(self, _):
+        self._app._stop_level_monitor_main()
+
+    def handleMaxDurationReached_(self, _):
+        self._app._handle_max_duration_reached_main()
+
 
 class SpeakTypeApp(rumps.App):
     def __init__(self):
@@ -90,11 +104,12 @@ class SpeakTypeApp(rumps.App):
         self.recorder = AudioRecorder(
             sample_rate=self.config["sample_rate"],
             device=device,
+            whisper_mode_enabled=self.config.get("whisper_mode_enabled", True),
         )
         self.asr = ASREngine(
             model_name=self.config["asr_model"],
-            backend=self.config.get("asr_backend", "qwen"),
-            whisper_model=self.config.get("whisper_model", "base"),
+            backend="qwen",
+            whisper_model="base",
         )
         self.polish_engine = PolishEngine(
             model=self.config["llm_model"],
@@ -102,6 +117,7 @@ class SpeakTypeApp(rumps.App):
         )
         self.history = DictationHistory(max_entries=self.config["history_max_entries"])
         self.snippets = SnippetLibrary()
+        self.corrections = CorrectionStore()
         self.hotkey_listener = None
         self._recording_start_time = 0
         self._is_processing = False
@@ -110,12 +126,21 @@ class SpeakTypeApp(rumps.App):
         self._settings_controller = None
         self._stats_controller = None
         self._dict_controller = None
-        self._overlay = RecordingOverlay()
-        self._level_timer = None
 
-        # Streaming preview
-        self._streaming_preview = StreamingPreviewWindow()
+        # Unified status overlay (recording dot + streaming preview + state phases)
+        self._status_overlay = StatusOverlay()
+        self._level_timer = None
         self._streaming_transcriber = None
+
+        # "Undo last dictation" support — what we inserted on the most
+        # recent successful pass, and into which app.
+        self._last_insertion_text: str | None = None
+        self._last_insertion_app: str | None = None
+        self._last_insertion_bundle_id: str | None = None
+        self._recording_stop_lock = threading.Lock()
+        self._recording_stop_requested = False
+        # Track the in-flight processing thread so quit can wait on it.
+        self._processing_thread: threading.Thread | None = None
 
         # Plugin system
         self._plugin_manager = PluginManager(
@@ -488,66 +513,194 @@ class SpeakTypeApp(rumps.App):
 
     def _start_recording(self):
         logger.info("Recording started")
-        self.title = ICON_RECORDING
+
+        streamer = None
+        self.recorder.set_whisper_state_callback(self._on_whisper_state_change)
+
+        if self.config.get("streaming_preview", True) and self.asr._loaded:
+            streamer = StreamingTranscriber(
+                self.asr,
+                on_partial_text=self._status_overlay.update_partial_text,
+                sample_rate=self.config["sample_rate"],
+            )
+            self.recorder.set_stream_callback(streamer.feed_audio)
+        else:
+            self.recorder.set_stream_callback(None)
+
+        max_seconds = self.config.get("max_recording_seconds")
+        try:
+            max_seconds = float(max_seconds) if max_seconds else None
+            if max_seconds is not None and max_seconds <= 0:
+                max_seconds = None
+        except (TypeError, ValueError):
+            max_seconds = None
+
+        try:
+            started = self.recorder.start(
+                max_seconds=max_seconds,
+                on_max_duration=self._on_max_duration_reached,
+            )
+        except Exception as e:
+            started = False
+            logger.error(f"Recorder start raised: {e}")
+
+        if not started:
+            self.recorder.set_stream_callback(None)
+            self.recorder.set_whisper_state_callback(None)
+            self._streaming_transcriber = None
+            with self._recording_stop_lock:
+                self._recording_stop_requested = False
+            err = getattr(self.recorder, "last_start_error", None)
+            message = str(err) if err else "Could not open microphone."
+            logger.error(f"Recording failed to start: {message}")
+            rumps.notification("SpeakType", t("notif_error"), message)
+            return
+
+        with self._recording_stop_lock:
+            self._recording_stop_requested = False
+
         self._recording_start_time = time.time()
         if self.config["sound_feedback"]:
             _play_sound("Tink")
 
-        # Notify plugins
         if self.config.get("plugins_enabled"):
             self._plugin_manager.run_hook("on_recording_start")
 
-        # Start streaming preview if enabled
-        if self.config.get("streaming_preview", False) and self.asr._loaded:
-            self._streaming_preview.show()
-            self._streaming_transcriber = StreamingTranscriber(
-                self.asr, self._streaming_preview
-            )
-            self.recorder.set_stream_callback(self._streaming_transcriber.feed_audio)
-            self._streaming_transcriber.start(language=self.config["language"])
-        else:
-            self.recorder.set_stream_callback(None)
+        self._status_overlay.show_recording()
+        self._start_level_monitor()
 
-        self.recorder.start()
+        self._streaming_transcriber = streamer
+        if self._streaming_transcriber is not None:
+            try:
+                self._streaming_transcriber.start(language=self.config["language"])
+            except Exception as e:
+                logger.debug(f"Streaming preview failed to start: {e}")
+                self._streaming_transcriber = None
+                self.recorder.set_stream_callback(None)
+
+    def _on_whisper_state_change(self, new_state: str):
+        """Forward whisper detector state into the overlay (any thread)."""
+        try:
+            self._status_overlay.set_whisper_mode(new_state == "whisper")
+        except Exception as e:
+            logger.debug(f"Failed to update overlay whisper indicator: {e}")
+
+    def _on_max_duration_reached(self):
+        """Audio thread fired the watchdog — bounce the stop onto the main thread."""
+        logger.info("max_recording_seconds reached; auto-stopping")
+        try:
+            self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"handleMaxDurationReached:", None, False
+            )
+        except Exception as e:
+            logger.debug(f"max_duration main-thread dispatch failed: {e}")
+
+    def _handle_max_duration_reached_main(self):
+        try:
+            if self.hotkey_listener and self.hotkey_listener.mode == "toggle":
+                if self.hotkey_listener._toggle_active:
+                    self.hotkey_listener._toggle_active = False
+            self._stop_recording()
+        except Exception as e:
+            logger.debug(f"max_duration auto-stop failed: {e}")
 
     def _stop_recording(self):
+        with self._recording_stop_lock:
+            if self._recording_stop_requested or not self.recorder.is_recording:
+                return
+            self._recording_stop_requested = True
+
         duration = time.time() - self._recording_start_time
         logger.info(f"Recording stopped after {duration:.1f}s")
         if self.config["sound_feedback"]:
             _play_sound("Pop")
-        self.title = ICON_PROCESSING
         self._is_processing = True
 
         # Notify plugins
         if self.config.get("plugins_enabled"):
             self._plugin_manager.run_hook("on_recording_stop")
 
-        # Stop streaming preview
-        streaming_text = ""
+        # Stop the level monitor and any streaming transcription
+        self._stop_level_monitor()
         if self._streaming_transcriber:
-            streaming_text = self._streaming_transcriber.stop()
+            self._streaming_transcriber.stop()
             self._streaming_transcriber = None
         self.recorder.set_stream_callback(None)
+
+        # Move the overlay into transcribing state while we wait on ASR
+        self._status_overlay.show_transcribing()
 
         audio_path = self.recorder.stop()
         if not audio_path:
             logger.info("No audio captured")
-            self.title = ICON_IDLE
             self._is_processing = False
-            self._streaming_preview.hide()
+            self._status_overlay.hide(delay=0.4)
             return
 
-        threading.Thread(
+        self._processing_thread = threading.Thread(
             target=self._process_audio,
             args=(audio_path, duration),
             daemon=True,
-        ).start()
+        )
+        self._processing_thread.start()
 
     def _start_level_monitor(self):
-        pass  # overlay disabled
+        try:
+            self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"startLevelMonitor:", None, True
+            )
+        except Exception as e:
+            logger.debug(f"Failed to dispatch level monitor start: {e}")
+            self._level_timer = None
+
+    def _start_level_monitor_main(self):
+        """Poll the recorder's audio level and feed it into the overlay."""
+        if self._level_timer is not None:
+            try:
+                self._level_timer.stop()
+            except Exception:
+                pass
+            self._level_timer = None
+        try:
+            self._level_timer = rumps.Timer(self._poll_audio_level, 0.08)
+            self._level_timer.start()
+        except Exception as e:
+            logger.debug(f"Failed to start level monitor: {e}")
+            self._level_timer = None
 
     def _stop_level_monitor(self):
-        pass
+        try:
+            self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"stopLevelMonitor:", None, True
+            )
+        except Exception as e:
+            logger.debug(f"Failed to dispatch level monitor stop: {e}")
+        try:
+            self._status_overlay.update_audio_level(0.0)
+        except Exception:
+            pass
+
+    def _stop_level_monitor_main(self):
+        if self._level_timer is not None:
+            try:
+                self._level_timer.stop()
+            except Exception:
+                pass
+            self._level_timer = None
+
+    def _poll_audio_level(self, sender):
+        if not self.recorder.is_recording:
+            try:
+                sender.stop()
+            except Exception:
+                pass
+            self._level_timer = None
+            return
+        try:
+            level = self.recorder.get_level()
+        except Exception:
+            level = 0.0
+        self._status_overlay.update_audio_level(level)
 
     def _process_audio(self, audio_path: str, duration: float):
         try:
@@ -559,16 +712,11 @@ class SpeakTypeApp(rumps.App):
                 audio_path = self._plugin_manager.run_hook("pre_transcribe", audio_path) or audio_path
 
             logger.info("Transcribing...")
-
-            # Update streaming preview
-            if self._streaming_preview._visible:
-                self._streaming_preview.update_text("Processing...")
-
             raw_text = self.asr.transcribe(audio_path, language=self.config["language"])
 
             if not raw_text.strip():
                 logger.info("Empty transcription")
-                self._streaming_preview.hide(delay=0.5)
+                self._status_overlay.hide(delay=0.4)
                 return
 
             logger.info(f"Raw: {raw_text}")
@@ -577,25 +725,45 @@ class SpeakTypeApp(rumps.App):
             if self.config.get("plugins_enabled"):
                 raw_text = self._plugin_manager.run_hook("post_transcribe", raw_text) or raw_text
 
+            # Apply user-defined corrections (e.g. "PI thon" -> "Python")
+            try:
+                raw_text = self.corrections.apply(raw_text)
+            except Exception as e:
+                logger.debug(f"Correction store apply failed: {e}")
+
+            # Local action commands (undo last dictation, etc.)
+            if self.config["voice_commands_enabled"]:
+                action = detect_action_command(raw_text)
+                if action == "undo_last":
+                    if self._handle_undo_last():
+                        self._status_overlay.show_done("\u21b6")  # ↶ undo glyph
+                    else:
+                        self._status_overlay.hide(delay=0.4)
+                    return
+
             # Check for snippet triggers
             snippet_text = self.snippets.match(raw_text)
             if snippet_text:
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
+                self._status_overlay.show_done(snippet_text)
                 insert_text(
                     snippet_text,
                     method=self.config["insert_method"],
                     app_name=app_info.get("name", ""),
                     bundle_id=app_info.get("bundle_id", ""),
                 )
-                self._streaming_preview.hide(delay=0.3)
+                self._remember_last_insertion(snippet_text, app_info)
                 return
 
             # Check for edit commands
             if self.config["voice_commands_enabled"]:
                 is_edit, command = detect_edit_command(raw_text)
                 if is_edit:
-                    self._handle_edit_command(command, tone)
-                    self._streaming_preview.hide(delay=0.3)
+                    self._status_overlay.show_polishing(raw_text)
+                    if self._handle_edit_command(command, tone, app_info):
+                        self._status_overlay.show_done(command)
+                    else:
+                        self._status_overlay.hide(delay=0.4)
                     return
 
             # Process punctuation commands
@@ -611,8 +779,23 @@ class SpeakTypeApp(rumps.App):
 
             # Polish with LLM
             if self.config["polish_enabled"]:
+                self._status_overlay.show_polishing(text)
                 logger.info("Polishing text...")
-                polished = self.polish_engine.polish(text, tone=tone, language=self.config["language"])
+                scene_id = None
+                scene_template = None
+                if self.config.get("scene_prompts_enabled", True):
+                    scene_id = get_scene_for_app(app_info)
+                    overrides = self.config.get("scene_prompts") or {}
+                    scene_template = overrides.get(scene_id) if isinstance(overrides, dict) else None
+                polished = self.polish_engine.polish(
+                    text,
+                    tone=tone,
+                    language=self.config["language"],
+                    auto_punctuation=self.config.get("auto_punctuation", True),
+                    filler_removal=self.config.get("filler_removal", True),
+                    scene=scene_id,
+                    scene_template=scene_template,
+                )
             else:
                 polished = text
 
@@ -623,21 +806,21 @@ class SpeakTypeApp(rumps.App):
             # Translate if enabled
             if self.config.get("translate_enabled", False):
                 target = self.config.get("translate_target", "en")
+                self._status_overlay.show_polishing(polished)
                 logger.info(f"Translating to {target}...")
                 polished = self.polish_engine.translate(polished, target_lang=target)
 
             logger.info(f"Final: {polished}")
 
-            # Update streaming preview with final text before hiding
-            if self._streaming_preview._visible:
-                self._streaming_preview.update_text(polished)
-
             # Plugin: pre_insert
             if self.config.get("plugins_enabled"):
                 polished = self._plugin_manager.run_hook("pre_insert", polished)
                 if polished is None:
-                    self._streaming_preview.hide(delay=0.5)
+                    self._status_overlay.hide(delay=0.4)
                     return
+
+            # Show the final text in the overlay before inserting
+            self._status_overlay.show_done(polished)
 
             # Insert text at cursor
             logger.info(
@@ -651,13 +834,11 @@ class SpeakTypeApp(rumps.App):
                 app_name=app_info.get("name", ""),
                 bundle_id=app_info.get("bundle_id", ""),
             )
+            self._remember_last_insertion(polished, app_info)
 
             # Plugin: post_insert
             if self.config.get("plugins_enabled"):
                 self._plugin_manager.run_hook("post_insert", polished)
-
-            # Hide streaming preview
-            self._streaming_preview.hide(delay=0.8)
 
             # Save history
             if self.config["history_enabled"]:
@@ -669,26 +850,90 @@ class SpeakTypeApp(rumps.App):
                 )
         except Exception as e:
             logger.error(f"Processing failed: {e}")
+            self._status_overlay.hide(delay=0.2)
             rumps.notification("SpeakType", t("notif_error"), str(e))
         finally:
-            self.title = ICON_IDLE
             self._is_processing = False
 
-    def _handle_edit_command(self, command: str, tone: str):
+    def _remember_last_insertion(self, text: str, app_info: dict | None = None):
+        self._last_insertion_text = text or None
+        self._last_insertion_app = (app_info or {}).get("name", "") or None
+        self._last_insertion_bundle_id = (app_info or {}).get("bundle_id", "") or None
+
+    def _clear_last_insertion(self):
+        self._last_insertion_text = None
+        self._last_insertion_app = None
+        self._last_insertion_bundle_id = None
+
+    def _handle_undo_last(self) -> bool:
+        """Voice "undo that" — delete the most recently inserted text."""
+        if not self._last_insertion_text:
+            logger.info("Undo requested but no prior insertion is recorded")
+            if self.config["sound_feedback"]:
+                _play_sound("Basso")
+            return False
+
+        current_app = get_active_app()
+        current_bundle_id = current_app.get("bundle_id", "")
+        current_app_name = current_app.get("name", "")
+        if (
+            self._last_insertion_bundle_id
+            and current_bundle_id
+            and self._last_insertion_bundle_id != current_bundle_id
+        ):
+            logger.info(
+                "Undo skipped because focus moved to %s [%s] from %s [%s]",
+                current_app_name,
+                current_bundle_id,
+                self._last_insertion_app,
+                self._last_insertion_bundle_id,
+            )
+            if self.config["sound_feedback"]:
+                _play_sound("Basso")
+            return False
+        if (
+            not current_bundle_id
+            and self._last_insertion_app
+            and current_app_name
+            and self._last_insertion_app != current_app_name
+        ):
+            logger.info(
+                "Undo skipped because focus moved to %s from %s",
+                current_app_name,
+                self._last_insertion_app,
+            )
+            if self.config["sound_feedback"]:
+                _play_sound("Basso")
+            return False
+
+        char_count = len(self._last_insertion_text)
+        logger.info(f"Undoing last insertion ({char_count} chars)")
+        try:
+            delete_chars(char_count)
+        except Exception as e:
+            logger.error(f"Undo delete failed: {e}")
+            return False
+
+        self._clear_last_insertion()
+        return True
+
+    def _handle_edit_command(self, command: str, tone: str, app_info: dict | None = None) -> bool:
         try:
             selected = get_selected_text()
             if not selected:
                 logger.info("No text selected for edit command")
                 if self.config["sound_feedback"]:
                     _play_sound("Basso")
-                return
+                return False
             logger.info(f"Edit command: '{command}' on: '{selected[:50]}...'")
             result = self.polish_engine.edit_text(command, selected, tone)
             replace_selection(result)
+            self._remember_last_insertion(result, app_info or get_active_app())
+            return True
         except Exception as e:
             logger.error(f"Edit command failed: {e}")
+            return False
         finally:
-            self.title = ICON_IDLE
             self._is_processing = False
 
     def _open_settings(self, _):
@@ -705,17 +950,15 @@ class SpeakTypeApp(rumps.App):
         self._settings_controller.show()
 
     def _open_dict(self, _):
-        """Open the dictionary & snippets editor."""
+        """Open the dictionary, snippets & corrections editor."""
         from .dict_window import DictWindowController
-        self._dict_controller = DictWindowController(self.snippets)
+        self._dict_controller = DictWindowController(self.snippets, self.corrections)
         self._dict_controller.show()
 
     def _apply_settings(self, new_config: dict):
         """Apply new settings from the Settings window."""
         old_hotkey = self.config.get("hotkey")
         old_asr = self.config.get("asr_model")
-        old_backend = self.config.get("asr_backend")
-        old_whisper = self.config.get("whisper_model")
         old_mode = self.config.get("dictation_mode")
         old_ui_lang = self.config.get("ui_language", "zh")
         old_plugins_enabled = self.config.get("plugins_enabled", False)
@@ -740,13 +983,11 @@ class SpeakTypeApp(rumps.App):
             self._restart_hotkey_listener()
 
         # Reload ASR model if changed
-        if (new_config.get("asr_model") != old_asr or
-                new_config.get("asr_backend") != old_backend or
-                new_config.get("whisper_model") != old_whisper):
+        if new_config.get("asr_model") != old_asr:
             self.asr = ASREngine(
                 model_name=self.config["asr_model"],
-                backend=self.config.get("asr_backend", "qwen"),
-                whisper_model=self.config.get("whisper_model", "base"),
+                backend="qwen",
+                whisper_model="base",
             )
             threading.Thread(target=self.asr.load, daemon=True).start()
 
@@ -831,11 +1072,42 @@ class SpeakTypeApp(rumps.App):
         subprocess.run(["open", str(CONFIG_DIR)])
 
     def _check_updates(self, _):
-        rumps.notification(
-            "SpeakType",
-            t("notif_up_to_date_title"),
-            t("notif_up_to_date_body", version=APP_VERSION),
-        )
+        def _do_check():
+            from .updates import check_for_update
+
+            result = check_for_update(APP_VERSION)
+            if result.error and not result.latest_version:
+                rumps.notification(
+                    "SpeakType",
+                    t("notif_update_check_failed_title"),
+                    t("notif_update_check_failed_body", error=result.error[:120]),
+                )
+                return
+            if result.has_update:
+                rumps.notification(
+                    "SpeakType",
+                    t("notif_update_available_title"),
+                    t(
+                        "notif_update_available_body",
+                        latest=result.latest_version or "?",
+                        current=APP_VERSION,
+                    ),
+                )
+                # Open the release page so the user can grab the .dmg.
+                target = result.release_url or result.download_url
+                if target:
+                    try:
+                        subprocess.Popen(["open", target])
+                    except Exception as e:
+                        logger.debug(f"Failed to open release URL: {e}")
+            else:
+                rumps.notification(
+                    "SpeakType",
+                    t("notif_up_to_date_title"),
+                    t("notif_up_to_date_body", version=APP_VERSION),
+                )
+
+        threading.Thread(target=_do_check, daemon=True).start()
 
     def _show_about(self, _):
         rumps.notification(
@@ -848,6 +1120,24 @@ class SpeakTypeApp(rumps.App):
     def _quit(self, _):
         if self.hotkey_listener:
             self.hotkey_listener.stop()
+        self._stop_level_monitor()
+        if self._streaming_transcriber is not None:
+            try:
+                self._streaming_transcriber.stop()
+            except Exception:
+                pass
+            self._streaming_transcriber = None
+        # Wait briefly for any in-flight transcription/polish thread so we
+        # don't yank the rug out from under a write the user expects.
+        if self._processing_thread is not None and self._processing_thread.is_alive():
+            try:
+                self._processing_thread.join(timeout=2.0)
+            except Exception:
+                pass
+        try:
+            self._status_overlay.hide()
+        except Exception:
+            pass
         rumps.quit_application()
 
 

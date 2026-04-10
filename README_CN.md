@@ -11,10 +11,10 @@
 - **按住说话与切换听写** -- 按住右 Command（可自定义）进行录音；松开即转写并插入文字
 - **AI 文本润色** -- 去除语气词、修正语法、保持语气风格（由本地 LLM 通过 Ollama 驱动）
 - **实时流式预览** -- 浮动窗口实时显示转写内容
+- **自适应低音量模式** -- 自动检测很轻的说话声并在本地录音链路里增益放大，不暴露手动开关
 - **上下文感知语气** -- 根据当前活跃应用自动调整正式程度（邮件 vs Slack vs 代码编辑器）
 - **转写后翻译** -- 支持翻译为英语、中文、日语、韩语、西班牙语、法语或德语
 - **语音指令** -- 说"换行"、"句号"、"缩短"、"修正语法"、"翻译成英文"等
-- **Whisper 兼容** -- 可在 Qwen3-ASR 和 OpenAI Whisper 后端之间切换
 - **音频设备选择** -- 从菜单栏选择麦克风
 - **自定义词典与文本片段** -- 定义始终正确识别的词语；设置触发短语快速插入文本
 - **插件系统** -- 使用 Python 插件扩展功能（`~/.speaktype/plugins/`）
@@ -35,8 +35,8 @@
 **1. 克隆仓库**
 
 ```bash
-git clone https://github.com/speaktype/speaktype.git
-cd speaktype
+git clone https://github.com/Konoyo-014/SpeakType.git
+cd SpeakType
 ```
 
 **2. 创建虚拟环境并安装依赖**
@@ -101,7 +101,7 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 ./build_dmg.sh --app
 ```
 
-独立的应用包将创建在 `dist/SpeakType.app`。
+开发态的工作区应用包会创建在 `dist/SpeakType.app`。如果要生成可分发的正式安装包，请运行 `./build_dmg.sh` 并使用生成的 DMG。DMG 构建流程会在工作区之外创建净化后的临时副本并重新签名，避免桌面或 iCloud File Provider 元数据破坏 bundle 签名。
 
 ## 使用方法
 
@@ -149,7 +149,7 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 
 ### 文本片段
 
-定义触发短语，说出即可展开为预设文本。例如，说"我的邮箱"即可插入你的邮箱地址。从菜单栏的"词典与片段"管理。
+定义触发短语，说出即可展开为预设文本。例如，说"我的邮箱"即可插入你的邮箱地址。片段正文支持 `{date}`、`{time}`、`{datetime}`、`{clipboard}` 和 `{env:NAME}`。其中 `{clipboard}` 与 `{env:...}` 只有在 **精确匹配触发词** 时才会展开，避免模糊匹配误插入本地敏感内容。从菜单栏的"词典与片段"管理。
 
 ## 配置
 
@@ -161,7 +161,7 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 |---|---|---|
 | `hotkey` | `"right_cmd"` | 按住说话快捷键。选项：`right_cmd`、`left_cmd`、`fn`、`right_alt`、`right_ctrl`、`ctrl+shift+space`、`f5`、`f6` |
 | `dictation_mode` | `"push_to_talk"` | `"push_to_talk"`（按住说话）或 `"toggle"`（按下切换） |
-| `asr_backend` | `"qwen"` | `"qwen"`（Qwen3-ASR via mlx-audio）或 `"whisper"`（OpenAI Whisper） |
+| `asr_backend` | `"qwen"` | 向后兼容字段。v2.1 固定使用 Qwen3-ASR，旧的 Whisper 配置会在读取/保存时归一化回 `qwen` |
 | `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | Qwen ASR 的 HuggingFace 模型 ID |
 | `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | 用于文本润色的 Ollama 模型 |
 | `ollama_url` | `"http://localhost:11434"` | Ollama API 地址 |
@@ -169,7 +169,7 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 | `language` | `"auto"` | ASR 语言：`"auto"`、`"en"`、`"zh"`、`"ja"`、`"ko"` |
 | `translate_enabled` | `false` | 启用转写后翻译 |
 | `translate_target` | `"en"` | 翻译目标语言 |
-| `streaming_preview` | `false` | 显示实时转写浮动窗口 |
+| `streaming_preview` | `true` | 显示实时转写浮动窗口 |
 | `voice_commands_enabled` | `true` | 启用语音指令处理 |
 | `context_aware_tone` | `true` | 根据应用调整润色语气 |
 | `insert_method` | `"paste"` | `"paste"`（剪贴板 + Cmd+V）或 `"type"`（逐字输入） |
@@ -219,7 +219,7 @@ def post_transcribe(text):
 ```
 按下快捷键
   -> 录制音频 (sounddevice)
-  -> ASR: Qwen3-ASR via mlx-audio（或 Whisper）
+  -> ASR: Qwen3-ASR via mlx-audio
   -> 语音指令检测 / 片段匹配
   -> LLM 润色 via Ollama（可选）
   -> 翻译（可选）
@@ -230,7 +230,7 @@ def post_transcribe(text):
 
 **核心组件：**
 
-- **ASR**：`mlx-community/Qwen3-ASR-1.7B-8bit`，通过 mlx-audio 运行，支持 Whisper 回退
+- **ASR**：`mlx-community/Qwen3-ASR-1.7B-8bit`，通过 mlx-audio 运行
 - **LLM**：`huihui_ai/qwen3.5-abliterated:9b-Claude`，通过 Ollama 本地推理
 - **文字插入**：CGEvent 键盘模拟 + NSPasteboard 剪贴板
 - **界面**：rumps（NSStatusItem 菜单栏）、AppKit（原生设置窗口）
@@ -280,6 +280,9 @@ python -m pytest tests/ -v
 
 # 构建 .app 包
 ./build_dmg.sh --app
+
+# 构建发布用 DMG
+./build_dmg.sh
 ```
 
 ## 贡献

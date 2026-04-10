@@ -59,6 +59,13 @@ _STRINGS = {
     "notif_config_reloaded_body": {"zh": "设置已更新。", "en": "Settings updated."},
     "notif_up_to_date_title": {"zh": "已是最新版本", "en": "Up to Date"},
     "notif_up_to_date_body": {"zh": "您正在运行最新版本 (v{version})。", "en": "You are running the latest version (v{version})."},
+    "notif_update_available_title": {"zh": "发现新版本", "en": "Update Available"},
+    "notif_update_available_body": {
+        "zh": "新版本 v{latest} 已发布（当前 v{current}）。在菜单中点击「打开发布页」获取下载。",
+        "en": "Version v{latest} is available (you have v{current}). Use the menu to open the release page.",
+    },
+    "notif_update_check_failed_title": {"zh": "更新检查失败", "en": "Update Check Failed"},
+    "notif_update_check_failed_body": {"zh": "无法连接到发布服务器：{error}", "en": "Could not reach the release server: {error}"},
     "notif_about_subtitle": {"zh": "v{version} — Mac AI 语音输入法", "en": "v{version} — AI Voice Input for Mac"},
     "notif_cannot_test": {"zh": "录音/处理中，无法测试。", "en": "Cannot test while recording/processing."},
     "notif_error": {"zh": "错误", "en": "Error"},
@@ -88,6 +95,7 @@ _STRINGS = {
     "settings_cb_history": {"zh": "保存听写历史", "en": "Save Dictation History"},
     "settings_cb_translate": {"zh": "转写后翻译", "en": "Translate After Transcription"},
     "settings_translate_to": {"zh": "翻译目标语言：", "en": "Translate To:"},
+    "settings_cb_streaming": {"zh": "录音时显示实时预览浮窗", "en": "Show Live Preview While Recording"},
     "settings_cb_plugins": {"zh": "启用插件系统", "en": "Enable Plugin System"},
     "settings_cb_auto_start": {"zh": "登录时启动", "en": "Start at Login"},
     "settings_btn_save": {"zh": "保存", "en": "Save"},
@@ -123,6 +131,11 @@ _STRINGS = {
     "stats_activity": {"zh": "活动（最近 7 天）", "en": "Activity (Last 7 Days)"},
     "stats_top_apps": {"zh": "常用应用", "en": "Top Apps"},
     "stats_recent": {"zh": "最近听写", "en": "Recent Dictations"},
+    "stats_btn_export": {"zh": "导出历史…", "en": "Export History\u2026"},
+    "stats_export_done_title": {"zh": "导出完成", "en": "Export Complete"},
+    "stats_export_done_body": {"zh": "已写入：{path}", "en": "Saved to: {path}"},
+    "stats_export_failed_title": {"zh": "导出失败", "en": "Export Failed"},
+    "stats_export_failed_body": {"zh": "{error}", "en": "{error}"},
 
     # --- Dictionary window (dict_window.py) ---
     "dict_title": {"zh": "SpeakType — 词典与快捷短语", "en": "SpeakType — Dictionary & Snippets"},
@@ -140,6 +153,15 @@ _STRINGS = {
     "dict_btn_close": {"zh": "关闭", "en": "Close"},
     "dict_no_words": {"zh": "（无自定义词语）", "en": "(no custom words)"},
     "dict_no_snippets": {"zh": "（无快捷短语）", "en": "(no snippets)"},
+    "dict_section_corrections": {
+        "zh": "听写纠错（识别错误自动替换）",
+        "en": "Corrections (replace mistranscribed phrases automatically)",
+    },
+    "dict_correction_wrong": {"zh": "识别为：", "en": "Heard:"},
+    "dict_correction_right": {"zh": "改写为：", "en": "Replace with:"},
+    "dict_correction_placeholder_wrong": {"zh": "例如：PI thon", "en": "e.g., PI thon"},
+    "dict_correction_placeholder_right": {"zh": "例如：Python", "en": "e.g., Python"},
+    "dict_no_corrections": {"zh": "（无纠错条目）", "en": "(no corrections)"},
 
     # --- Download status (app.py status bar) ---
     "notif_perm_missing_title": {"zh": "权限缺失", "en": "Missing Permissions"},

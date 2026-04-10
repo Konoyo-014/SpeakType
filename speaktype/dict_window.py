@@ -1,10 +1,11 @@
-"""Custom dictionary editor — native macOS window for managing custom words and snippets."""
+"""Custom dictionary editor — native macOS window for managing custom words, snippets, and corrections."""
 
 import logging
 import AppKit
 import objc
 from Foundation import NSObject, NSMakeRect
 from .config import load_custom_dictionary, save_custom_dictionary
+from .corrections import CorrectionStore
 from .snippets import SnippetLibrary, SNIPPETS_FILE
 from .i18n import t
 
@@ -32,6 +33,12 @@ class _DictDelegate(NSObject):
     def onRemoveSnippet_(self, sender):
         self._controller._remove_snippet()
 
+    def onAddCorrection_(self, sender):
+        self._controller._add_correction()
+
+    def onRemoveCorrection_(self, sender):
+        self._controller._remove_correction()
+
     def onSave_(self, sender):
         self._controller._do_save()
 
@@ -40,19 +47,24 @@ class _DictDelegate(NSObject):
 
 
 class DictWindowController:
-    """Manages the custom dictionary and snippets editor window."""
+    """Manages the custom dictionary, snippets, and correction editor window."""
 
-    def __init__(self, snippets: SnippetLibrary):
+    def __init__(self, snippets: SnippetLibrary, corrections: CorrectionStore | None = None):
         self.snippets = snippets
+        self.corrections = corrections or CorrectionStore()
         self.window = None
         self._delegate = None
         self._word_list_view = None
         self._snippet_list_view = None
+        self._correction_list_view = None
         self._word_field = None
         self._snippet_trigger_field = None
         self._snippet_text_field = None
+        self._correction_wrong_field = None
+        self._correction_right_field = None
         self._words = list(load_custom_dictionary())
         self._snippet_data = list(snippets.get_all())
+        self._correction_data = list(self.corrections.get_all())
 
     def show(self):
         if self.window and self.window.isVisible():
@@ -64,7 +76,7 @@ class DictWindowController:
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
     def _build_window(self):
-        frame = NSMakeRect(0, 0, 560, 600)
+        frame = NSMakeRect(0, 0, 560, 820)
         style = (
             AppKit.NSTitledWindowMask
             | AppKit.NSClosableWindowMask
@@ -81,7 +93,7 @@ class DictWindowController:
 
         self._delegate = _DictDelegate.alloc().initWithController_(self)
         content = self.window.contentView()
-        y = 570
+        y = 790
 
         # === Custom Dictionary Section ===
         y = self._section(content, t("dict_section_words"), y)
@@ -175,6 +187,56 @@ class DictWindowController:
         remove_snip_btn.setAction_(b"onRemoveSnippet:")
         content.addSubview_(remove_snip_btn)
 
+        # === Corrections Section ===
+        y -= 38
+        y = self._section(content, t("dict_section_corrections"), y)
+
+        lbl3 = self._label(content, t("dict_correction_wrong"), 30, y - 24)
+        self._correction_wrong_field = AppKit.NSTextField.alloc().initWithFrame_(
+            NSMakeRect(100, y - 26, 200, 24)
+        )
+        self._correction_wrong_field.setPlaceholderString_(t("dict_correction_placeholder_wrong"))
+        content.addSubview_(self._correction_wrong_field)
+
+        lbl4 = self._label(content, t("dict_correction_right"), 310, y - 24)
+        self._correction_right_field = AppKit.NSTextField.alloc().initWithFrame_(
+            NSMakeRect(380, y - 26, 105, 24)
+        )
+        self._correction_right_field.setPlaceholderString_(t("dict_correction_placeholder_right"))
+        content.addSubview_(self._correction_right_field)
+
+        add_corr_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(495, y - 26, 50, 24))
+        add_corr_btn.setTitle_("+")
+        add_corr_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        add_corr_btn.setTarget_(self._delegate)
+        add_corr_btn.setAction_(b"onAddCorrection:")
+        content.addSubview_(add_corr_btn)
+        y -= 36
+
+        scroll_frame3 = NSMakeRect(30, y - 100, 515, 100)
+        scroll_view3 = AppKit.NSScrollView.alloc().initWithFrame_(scroll_frame3)
+        scroll_view3.setHasVerticalScroller_(True)
+        scroll_view3.setBorderType_(AppKit.NSBezelBorder)
+
+        self._correction_list_view = AppKit.NSTextView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 500, 100)
+        )
+        self._correction_list_view.setEditable_(False)
+        self._correction_list_view.setFont_(
+            AppKit.NSFont.monospacedSystemFontOfSize_weight_(12, AppKit.NSFontWeightRegular)
+        )
+        self._update_correction_list()
+        scroll_view3.setDocumentView_(self._correction_list_view)
+        content.addSubview_(scroll_view3)
+        y -= 110
+
+        remove_corr_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(30, y - 4, 140, 24))
+        remove_corr_btn.setTitle_(t("dict_btn_remove_selected"))
+        remove_corr_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        remove_corr_btn.setTarget_(self._delegate)
+        remove_corr_btn.setAction_(b"onRemoveCorrection:")
+        content.addSubview_(remove_corr_btn)
+
         # Save / Close buttons
         y -= 40
         save_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(350, 15, 90, 32))
@@ -236,6 +298,16 @@ class DictWindowController:
             text = "\n".join(lines) if lines else f"  {t('dict_no_snippets')}"
             self._snippet_list_view.setString_(text)
 
+    def _update_correction_list(self):
+        if self._correction_list_view:
+            lines = []
+            for i, c in enumerate(self._correction_data):
+                wrong = c.get("wrong", "")
+                right = c.get("right", "")
+                lines.append(f"  [{i}] \"{wrong}\" -> \"{right}\"")
+            text = "\n".join(lines) if lines else f"  {t('dict_no_corrections')}"
+            self._correction_list_view.setString_(text)
+
     def _add_word(self):
         word = self._word_field.stringValue().strip()
         if word and word not in self._words:
@@ -269,10 +341,37 @@ class DictWindowController:
             self._snippet_data.pop()
             self._update_snippet_list()
 
+    def _add_correction(self):
+        wrong = self._correction_wrong_field.stringValue().strip()
+        right = self._correction_right_field.stringValue().strip()
+        if not wrong:
+            return
+        # Update existing entry if the same wrong already exists
+        for entry in self._correction_data:
+            if entry.get("wrong", "").lower() == wrong.lower():
+                entry["right"] = right
+                break
+        else:
+            self._correction_data.append({"wrong": wrong, "right": right})
+        self._update_correction_list()
+        self._correction_wrong_field.setStringValue_("")
+        self._correction_right_field.setStringValue_("")
+
+    def _remove_correction(self):
+        if self._correction_data:
+            self._correction_data.pop()
+            self._update_correction_list()
+
     def _do_save(self):
         save_custom_dictionary(self._words)
         # Update snippets library
         self.snippets._snippets = list(self._snippet_data)
         self.snippets._save()
+        # Update correction store
+        self.corrections.replace_all(self._correction_data)
         self.window.close()
-        logger.info(f"Saved {len(self._words)} dictionary words and {len(self._snippet_data)} snippets")
+        logger.info(
+            f"Saved {len(self._words)} dictionary words, "
+            f"{len(self._snippet_data)} snippets, "
+            f"{len(self._correction_data)} corrections"
+        )

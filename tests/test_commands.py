@@ -4,7 +4,66 @@ import pytest
 from speaktype.commands import (
     process_punctuation_commands,
     detect_edit_command,
+    detect_action_command,
 )
+
+
+class TestActionCommands:
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "undo that",
+            "Undo last",
+            "undo last dictation",
+            "scratch that",
+            "撤销",
+            "撤销刚才",
+            "撤销上一句",
+            "撤回",
+            "撤回。",
+        ],
+    )
+    def test_undo_phrases(self, phrase):
+        assert detect_action_command(phrase) == "undo_last"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "make this shorter",
+            "hello world",
+            "this is a sentence with the word undo somewhere in it",
+            "",
+        ],
+    )
+    def test_non_action_phrases(self, phrase):
+        assert detect_action_command(phrase) is None
+
+
+class TestExtendedEditCommands:
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "bullet point this",
+            "bullet list this",
+            "turn this into a list",
+            "turn it into bullet points",
+            "make this a headline",
+            "expand on this",
+            "simplify this",
+            "add details",
+            "remove details",
+            "proofread this",
+            "改成列表",
+            "改成要点",
+            "改成标题",
+            "润色一下",
+            "更简洁",
+            "更详细",
+        ],
+    )
+    def test_new_edit_commands_detected(self, phrase):
+        is_edit, _ = detect_edit_command(phrase)
+        assert is_edit, f"Expected {phrase!r} to be detected as an edit command"
 
 
 class TestPunctuationCommands:

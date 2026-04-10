@@ -11,12 +11,26 @@ from .i18n import t
 logger = logging.getLogger("speaktype.stats_window")
 
 
+class _StatsDelegate(NSObject):
+    """ObjC delegate to dispatch stats-window button actions."""
+
+    def initWithController_(self, controller):
+        self = objc.super(_StatsDelegate, self).init()
+        if self is not None:
+            self._controller = controller
+        return self
+
+    def onExport_(self, sender):
+        self._controller._do_export()
+
+
 class StatsWindowController:
     """Displays a statistics dashboard with dictation analytics."""
 
     def __init__(self, history):
         self.history = history
         self.window = None
+        self._delegate = None
 
     def show(self):
         if self.window and self.window.isVisible():
@@ -28,7 +42,7 @@ class StatsWindowController:
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
     def _build_window(self):
-        frame = NSMakeRect(0, 0, 520, 560)
+        frame = NSMakeRect(0, 0, 520, 600)
         style = (
             AppKit.NSTitledWindowMask
             | AppKit.NSClosableWindowMask
@@ -42,10 +56,22 @@ class StatsWindowController:
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
 
+        self._delegate = _StatsDelegate.alloc().initWithController_(self)
+
         content = self.window.contentView()
         entries = self.history.get_recent(self.history.max_entries)
         stats = self.history.get_stats()
-        y = 530
+        y = 570
+
+        # Export button at the very top-right
+        export_btn = AppKit.NSButton.alloc().initWithFrame_(
+            NSMakeRect(390, 565, 110, 28)
+        )
+        export_btn.setTitle_(t("stats_btn_export"))
+        export_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        export_btn.setTarget_(self._delegate)
+        export_btn.setAction_(b"onExport:")
+        content.addSubview_(export_btn)
 
         # --- Overview Section ---
         y = self._section(content, t("stats_overview"), y)
@@ -149,3 +175,40 @@ class StatsWindowController:
             return " " * width
         filled = round(count / max_count * width)
         return "\u2588" * filled + "\u2591" * (width - filled)
+
+    def _do_export(self):
+        """Show an NSSavePanel and export the history to the chosen file."""
+        panel = AppKit.NSSavePanel.savePanel()
+        panel.setTitle_(t("stats_btn_export"))
+        panel.setAllowedFileTypes_(["txt", "md", "csv", "json"])
+        panel.setNameFieldStringValue_("speaktype-history.md")
+
+        result = panel.runModal()
+        if result != AppKit.NSModalResponseOK:
+            return
+        url = panel.URL()
+        if url is None:
+            return
+        path = url.path()
+        try:
+            saved_path = self.history.export(path)
+        except Exception as e:
+            logger.error(f"History export failed: {e}")
+            self._show_alert(
+                t("stats_export_failed_title"),
+                t("stats_export_failed_body", error=str(e)[:200]),
+                AppKit.NSAlertStyleWarning,
+            )
+            return
+        self._show_alert(
+            t("stats_export_done_title"),
+            t("stats_export_done_body", path=str(saved_path)),
+            AppKit.NSAlertStyleInformational,
+        )
+
+    def _show_alert(self, title: str, body: str, style):
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(body)
+        alert.setAlertStyle_(style)
+        alert.runModal()

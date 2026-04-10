@@ -2,6 +2,7 @@
 
 import os
 import logging
+import threading
 
 logger = logging.getLogger("speaktype.asr")
 
@@ -21,16 +22,22 @@ class ASREngine:
         self.whisper_model = whisper_model
         self.model = None
         self._loaded = False
+        # Serialize concurrent load() calls so a fast double-tap during
+        # startup never triggers two parallel HuggingFace downloads.
+        self._load_lock = threading.Lock()
 
     def load(self, progress_callback=None):
         """Load the ASR model. progress_callback(pct, status_str) for download progress."""
         if self._loaded:
             return
 
-        if self.backend == "whisper":
-            self._load_whisper()
-        else:
-            self._load_qwen(progress_callback=progress_callback)
+        with self._load_lock:
+            if self._loaded:  # double-checked under the lock
+                return
+            if self.backend == "whisper":
+                self._load_whisper()
+            else:
+                self._load_qwen(progress_callback=progress_callback)
 
     def _load_qwen(self, progress_callback=None):
         """Load Qwen3-ASR via mlx-audio, with optional download progress."""

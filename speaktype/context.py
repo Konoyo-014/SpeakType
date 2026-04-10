@@ -70,31 +70,59 @@ def get_tone_for_app(app_info: dict) -> str:
         return "neutral"
 
 
+def get_scene_for_app(app_info: dict) -> str:
+    """Map an active application to a polish scene id.
+
+    Scene ids are looked up in polish.SCENE_PROMPTS to fetch a matching
+    instruction fragment for the LLM. Returns ``"default"`` for unknown apps.
+    """
+    bundle_id = app_info.get("bundle_id", "")
+    if not bundle_id:
+        return "default"
+    if bundle_id in FORMAL_APPS:
+        return "email"
+    if bundle_id in CASUAL_APPS:
+        return "chat"
+    if bundle_id in CODE_APPS:
+        return "code"
+    if bundle_id in NOTE_APPS:
+        return "notes"
+    return "default"
+
+
 def get_selected_text() -> str:
-    """Get currently selected text via Cmd+C using CGEvent + NSPasteboard."""
+    """Get currently selected text via Cmd+C using CGEvent + NSPasteboard.
+
+    Always restores the user's previous clipboard contents, even if any
+    intermediate step throws — the previous implementation could lose the
+    user's clipboard on errors.
+    """
     import time
     import AppKit
     import Quartz
 
-    try:
-        pb = AppKit.NSPasteboard.generalPasteboard()
+    pb = AppKit.NSPasteboard.generalPasteboard()
 
-        # Save current clipboard contents
-        old_types = pb.types()
-        old_data = {}
-        if old_types:
-            for t in old_types:
+    # Snapshot the current clipboard so we can put it back no matter what.
+    old_types = pb.types()
+    old_data: dict = {}
+    if old_types:
+        for t in old_types:
+            try:
                 d = pb.dataForType_(t)
                 if d:
                     old_data[t] = d
+            except Exception:
+                continue
 
+    new_text = ""
+    try:
         # Clear clipboard so we can detect new content
         pb.clearContents()
         pb.setString_forType_("", AppKit.NSPasteboardTypeString)
 
         # Simulate Cmd+C via CGEvent
         src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
-        # C key = keycode 8
         cmd_c_down = Quartz.CGEventCreateKeyboardEvent(src, 8, True)
         Quartz.CGEventSetFlags(cmd_c_down, Quartz.kCGEventFlagMaskCommand)
         Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, cmd_c_down)
@@ -105,22 +133,22 @@ def get_selected_text() -> str:
 
         time.sleep(0.15)
 
-        # Read new clipboard
         new_text = pb.stringForType_(AppKit.NSPasteboardTypeString) or ""
-
-        # Restore old clipboard
-        if old_data:
-            pb.clearContents()
-            for t, d in old_data.items():
-                try:
-                    pb.setData_forType_(d, t)
-                except Exception:
-                    pass
-
-        if new_text.strip():
-            return new_text.strip()
-
     except Exception as e:
         logger.debug(f"Failed to get selected text: {e}")
+    finally:
+        # Restore the old clipboard contents.
+        if old_data:
+            try:
+                pb.clearContents()
+                for t, d in old_data.items():
+                    try:
+                        pb.setData_forType_(d, t)
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug(f"Clipboard restore failed: {e}")
 
+    if new_text and new_text.strip():
+        return new_text.strip()
     return ""

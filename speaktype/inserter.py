@@ -216,13 +216,63 @@ def _get_pasteboard():
     return AppKit.NSPasteboard.generalPasteboard()
 
 
+def _snapshot_pasteboard(pb):
+    old_types = pb.types()
+    old_data = {}
+    if old_types:
+        for t in old_types:
+            try:
+                d = pb.dataForType_(t)
+            except Exception:
+                d = None
+            if d:
+                old_data[t] = d
+    return old_data
+
+
+def _restore_pasteboard(pb, old_data):
+    pb.clearContents()
+    if old_data:
+        for t, d in old_data.items():
+            try:
+                pb.setData_forType_(d, t)
+            except Exception:
+                pass
+
+
 def replace_selection(text: str):
     """Replace the currently selected text with new text."""
     pb = _get_pasteboard()
-    pb.clearContents()
-    pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-    time.sleep(PASTEBOARD_SETTLE_DELAY)
-    _press_cmd_v()
+    old_data = _snapshot_pasteboard(pb)
+    try:
+        pb.clearContents()
+        pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+        time.sleep(PASTEBOARD_SETTLE_DELAY)
+        _press_cmd_v()
+        time.sleep(CLIPBOARD_RESTORE_DELAY)
+    finally:
+        _restore_pasteboard(pb, old_data)
+
+
+def delete_chars(count: int):
+    """Send `count` backspace events to remove the previous `count` characters.
+
+    Used by the "undo last dictation" voice command. Falls back silently
+    if the CGEvent post fails.
+    """
+    if count <= 0:
+        return
+    try:
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        delete_keycode = 51  # macOS keycode for the Delete (backspace) key
+        for _ in range(count):
+            down = Quartz.CGEventCreateKeyboardEvent(src, delete_keycode, True)
+            Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, down)
+            up = Quartz.CGEventCreateKeyboardEvent(src, delete_keycode, False)
+            Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, up)
+            time.sleep(0.005)
+    except Exception as e:
+        logger.error(f"delete_chars failed: {e}")
 
 
 def _insert_via_keystroke(text: str):

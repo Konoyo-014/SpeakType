@@ -11,10 +11,10 @@
 - **Push-to-talk and toggle dictation** -- hold Right Command (configurable) to record; release to transcribe and insert
 - **AI text polishing** -- removes filler words, fixes grammar, preserves your tone (powered by local LLM via Ollama)
 - **Real-time streaming preview** -- floating overlay shows transcription as you speak
+- **Adaptive Whisper Mode** -- automatically detects very low-volume speech and boosts it locally during recording, without exposing a manual toggle
 - **Context-aware tone** -- automatically adjusts formality based on the active app (email vs Slack vs code editor)
 - **Post-transcription translation** -- translate output to English, Chinese, Japanese, Korean, Spanish, French, or German
 - **Voice commands** -- say "new line", "period", "make it shorter", "fix grammar", "translate to Chinese", etc.
-- **Whisper compatibility** -- switch between Qwen3-ASR and OpenAI Whisper backends
 - **Audio device selection** -- choose your preferred microphone from the menubar
 - **Custom dictionary and snippets** -- define words to always recognize correctly; trigger phrases for text expansion
 - **Plugin system** -- extend SpeakType with Python plugins (`~/.speaktype/plugins/`)
@@ -35,8 +35,8 @@
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/speaktype/speaktype.git
-cd speaktype
+git clone https://github.com/Konoyo-014/SpeakType.git
+cd SpeakType
 ```
 
 **2. Create a virtual environment and install dependencies**
@@ -93,7 +93,7 @@ echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.zshrc
 ./build_dmg.sh --app
 ```
 
-The standalone app bundle is created at `dist/SpeakType.app`.
+The standalone workspace bundle is created at `dist/SpeakType.app`. For a release-ready installer, run `./build_dmg.sh` and distribute the generated DMG instead. The DMG path uses a cleaned, re-signed temporary copy so Desktop/iCloud file-provider metadata does not invalidate the bundle signature.
 
 ## Usage
 
@@ -143,7 +143,7 @@ Enable post-transcription translation from the menubar. Supported targets: Engli
 
 ### Snippets
 
-Define trigger phrases that expand into saved text. For example, say "my email" to insert your email address. Manage snippets from the menubar: Dictionary & Snippets.
+Define trigger phrases that expand into saved text. For example, say "my email" to insert your email address. Snippet bodies support `{date}`, `{time}`, `{datetime}`, `{clipboard}`, and `{env:NAME}`. Sensitive placeholders like `{clipboard}` and `{env:...}` only expand on exact trigger matches, so fuzzy matching cannot accidentally inject local secrets. Manage snippets from the menubar: Dictionary & Snippets.
 
 ## Configuration
 
@@ -155,7 +155,7 @@ Key options:
 |---|---|---|
 | `hotkey` | `"right_cmd"` | Push-to-talk key. Options: `right_cmd`, `left_cmd`, `fn`, `right_alt`, `right_ctrl`, `ctrl+shift+space`, `f5`, `f6` |
 | `dictation_mode` | `"push_to_talk"` | `"push_to_talk"` or `"toggle"` |
-| `asr_backend` | `"qwen"` | `"qwen"` (Qwen3-ASR via mlx-audio) or `"whisper"` (OpenAI Whisper) |
+| `asr_backend` | `"qwen"` | Legacy compatibility key. v2.1 always runs Qwen3-ASR and normalizes old Whisper configs back to `qwen` |
 | `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | HuggingFace model ID for Qwen ASR |
 | `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | Ollama model for text polishing |
 | `ollama_url` | `"http://localhost:11434"` | Ollama API endpoint |
@@ -163,7 +163,7 @@ Key options:
 | `language` | `"auto"` | ASR language: `"auto"`, `"en"`, `"zh"`, `"ja"`, `"ko"` |
 | `translate_enabled` | `false` | Enable post-transcription translation |
 | `translate_target` | `"en"` | Translation target language |
-| `streaming_preview` | `false` | Show real-time transcription overlay |
+| `streaming_preview` | `true` | Show real-time transcription overlay |
 | `voice_commands_enabled` | `true` | Enable voice command processing |
 | `context_aware_tone` | `true` | Adjust polishing tone per-app |
 | `insert_method` | `"paste"` | `"paste"` (clipboard + Cmd+V) or `"type"` (key-by-key) |
@@ -213,7 +213,7 @@ Plugins prefixed with `_` (e.g., `_example_plugin.py`) are ignored.
 ```
 Hotkey press
   -> Record audio (sounddevice)
-  -> ASR: Qwen3-ASR via mlx-audio  (or Whisper)
+  -> ASR: Qwen3-ASR via mlx-audio
   -> Voice command detection / Snippet matching
   -> LLM polish via Ollama (optional)
   -> Translation (optional)
@@ -224,7 +224,7 @@ All processing runs locally on-device. Audio files are deleted immediately after
 
 **Key components:**
 
-- **ASR**: `mlx-community/Qwen3-ASR-1.7B-8bit` via mlx-audio, with Whisper fallback
+- **ASR**: `mlx-community/Qwen3-ASR-1.7B-8bit` via mlx-audio
 - **LLM**: `huihui_ai/qwen3.5-abliterated:9b-Claude` via Ollama (local inference)
 - **Text insertion**: CGEvent keyboard simulation + NSPasteboard clipboard
 - **UI**: rumps (NSStatusItem menubar), AppKit (native settings windows)
@@ -274,6 +274,9 @@ python -m pytest tests/ -v
 
 # Build .app bundle
 ./build_dmg.sh --app
+
+# Build the release DMG
+./build_dmg.sh
 ```
 
 ## Contributing

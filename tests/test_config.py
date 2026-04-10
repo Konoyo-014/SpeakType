@@ -28,7 +28,7 @@ class TestDefaultConfig:
         assert DEFAULT_CONFIG["dictation_mode"] == "push_to_talk"
         assert DEFAULT_CONFIG["asr_backend"] == "qwen"
         assert DEFAULT_CONFIG["audio_device"] is None
-        assert DEFAULT_CONFIG["streaming_preview"] is False
+        assert DEFAULT_CONFIG["streaming_preview"] is True
         assert DEFAULT_CONFIG["plugins_enabled"] is False
         assert DEFAULT_CONFIG["last_seen_version"] == ""
 
@@ -81,6 +81,16 @@ class TestLoadSaveConfig:
                 save_config({"bad": object()})
             assert not config_file.exists()
             assert not list(tmp_path.glob(".config.json.*.tmp"))
+
+    def test_load_clamps_legacy_whisper_backend_to_qwen(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text('{"asr_backend": "whisper", "whisper_model": "large"}')
+        with patch("speaktype.config.CONFIG_FILE", config_file), \
+             patch("speaktype.config.CONFIG_DIR", tmp_path):
+            from speaktype.config import load_config
+            config = load_config()
+            assert config["asr_backend"] == "qwen"
+            assert config["whisper_model"] == "large"
 
 
 class TestCustomDictionary:
