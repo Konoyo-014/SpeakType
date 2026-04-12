@@ -10,7 +10,7 @@ import time
 import pytest
 
 from speaktype import status_overlay
-from speaktype.status_overlay import StatusOverlay, _format_duration
+from speaktype.status_overlay import StatusOverlay, _format_duration, _sanitize_display_text
 
 
 @pytest.fixture
@@ -108,6 +108,12 @@ class TestStateTransitions:
         assert overlay.state == "done"
         assert overlay._text == "final text"
 
+    def test_show_error_sets_text(self, overlay):
+        overlay.show_recording()
+        overlay.show_error("insert failed", auto_hide_after=0)
+        assert overlay.state == "error"
+        assert overlay._text == "insert failed"
+
     def test_full_pipeline_state_sequence(self, overlay):
         overlay.show_recording()
         assert overlay.state == "recording"
@@ -136,6 +142,15 @@ class TestPartialTextUpdates:
         overlay.update_partial_text("real")
         overlay.update_partial_text("")
         assert overlay._text == ""
+
+    def test_update_partial_text_sanitizes_display_only_artifacts(self, overlay):
+        overlay.update_partial_text("hello<|zh|>\x00世\u754c\r\nnext\tline")
+        assert overlay._text == "hello世界\nnext line"
+
+
+class TestDisplaySanitization:
+    def test_sanitize_display_text_removes_special_tokens_and_controls(self):
+        assert _sanitize_display_text("<|startoftranscript|>hi\x00\r\nthere") == "hi\nthere"
 
 
 class TestAudioLevel:

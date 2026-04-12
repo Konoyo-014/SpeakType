@@ -7,16 +7,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from speaktype.streaming import StreamingTranscriber, _extract_text
+from speaktype.streaming import StreamingTranscriber, _extract_text, _should_use_native_stream
 
 
 class _FakeASR:
     """Minimal ASR engine stub used by StreamingTranscriber."""
 
-    def __init__(self, model=None, loaded=True, backend="qwen"):
+    def __init__(self, model=None, loaded=True, backend="qwen", inference_available=True):
         self.model = model
         self._loaded = loaded
         self.backend = backend
+        self.inference_available = inference_available
+        self.acquired = 0
+        self.released = 0
+
+    def acquire_inference(self, blocking=True):
+        if not self.inference_available:
+            return False
+        self.acquired += 1
+        return True
+
+    def release_inference(self):
+        self.released += 1
 
 
 class _FakeStreamingModel:
@@ -53,6 +65,20 @@ def test_extract_text_handles_unknown():
     assert _extract_text(42) == ""
 
 
+def test_qwen_backend_uses_chunked_preview_even_with_native_stream_method():
+    model = _FakeStreamingModel(frames=[SimpleNamespace(text="hi")])
+    asr = _FakeASR(model=model, loaded=True, backend="qwen")
+
+    assert _should_use_native_stream(asr, model) is False
+
+
+def test_non_qwen_backend_can_use_native_stream_method():
+    model = _FakeStreamingModel(frames=[SimpleNamespace(text="hi")])
+    asr = _FakeASR(model=model, loaded=True, backend="custom")
+
+    assert _should_use_native_stream(asr, model) is True
+
+
 def test_emit_partial_invokes_callback():
     received = []
     asr = _FakeASR(loaded=False)  # loaded=False means stream loop won't run
@@ -76,6 +102,30 @@ def test_stop_returns_accumulated_text():
     transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
     transcriber._accumulated_text = "captured"
     assert transcriber.stop() == "captured"
+
+
+def test_stop_can_skip_join(monkeypatch):
+    asr = _FakeASR(loaded=False)
+    transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
+    joins = []
+    transcriber._thread = SimpleNamespace(join=lambda timeout=None: joins.append(timeout))
+    transcriber._running = True
+
+    assert transcriber.stop(wait=False) == ""
+    assert joins == []
+    assert transcriber._thread is None
+
+
+def test_stop_disables_future_partial_callbacks():
+    received = []
+    asr = _FakeASR(loaded=False)
+    transcriber = StreamingTranscriber(asr, on_partial_text=received.append)
+
+    transcriber.stop(wait=False)
+    transcriber._emit_partial("hello")
+
+    assert received == []
+    assert transcriber.accumulated_text == "hello"
 
 
 def test_stream_loop_aborts_when_asr_not_loaded():
@@ -141,6 +191,32 @@ def test_run_native_stream_omits_language_for_auto():
     transcriber._running = True
     transcriber._run_native_stream(model, audio_data=b"x", language="auto")
     assert "language" not in model.calls[0]
+
+
+def test_run_native_stream_skips_when_inference_busy():
+    received = []
+    model = _FakeStreamingModel(frames=[SimpleNamespace(text="hi")])
+    asr = _FakeASR(model=model, loaded=True, inference_available=False)
+    transcriber = StreamingTranscriber(asr, on_partial_text=received.append)
+    transcriber._running = True
+
+    transcriber._run_native_stream(model, audio_data=b"x", language="auto")
+
+    assert received == []
+    assert model.calls == []
+    assert asr.released == 0
+
+
+def test_run_native_stream_releases_inference_slot():
+    model = _FakeStreamingModel(frames=[SimpleNamespace(text="hi")])
+    asr = _FakeASR(model=model, loaded=True)
+    transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
+    transcriber._running = True
+
+    transcriber._run_native_stream(model, audio_data=b"x", language="auto")
+
+    assert asr.acquired == 1
+    assert asr.released == 1
 
 
 def test_run_native_stream_stops_when_running_flag_clears():
@@ -254,3 +330,55 @@ def test_run_chunked_skips_non_qwen_backends(monkeypatch):
     transcriber._run_chunked(audio_data=b"x", language="auto")
 
     assert received == []
+
+
+def test_run_chunked_uses_temp_output_path_and_cleans_mlx_transcript(tmp_path, monkeypatch):
+    received = []
+    output_stem = str(tmp_path / "stream-output")
+    calls = []
+    asr = _FakeASR(model=object(), loaded=True, backend="qwen")
+    transcriber = StreamingTranscriber(asr, on_partial_text=received.append)
+
+    def fake_generate_transcription(**kwargs):
+        calls.append(kwargs)
+        (tmp_path / "stream-output.txt").write_text("leaked", encoding="utf-8")
+        return SimpleNamespace(text="partial")
+
+    monkeypatch.setattr("speaktype.asr._make_temp_transcript_output_path", lambda: output_stem)
+    monkeypatch.setattr("mlx_audio.stt.generate.generate_transcription", fake_generate_transcription)
+
+    transcriber._run_chunked(audio_data=b"x", language="auto")
+
+    assert received == ["partial"]
+    assert calls and calls[0]["output_path"] == output_stem
+    assert not (tmp_path / "stream-output.txt").exists()
+
+
+def test_run_chunked_skips_when_inference_busy(monkeypatch):
+    received = []
+    asr = _FakeASR(model=object(), loaded=True, backend="qwen", inference_available=False)
+    transcriber = StreamingTranscriber(asr, on_partial_text=received.append)
+
+    monkeypatch.setattr(
+        "mlx_audio.stt.generate.generate_transcription",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
+    )
+
+    transcriber._run_chunked(audio_data=b"x", language="auto")
+
+    assert received == []
+    assert asr.released == 0
+
+
+def test_run_chunked_releases_inference_slot(tmp_path, monkeypatch):
+    output_stem = str(tmp_path / "stream-output")
+    asr = _FakeASR(model=object(), loaded=True, backend="qwen")
+    transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
+
+    monkeypatch.setattr("speaktype.asr._make_temp_transcript_output_path", lambda: output_stem)
+    monkeypatch.setattr("mlx_audio.stt.generate.generate_transcription", lambda **kwargs: SimpleNamespace(text="partial"))
+
+    transcriber._run_chunked(audio_data=b"x", language="auto")
+
+    assert asr.acquired == 1
+    assert asr.released == 1

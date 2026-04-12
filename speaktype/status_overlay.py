@@ -9,6 +9,7 @@ Designed as a continuous-curve squircle HUD with:
     transcribing -> spinning arc         (tinted orange)
     polishing    -> spinning arc         (tinted blue)
     done         -> SF Symbol checkmark  (tinted green)
+    error        -> SF Symbol warning    (tinted red)
 - An SF Symbol ``moon.stars.fill`` whisper indicator (no more emoji clipping).
 - No numeric timer — the waveform itself IS the "recording is active" cue.
 - Word-wrapped transcription with fluid top-anchored window growth: the
@@ -23,7 +24,9 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import threading
+import unicodedata
 
 import AppKit
 import objc
@@ -76,7 +79,22 @@ STATE_LABELS = {
     "transcribing": "Transcribing\u2026",
     "polishing": "Polishing\u2026",
     "done": "",
+    "error": "Error",
 }
+
+_ASR_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|\r\n]{0,80}\|>")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitize_display_text(text) -> str:
+    """Normalize text for overlay display without changing inserted output."""
+    if text is None:
+        return ""
+    clean = str(text)
+    clean = clean.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    clean = _ASR_SPECIAL_TOKEN_RE.sub("", clean)
+    clean = _CONTROL_CHARS_RE.sub("", clean)
+    return unicodedata.normalize("NFC", clean)
 
 
 def _state_color(state: str):
@@ -89,6 +107,8 @@ def _state_color(state: str):
         return AppKit.NSColor.systemBlueColor()
     if state == "done":
         return AppKit.NSColor.systemGreenColor()
+    if state == "error":
+        return AppKit.NSColor.systemRedColor()
     return AppKit.NSColor.secondaryLabelColor()
 
 
@@ -345,6 +365,16 @@ class _StateIndicatorView(AppKit.NSView):
             self._check_view.setHidden_(True)
             self.addSubview_(self._check_view)
 
+        self._error_view = _create_sf_symbol_view(
+            "exclamationmark.triangle.fill",
+            17,
+            AppKit.NSColor.systemRedColor(),
+            inner,
+        )
+        if self._error_view is not None:
+            self._error_view.setHidden_(True)
+            self.addSubview_(self._error_view)
+
         self._state = "idle"
         return self
 
@@ -360,6 +390,8 @@ class _StateIndicatorView(AppKit.NSView):
             self._spinner.setHidden_(True)
             if self._check_view is not None:
                 self._check_view.setHidden_(True)
+            if self._error_view is not None:
+                self._error_view.setHidden_(True)
         elif state in ("transcribing", "polishing"):
             self._waveform.stop_animating()
             self._waveform.setHidden_(True)
@@ -368,6 +400,8 @@ class _StateIndicatorView(AppKit.NSView):
             self._spinner.start_animating()
             if self._check_view is not None:
                 self._check_view.setHidden_(True)
+            if self._error_view is not None:
+                self._error_view.setHidden_(True)
         elif state == "done":
             self._waveform.stop_animating()
             self._waveform.setHidden_(True)
@@ -379,6 +413,21 @@ class _StateIndicatorView(AppKit.NSView):
                 except Exception:
                     pass
                 self._check_view.setHidden_(False)
+            if self._error_view is not None:
+                self._error_view.setHidden_(True)
+        elif state == "error":
+            self._waveform.stop_animating()
+            self._waveform.setHidden_(True)
+            self._spinner.stop_animating()
+            self._spinner.setHidden_(True)
+            if self._check_view is not None:
+                self._check_view.setHidden_(True)
+            if self._error_view is not None:
+                try:
+                    self._error_view.setContentTintColor_(color)
+                except Exception:
+                    pass
+                self._error_view.setHidden_(False)
         else:  # idle
             self._waveform.stop_animating()
             self._waveform.setHidden_(True)
@@ -386,6 +435,8 @@ class _StateIndicatorView(AppKit.NSView):
             self._spinner.setHidden_(True)
             if self._check_view is not None:
                 self._check_view.setHidden_(True)
+            if self._error_view is not None:
+                self._error_view.setHidden_(True)
 
         self._state = state
 
@@ -478,7 +529,7 @@ class StatusOverlay:
         with self._lock:
             self._state = "polishing"
             if text:
-                self._text = text
+                self._text = _sanitize_display_text(text)
         self._dispatch_main(b"refreshMain:")
 
     def show_done(self, text: str = "", auto_hide_after: float = 0.6):
@@ -486,7 +537,17 @@ class StatusOverlay:
         with self._lock:
             self._state = "done"
             if text:
-                self._text = text
+                self._text = _sanitize_display_text(text)
+        self._dispatch_main(b"refreshMain:")
+        if auto_hide_after > 0:
+            self._schedule_auto_hide(auto_hide_after)
+
+    def show_error(self, text: str = "", auto_hide_after: float = 3.0):
+        """Switch to error state with a visible message, then auto-hide."""
+        with self._lock:
+            self._state = "error"
+            if text:
+                self._text = _sanitize_display_text(text)
         self._dispatch_main(b"refreshMain:")
         if auto_hide_after > 0:
             self._schedule_auto_hide(auto_hide_after)
@@ -496,7 +557,7 @@ class StatusOverlay:
         if text is None:
             return
         with self._lock:
-            self._text = text
+            self._text = _sanitize_display_text(text)
         self._dispatch_main(b"refreshMain:")
 
     def update_audio_level(self, level: float):
@@ -610,7 +671,7 @@ class StatusOverlay:
         )
         content.addSubview_(self._indicator)
 
-        # Text field — word-wrapped
+        # Text field — character-wrapped so CJK, paths, and long tokens do not overflow.
         text_width = WINDOW_WIDTH - TEXT_LEFT - RIGHT_PADDING
         self._text_field = AppKit.NSTextField.alloc().initWithFrame_(
             NSMakeRect(
@@ -641,7 +702,7 @@ class StatusOverlay:
                 cell.setUsesSingleLineMode_(False)
                 cell.setWraps_(True)
                 cell.setTruncatesLastVisibleLine_(False)
-                cell.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                cell.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
                 cell.setScrollable_(False)
             except Exception:
                 pass
@@ -805,7 +866,7 @@ class StatusOverlay:
                 TEXT_FONT_SIZE, AppKit.NSFontWeightMedium
             )
             paragraph = AppKit.NSMutableParagraphStyle.alloc().init()
-            paragraph.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+            paragraph.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
             attrs = {
                 AppKit.NSFontAttributeName: font,
                 AppKit.NSParagraphStyleAttributeName: paragraph,

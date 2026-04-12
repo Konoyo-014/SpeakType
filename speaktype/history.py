@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
@@ -19,6 +20,7 @@ class DictationHistory:
     def __init__(self, max_entries=1000):
         self.max_entries = max_entries
         self._entries = []
+        self._lock = threading.Lock()
         self._load()
 
     def _load(self):
@@ -44,26 +46,44 @@ class DictationHistory:
             "app": app_name,
             "duration": round(duration_sec, 1),
         }
-        self._entries.append(entry)
-        if len(self._entries) > self.max_entries:
-            self._entries = self._entries[-self.max_entries:]
-        self._save()
+        with self._lock:
+            self._entries.append(entry)
+            if len(self._entries) > self.max_entries:
+                self._entries = self._entries[-self.max_entries:]
+            self._save()
+
+    def add_async(self, raw_text: str, polished_text: str, app_name: str = "", duration_sec: float = 0):
+        threading.Thread(
+            target=self.add,
+            kwargs={
+                "raw_text": raw_text,
+                "polished_text": polished_text,
+                "app_name": app_name,
+                "duration_sec": duration_sec,
+            },
+            daemon=True,
+            name="SpeakTypeHistorySave",
+        ).start()
 
     def get_recent(self, count=20) -> list:
-        return self._entries[-count:]
+        with self._lock:
+            return list(self._entries[-count:])
 
     def get_stats(self) -> dict:
-        total_words = sum(len(e.get("polished", "").split()) for e in self._entries)
-        total_duration = sum(e.get("duration", 0) for e in self._entries)
+        with self._lock:
+            entries = list(self._entries)
+        total_words = sum(len(e.get("polished", "").split()) for e in entries)
+        total_duration = sum(e.get("duration", 0) for e in entries)
         return {
-            "total_entries": len(self._entries),
+            "total_entries": len(entries),
             "total_words": total_words,
             "total_duration_min": round(total_duration / 60, 1),
         }
 
     def clear(self):
-        self._entries = []
-        self._save()
+        with self._lock:
+            self._entries = []
+            self._save()
 
     # ------------------------------------------------------------------ #
     # Export                                                              #

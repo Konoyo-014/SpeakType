@@ -1,9 +1,11 @@
 """Insert text at the cursor position in any application using CGEvent."""
 
-import time
 import logging
+import threading
+import time
 import AppKit
 import Quartz
+from .applescript import run_osascript
 from ApplicationServices import (
     AXUIElementCopyAttributeValue,
     AXUIElementCreateSystemWide,
@@ -17,16 +19,22 @@ from ApplicationServices import (
 logger = logging.getLogger("speaktype.inserter")
 
 PASTEBOARD_SETTLE_DELAY = 0.08
+PASTE_VERIFY_INTERVAL = 0.05
+PASTE_VERIFY_ATTEMPTS = 7
 CLIPBOARD_RESTORE_DELAY = 0.75
 KEYCODE_V = 9
 KEYCODE_COMMAND = 55
 TARGET_ACTIVATION_DELAY = 0.3
 
+_clipboard_restore_lock = threading.Lock()
+_clipboard_restore_token = 0
+_clipboard_restore_data = None
 
-def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id: str = ""):
+
+def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id: str = "") -> bool:
     """Insert text at the current cursor position."""
     if not text:
-        return
+        return True
     _prepare_target_app(bundle_id=bundle_id, app_name=app_name)
     logger.info(
         "Insert text via %s (%d chars) into %s [%s]",
@@ -36,61 +44,93 @@ def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id:
         bundle_id or "",
     )
     if method == "paste":
-        _insert_via_paste(text, app_name=app_name)
-    else:
-        _insert_via_keystroke(text)
+        return _insert_via_paste(text, app_name=app_name)
+    return _insert_via_keystroke(text)
 
 
-def _insert_via_paste(text: str, app_name: str = ""):
+def _insert_via_paste(text: str, app_name: str = "") -> bool:
     """Insert text by setting pasteboard and simulating Cmd+V via CGEvent."""
     if _insert_via_accessibility(text):
-        return
-
-    if _insert_via_keystroke(text):
-        logger.info(
-            "Accessibility insertion unavailable; direct keystroke fallback succeeded (%d chars, app=%s)",
-            len(text),
+        return True
+    if not _can_post_synthetic_input():
+        logger.error(
+            "Cannot use paste/keystroke insertion because PostEvent access is not granted (app=%s)",
             app_name or "Unknown",
         )
-        return
+        return False
 
+    pb = None
+    old_data = {}
     try:
-        # Save current pasteboard
+        element = _get_focused_element()
+        value_before = _copy_ax_attribute(element, "AXValue") if element is not None else None
         pb = _get_pasteboard()
-        old_types = pb.types()
-        old_data = {}
-        if old_types:
-            for t in old_types:
-                d = pb.dataForType_(t)
-                if d:
-                    old_data[t] = d
+        old_data = _snapshot_restore_data(pb)
 
         # Set our text
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+        expected_change_count = _get_pasteboard_change_count(pb)
 
         time.sleep(PASTEBOARD_SETTLE_DELAY)
 
         # Some desktop shells handle UI scripting paste more reliably than raw
         # CGEvents, especially when the editor is embedded inside Chromium.
         _press_cmd_v(app_name=app_name)
+        verification = _verify_paste_result(element, value_before, text)
+        if verification is True or verification is None:
+            _schedule_pasteboard_restore(
+                old_data,
+                temporary_text=text,
+                expected_change_count=expected_change_count,
+            )
+            logger.info("Clipboard paste path completed (app=%s)", app_name or "Unknown")
+            return True
 
-        # Give the target app enough time to read the pasteboard before restoring
-        # the user's clipboard. Electron-based apps often paste asynchronously.
-        time.sleep(CLIPBOARD_RESTORE_DELAY)
-        if old_data:
-            pb.clearContents()
-            for t, d in old_data.items():
-                try:
-                    pb.setData_forType_(d, t)
-                except Exception:
-                    pass
-        else:
-            pb.clearContents()
+        logger.info(
+            "Quartz paste did not change the focused text field; retrying via System Events (app=%s)",
+            app_name or "Unknown",
+        )
+        if _press_cmd_v_with_osascript(app_name=app_name):
+            verification = _verify_paste_result(element, value_before, text)
+            if verification is True or verification is None:
+                _schedule_pasteboard_restore(
+                    old_data,
+                    temporary_text=text,
+                    expected_change_count=expected_change_count,
+                )
+                logger.info("Clipboard paste path completed via System Events (app=%s)", app_name or "Unknown")
+                return True
+
+        if _insert_via_keystroke(text):
+            _schedule_pasteboard_restore(
+                old_data,
+                temporary_text=text,
+                expected_change_count=expected_change_count,
+            )
+            logger.info(
+                "Clipboard paste failed verification; direct keystroke fallback succeeded (%d chars, app=%s)",
+                len(text),
+                app_name or "Unknown",
+            )
+            return True
+
+        _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+        logger.error("Clipboard paste failed verification (app=%s)", app_name or "Unknown")
+        return False
 
     except Exception as e:
         logger.error(f"Paste insertion failed: {e}")
-        _insert_via_keystroke(text)
+        if pb is not None:
+            _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+        if _insert_via_keystroke(text):
+            logger.info(
+                "Clipboard paste failed; direct keystroke fallback succeeded (%d chars, app=%s)",
+                len(text),
+                app_name or "Unknown",
+            )
+            return True
+        return False
 
 
 def _press_cmd_v(app_name: str = ""):
@@ -102,6 +142,65 @@ def _press_cmd_v(app_name: str = ""):
     _post_key_event(src, tap, KEYCODE_V, False, Quartz.kCGEventFlagMaskCommand)
     _post_key_event(src, tap, KEYCODE_COMMAND, False, 0)
     logger.info("Paste shortcut sent via Quartz CGEvent (app=%s)", app_name or "Unknown")
+
+
+def _can_post_synthetic_input() -> bool:
+    checker = getattr(Quartz, "CGPreflightPostEventAccess", None)
+    if not callable(checker):
+        return True
+    try:
+        return bool(checker())
+    except Exception:
+        return True
+
+
+def _press_cmd_v_with_osascript(app_name: str = "") -> bool:
+    """Retry paste through System Events for apps that ignore raw CGEvents."""
+    script = 'tell application "System Events" to keystroke "v" using command down'
+    try:
+        result = run_osascript(script, timeout=2)
+    except Exception as e:
+        logger.info("System Events paste failed to run (app=%s): %s", app_name or "Unknown", e)
+        return False
+    if result.returncode == 0:
+        logger.info("Paste shortcut sent via System Events (app=%s)", app_name or "Unknown")
+        return True
+    logger.info(
+        "System Events paste returned %s (app=%s): %s",
+        result.returncode,
+        app_name or "Unknown",
+        result.stderr.strip(),
+    )
+    return False
+
+
+def _verify_paste_result(element, value_before, inserted_text: str):
+    """Return True/False when AXValue can prove paste success/failure, else None."""
+    if element is None or not isinstance(value_before, str):
+        return None
+    value_after = value_before
+    for _ in range(PASTE_VERIFY_ATTEMPTS):
+        time.sleep(PASTE_VERIFY_INTERVAL)
+        value_after = _copy_ax_attribute(element, "AXValue")
+        if not isinstance(value_after, str):
+            return None
+        if value_after != value_before:
+            if inserted_text and inserted_text in value_after:
+                return True
+            logger.info(
+                "Paste verification found AXValue changed without exact inserted text (value_before=%r, value_after=%r)",
+                value_before,
+                value_after,
+            )
+            return False
+    if not isinstance(value_after, str):
+        return None
+    logger.info(
+        "Paste verification found unchanged AXValue (value_before=%r, value_after=%r)",
+        value_before,
+        value_after,
+    )
+    return False
 
 
 def _post_key_event(source, tap, keycode: int, is_down: bool, flags: int = 0):
@@ -165,12 +264,16 @@ def _insert_via_accessibility(text: str) -> bool:
         time.sleep(0.05)
         value_after = _copy_ax_attribute(element, "AXValue")
         selected_after = _copy_ax_attribute(element, kAXSelectedTextAttribute)
-        if value_after != value_before or selected_after == text:
+        if (
+            isinstance(value_after, str)
+            and value_after != value_before
+            and text in value_after
+        ):
             logger.info("Inserted text via Accessibility API (role=%s)", role)
             return True
 
         logger.info(
-            "Accessibility API reported success without text change (role=%s, value_before=%r, value_after=%r, selected_before=%r, selected_after=%r)",
+            "Accessibility API reported success without verified text insertion (role=%s, value_before=%r, value_after=%r, selected_before=%r, selected_after=%r)",
             role,
             value_before,
             value_after,
@@ -216,6 +319,13 @@ def _get_pasteboard():
     return AppKit.NSPasteboard.generalPasteboard()
 
 
+def _snapshot_restore_data(pb):
+    with _clipboard_restore_lock:
+        if _clipboard_restore_data is not None:
+            return dict(_clipboard_restore_data)
+    return _snapshot_pasteboard(pb)
+
+
 def _snapshot_pasteboard(pb):
     old_types = pb.types()
     old_data = {}
@@ -240,18 +350,95 @@ def _restore_pasteboard(pb, old_data):
                 pass
 
 
-def replace_selection(text: str):
+def _get_pasteboard_change_count(pb):
+    getter = getattr(pb, "changeCount", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    return None
+
+
+def _pasteboard_still_has_temporary_text(pb, temporary_text: str, expected_change_count=None) -> bool:
+    current_change_count = _get_pasteboard_change_count(pb)
+    if expected_change_count is not None and current_change_count is not None:
+        return current_change_count == expected_change_count
+
+    getter = getattr(pb, "stringForType_", None)
+    if callable(getter):
+        try:
+            return getter(AppKit.NSPasteboardTypeString) == temporary_text
+        except Exception:
+            return False
+    return False
+
+
+def _cancel_pending_pasteboard_restore(fallback_old_data):
+    global _clipboard_restore_data, _clipboard_restore_token
+    with _clipboard_restore_lock:
+        _clipboard_restore_token += 1
+        old_data = _clipboard_restore_data
+        _clipboard_restore_data = None
+    return old_data if old_data is not None else fallback_old_data
+
+
+def _schedule_pasteboard_restore(old_data, temporary_text: str, expected_change_count=None, delay: float = CLIPBOARD_RESTORE_DELAY):
+    global _clipboard_restore_data, _clipboard_restore_token
+    with _clipboard_restore_lock:
+        _clipboard_restore_token += 1
+        token = _clipboard_restore_token
+        if _clipboard_restore_data is None:
+            _clipboard_restore_data = old_data
+        restore_data = dict(_clipboard_restore_data)
+
+    thread = threading.Thread(
+        target=_restore_pasteboard_after_delay,
+        args=(token, restore_data, temporary_text, expected_change_count, delay),
+        daemon=True,
+    )
+    thread.start()
+
+
+def _restore_pasteboard_after_delay(token: int, old_data, temporary_text: str, expected_change_count=None, delay: float = CLIPBOARD_RESTORE_DELAY):
+    global _clipboard_restore_data
+    time.sleep(delay)
+    pb = _get_pasteboard()
+    should_restore = _pasteboard_still_has_temporary_text(
+        pb,
+        temporary_text=temporary_text,
+        expected_change_count=expected_change_count,
+    )
+    with _clipboard_restore_lock:
+        if token != _clipboard_restore_token:
+            return
+        _clipboard_restore_data = None
+
+    if should_restore:
+        _restore_pasteboard(pb, old_data)
+    else:
+        logger.debug("Skipped clipboard restore because pasteboard changed after paste")
+
+
+def replace_selection(text: str) -> bool:
     """Replace the currently selected text with new text."""
     pb = _get_pasteboard()
-    old_data = _snapshot_pasteboard(pb)
+    old_data = _snapshot_restore_data(pb)
     try:
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+        expected_change_count = _get_pasteboard_change_count(pb)
         time.sleep(PASTEBOARD_SETTLE_DELAY)
         _press_cmd_v()
-        time.sleep(CLIPBOARD_RESTORE_DELAY)
-    finally:
-        _restore_pasteboard(pb, old_data)
+        _schedule_pasteboard_restore(
+            old_data,
+            temporary_text=text,
+            expected_change_count=expected_change_count,
+        )
+        return True
+    except Exception:
+        _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+        raise
 
 
 def delete_chars(count: int):

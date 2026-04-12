@@ -1,5 +1,6 @@
 """Runtime helpers for distinguishing source and bundled execution."""
 
+import hashlib
 from pathlib import Path
 
 BUNDLE_IDENTIFIER = "com.speaktype.app"
@@ -42,6 +43,34 @@ def get_runtime_version(default_version: str) -> str:
         return build_version or default_version
     except Exception:
         return default_version
+
+
+def get_bundle_fingerprint(bundle_path: str | None = None) -> str:
+    """Return a stable fingerprint for the currently installed app bundle."""
+    active_bundle = bundle_path if bundle_path is not None else get_running_bundle_path()
+    if not active_bundle:
+        return ""
+
+    bundle = Path(active_bundle).expanduser().resolve()
+    candidates = [
+        bundle / "Contents" / "Info.plist",
+        bundle / "Contents" / "MacOS" / "SpeakType",
+        bundle / "Contents" / "_CodeSignature" / "CodeResources",
+    ]
+    digest = hashlib.sha256()
+    found = False
+    for path in candidates:
+        if not path.exists() or not path.is_file():
+            continue
+        found = True
+        stat = path.stat()
+        digest.update(str(path.relative_to(bundle)).encode("utf-8"))
+        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest() if found else ""
 
 
 def get_launch_program_args(module_file: str, bundle_path: str | None = None) -> tuple[list[str], str]:

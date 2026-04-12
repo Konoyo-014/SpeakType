@@ -4,6 +4,7 @@ import atexit
 import importlib.util
 import os
 from pathlib import Path
+import py_compile
 import re
 import shutil
 from setuptools import setup
@@ -32,24 +33,38 @@ def _patch_site_py():
     py2app's generated site.py defines PREFIXES at the end, causing a circular
     import crash. This moves it before the sitecustomize import.
     """
-    site_py = Path("dist/SpeakType.app/Contents/Resources/site.py")
-    if not site_py.exists():
+    resources_dir = Path("dist/SpeakType.app/Contents/Resources")
+    site_py = resources_dir / "site.py"
+    site_pyc = resources_dir / "site.pyc"
+    if not resources_dir.exists():
         return
-    text = site_py.read_text()
+
+    if site_py.exists():
+        text = site_py.read_text(encoding="utf-8")
+    else:
+        import py2app
+
+        template_py = Path(py2app.__file__).resolve().parent / "apptemplate" / "lib" / "site.py"
+        if not template_py.exists():
+            return
+        text = template_py.read_text(encoding="utf-8")
+
     needle = "PREFIXES = [sys.prefix, sys.exec_prefix]"
-    if text.count(needle) != 1:
+    if needle not in text:
         return
-    # Remove the line from its original position
+
     text = text.replace("# Prefixes for site-packages; add additional prefixes like /usr/local here\n" + needle, "")
-    # Insert before sitecustomize import
+    text = text.replace(needle, "")
     text = text.replace(
         "#\n# Run custom site specific code, if available.\n#",
         "# Prefixes for site-packages (must be set before sitecustomize import)\n"
         + needle + "\n\n"
         "#\n# Run custom site specific code, if available.\n#",
     )
-    site_py.write_text(text)
-    print("*** patched site.py: moved PREFIXES before sitecustomize import ***")
+    site_py.write_text(text, encoding="utf-8")
+    if site_pyc.exists():
+        py_compile.compile(str(site_py), cfile=str(site_pyc), doraise=True)
+    print("*** patched site.py/site.pyc: moved PREFIXES before sitecustomize import ***")
 
 
 def _copy_runtime_support():

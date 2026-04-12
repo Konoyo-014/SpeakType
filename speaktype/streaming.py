@@ -15,9 +15,9 @@ logger = logging.getLogger("speaktype.streaming")
 # Minimum seconds between transcription updates. Lower = snappier preview
 # but more CPU. mlx-audio takes ~0.3-0.6s per call on M-series, so 0.9s
 # leaves headroom and avoids piling up calls behind each other.
-DEFAULT_INTERVAL = 0.9
+DEFAULT_INTERVAL = 0.6
 # Minimum audio buffer length (seconds) before we attempt a transcription.
-MIN_BUFFER_SECONDS = 0.4
+MIN_BUFFER_SECONDS = 0.25
 # Sample rate the audio recorder uses.
 DEFAULT_SAMPLE_RATE = 16000
 
@@ -49,6 +49,7 @@ class StreamingTranscriber:
         self._running = False
         self._thread = None
         self._accumulated_text = ""
+        self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                          #
@@ -60,6 +61,7 @@ class StreamingTranscriber:
             self._audio_buffer = []
             self._accumulated_text = ""
             self._running = True
+            self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._stream_loop,
             args=(language,),
@@ -67,12 +69,15 @@ class StreamingTranscriber:
         )
         self._thread.start()
 
-    def stop(self) -> str:
+    def stop(self, wait: bool = True) -> str:
         """Stop the loop and return the most recent partial transcript."""
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=3)
-            self._thread = None
+        self._stop_event.set()
+        self._on_partial_text = None
+        thread = self._thread
+        if wait and thread:
+            thread.join(timeout=3)
+        self._thread = None
         return self._accumulated_text
 
     def feed_audio(self, audio_chunk):
@@ -103,13 +108,14 @@ class StreamingTranscriber:
             return
 
         model = getattr(self._asr, "model", None)
-        has_native_stream = hasattr(model, "stream_transcribe")
+        has_native_stream = _should_use_native_stream(self._asr, model)
 
         last_run_at = 0.0
         min_samples = int(self._sample_rate * MIN_BUFFER_SECONDS)
 
         while self._running:
-            time.sleep(0.08)
+            if self._stop_event.wait(0.08):
+                break
             now = time.time()
             if now - last_run_at < self._interval:
                 continue
@@ -144,17 +150,22 @@ class StreamingTranscriber:
         if language and language != "auto":
             kwargs["language"] = language
 
-        accumulated_parts: list[str] = []
-        for result in model.stream_transcribe(**kwargs):
-            if not self._running:
-                return
-            # The final marker for each chunk yields an empty text with
-            # is_final=True; ignore those entirely.
-            text = _extract_text(result)
-            if not text:
-                continue
-            accumulated_parts.append(text)
-            self._emit_partial("".join(accumulated_parts))
+        if not self._acquire_preview_slot():
+            return
+        try:
+            accumulated_parts: list[str] = []
+            for result in model.stream_transcribe(**kwargs):
+                if not self._running:
+                    return
+                # The final marker for each chunk yields an empty text with
+                # is_final=True; ignore those entirely.
+                text = _extract_text(result)
+                if not text:
+                    continue
+                accumulated_parts.append(text)
+                self._emit_partial("".join(accumulated_parts))
+        finally:
+            self._release_preview_slot()
 
     def _run_chunked(self, audio_data, language: str):
         """Fallback path: re-run full transcription on the buffer so far."""
@@ -167,22 +178,46 @@ class StreamingTranscriber:
 
         try:
             from mlx_audio.stt.generate import generate_transcription
+            from .asr import _cleanup_transcript_outputs, _make_temp_transcript_output_path
         except Exception as e:
             logger.debug(f"mlx_audio not available for chunked streaming: {e}")
             return
 
+        if not self._acquire_preview_slot():
+            return
+
+        output_path = _make_temp_transcript_output_path()
         kwargs = {
             "model": self._asr.model,
             "audio": audio_data,
+            "output_path": output_path,
             "verbose": False,
         }
         if language and language != "auto":
             kwargs["language"] = language
 
-        result = generate_transcription(**kwargs)
+        try:
+            result = generate_transcription(**kwargs)
+        finally:
+            _cleanup_transcript_outputs(output_path)
+            self._release_preview_slot()
         text = _extract_text(result)
         if text:
             self._emit_partial(text)
+
+    def _acquire_preview_slot(self) -> bool:
+        acquire = getattr(self._asr, "acquire_inference", None)
+        if not callable(acquire):
+            return True
+        if acquire(blocking=False):
+            return True
+        logger.debug("Skipping streaming preview pass because ASR inference is busy")
+        return False
+
+    def _release_preview_slot(self):
+        release = getattr(self._asr, "release_inference", None)
+        if callable(release):
+            release()
 
     def _emit_partial(self, text: str):
         if not text:
@@ -219,3 +254,16 @@ def _extract_text(result) -> str:
     if isinstance(result, str):
         return result
     return ""
+
+
+def _should_use_native_stream(asr_engine, model) -> bool:
+    """Return whether native token streaming is safe for preview display.
+
+    Qwen/MLX final transcription decodes full text correctly, but its native
+    token-delta stream can expose transient replacement glyphs for CJK text.
+    Use chunked full-buffer preview for Qwen so the overlay sees the same
+    Unicode decoding path as final transcription.
+    """
+    if not hasattr(model, "stream_transcribe"):
+        return False
+    return getattr(asr_engine, "backend", "qwen") != "qwen"

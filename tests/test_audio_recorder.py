@@ -133,3 +133,17 @@ def test_start_returns_false_and_preserves_last_error(monkeypatch):
     assert recorder.start() is False
     assert recorder.is_recording is False
     assert isinstance(recorder.last_start_error, RuntimeError)
+
+
+def test_stop_audio_returns_buffer_without_writing_temp_file(monkeypatch):
+    recorder = AudioRecorder(sample_rate=16000)
+    recorder.is_recording = True
+    recorder._frames = [_loud_chunk(samples=6400)]
+
+    monkeypatch.setattr(audio_mod.sf, "write", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sf.write should not run")))
+
+    audio_data = recorder.stop_audio()
+
+    assert audio_data is not None
+    assert len(audio_data) == 6400
+    assert recorder.is_recording is False

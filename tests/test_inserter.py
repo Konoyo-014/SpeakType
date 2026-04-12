@@ -7,12 +7,55 @@ import pytest
 from speaktype import inserter
 
 
+class _Pasteboard:
+    def __init__(self, initial=None):
+        self._store = dict(initial or {})
+        self._change_count = 0
+
+    def types(self):
+        return list(self._store.keys())
+
+    def dataForType_(self, paste_type):
+        return self._store.get(paste_type)
+
+    def stringForType_(self, paste_type):
+        value = self._store.get(paste_type)
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value
+
+    def clearContents(self):
+        self._store = {}
+        self._change_count += 1
+
+    def setString_forType_(self, text, paste_type):
+        self._store[paste_type] = text.encode("utf-8")
+        self._change_count += 1
+
+    def setData_forType_(self, data, paste_type):
+        self._store[paste_type] = data
+        self._change_count += 1
+
+    def changeCount(self):
+        return self._change_count
+
+
+@pytest.fixture(autouse=True)
+def _reset_clipboard_restore_state(monkeypatch):
+    inserter._clipboard_restore_token = 0
+    inserter._clipboard_restore_data = None
+    monkeypatch.setattr(inserter, "_can_post_synthetic_input", lambda: True)
+    yield
+    inserter._clipboard_restore_token = 0
+    inserter._clipboard_restore_data = None
+
+
 def test_insert_via_accessibility_sets_selected_text(monkeypatch):
     element = object()
     calls = []
     values = {
         (element, inserter.kAXRoleAttribute): ["AXTextArea"],
-        (element, "AXValue"): ["before", "after"],
+        (element, "AXValue"): ["before", "beforehello"],
         (element, inserter.kAXSelectedTextAttribute): ["", ""],
     }
 
@@ -61,6 +104,26 @@ def test_insert_via_accessibility_rejects_false_success(monkeypatch):
     assert calls == [(element, inserter.kAXSelectedTextAttribute, "hello")]
 
 
+def test_insert_via_accessibility_rejects_selection_echo(monkeypatch):
+    element = object()
+    values = {
+        (element, inserter.kAXRoleAttribute): ["AXTextArea"],
+        (element, "AXValue"): ["same", "same"],
+        (element, inserter.kAXSelectedTextAttribute): ["", "hello"],
+    }
+
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: element)
+    monkeypatch.setattr(
+        inserter,
+        "_copy_ax_attribute",
+        lambda elem, attr: values[(elem, attr)].pop(0),
+    )
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_set_ax_attribute", lambda elem, attr, value: 0)
+
+    assert inserter._insert_via_accessibility("hello") is False
+
+
 def test_insert_via_paste_skips_clipboard_when_accessibility_succeeds(monkeypatch):
     monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: True)
 
@@ -72,19 +135,128 @@ def test_insert_via_paste_skips_clipboard_when_accessibility_succeeds(monkeypatc
 
     monkeypatch.setattr(inserter, "_get_pasteboard", fail_get_pasteboard)
 
-    inserter._insert_via_paste("hello")
+    assert inserter._insert_via_paste("hello") is True
 
 
-def test_insert_via_paste_prefers_direct_keystrokes_before_clipboard(monkeypatch):
+def test_insert_via_paste_fails_fast_without_post_event_permission(monkeypatch):
     monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: False)
-    calls = []
+    monkeypatch.setattr(inserter, "_can_post_synthetic_input", lambda: False)
+    monkeypatch.setattr(
+        inserter,
+        "_get_pasteboard",
+        lambda: (_ for _ in ()).throw(AssertionError("pasteboard should not be touched")),
+    )
 
-    monkeypatch.setattr(inserter, "_insert_via_keystroke", lambda text: calls.append(text) or True)
-    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: (_ for _ in ()).throw(AssertionError("clipboard should not be used")))
+    assert inserter._insert_via_paste("hello", app_name="Codex") is False
 
-    inserter._insert_via_paste("hello", app_name="Codex")
 
-    assert calls == ["hello"]
+def test_insert_via_paste_prefers_clipboard_before_direct_keystrokes(monkeypatch):
+    monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: False)
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: None)
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    presses = []
+
+    monkeypatch.setattr(inserter, "_insert_via_keystroke", lambda text: (_ for _ in ()).throw(AssertionError("keystroke should not be used")))
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_press_cmd_v", lambda app_name="": presses.append(app_name))
+    monkeypatch.setattr(inserter, "_schedule_pasteboard_restore", lambda *args, **kwargs: None)
+
+    assert inserter._insert_via_paste("hello", app_name="Codex") is True
+
+    assert presses == ["Codex"]
+    assert pb.stringForType_(inserter.AppKit.NSPasteboardTypeString) == "hello"
+
+
+def test_insert_via_paste_retries_system_events_when_observable_paste_does_not_change_target(monkeypatch):
+    monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: False)
+    element = object()
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    quartz_presses = []
+    osascript_presses = []
+    scheduled = []
+    verifications = [False, True]
+
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: element)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: "before")
+    monkeypatch.setattr(inserter, "_insert_via_keystroke", lambda text: False)
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_press_cmd_v", lambda app_name="": quartz_presses.append(app_name))
+    monkeypatch.setattr(inserter, "_press_cmd_v_with_osascript", lambda app_name="": osascript_presses.append(app_name) or True)
+    monkeypatch.setattr(inserter, "_verify_paste_result", lambda element, value_before, text: verifications.pop(0))
+    monkeypatch.setattr(
+        inserter,
+        "_schedule_pasteboard_restore",
+        lambda old_data, temporary_text, expected_change_count=None, delay=inserter.CLIPBOARD_RESTORE_DELAY: scheduled.append(
+            (old_data, temporary_text, expected_change_count, delay)
+        ),
+    )
+
+    assert inserter._insert_via_paste("hello", app_name="Codex") is True
+
+    assert quartz_presses == ["Codex"]
+    assert osascript_presses == ["Codex"]
+    assert scheduled == [
+        (
+            {"public.utf8-plain-text": b"before"},
+            "hello",
+            pb.changeCount(),
+            inserter.CLIPBOARD_RESTORE_DELAY,
+        )
+    ]
+
+
+def test_insert_via_paste_returns_false_when_observable_paste_and_fallbacks_fail(monkeypatch):
+    monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: False)
+    element = object()
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    restored = []
+
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: element)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: "before")
+    monkeypatch.setattr(inserter, "_insert_via_keystroke", lambda text: False)
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_press_cmd_v", lambda app_name="": None)
+    monkeypatch.setattr(inserter, "_press_cmd_v_with_osascript", lambda app_name="": False)
+    monkeypatch.setattr(inserter, "_verify_paste_result", lambda element, value_before, text: False)
+    monkeypatch.setattr(inserter, "_restore_pasteboard", lambda pasteboard, old_data: restored.append(old_data))
+
+    assert inserter._insert_via_paste("hello", app_name="Codex") is False
+
+    assert restored == [{"public.utf8-plain-text": b"before"}]
+
+
+def test_verify_paste_result_detects_unchanged_ax_value(monkeypatch):
+    element = object()
+
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: "before")
+
+    assert inserter._verify_paste_result(element, "before", "hello") is False
+
+
+def test_verify_paste_result_detects_changed_ax_value(monkeypatch):
+    element = object()
+
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: "beforehello")
+
+    assert inserter._verify_paste_result(element, "before", "hello") is True
+
+
+def test_verify_paste_result_rejects_unrelated_ax_change(monkeypatch):
+    element = object()
+
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: "different")
+
+    assert inserter._verify_paste_result(element, "before", "hello") is False
+
+
+def test_verify_paste_result_is_inconclusive_without_ax_value():
+    assert inserter._verify_paste_result(None, None, "hello") is None
 
 
 def test_press_cmd_v_posts_annotated_session_events(monkeypatch):
@@ -138,13 +310,20 @@ def test_insert_text_prepares_target_app(monkeypatch):
     monkeypatch.setattr(
         inserter,
         "_insert_via_paste",
-        lambda text, app_name="": inserted.append((text, app_name)),
+        lambda text, app_name="": inserted.append((text, app_name)) or True,
     )
 
-    inserter.insert_text("hello", method="paste", app_name="Codex", bundle_id="com.openai.codex")
+    assert inserter.insert_text("hello", method="paste", app_name="Codex", bundle_id="com.openai.codex") is True
 
     assert prepared == [("com.openai.codex", "Codex")]
     assert inserted == [("hello", "Codex")]
+
+
+def test_insert_text_returns_false_when_fallbacks_fail(monkeypatch):
+    monkeypatch.setattr(inserter, "_prepare_target_app", lambda bundle_id="", app_name="": None)
+    monkeypatch.setattr(inserter, "_insert_via_paste", lambda text, app_name="": False)
+
+    assert inserter.insert_text("hello", method="paste", app_name="Codex") is False
 
 
 def test_insert_via_keystroke_rejects_unchanged_ax_value(monkeypatch):
@@ -171,26 +350,7 @@ def test_insert_via_keystroke_rejects_unchanged_ax_value(monkeypatch):
 
 
 def test_replace_selection_restores_clipboard_on_failure(monkeypatch):
-    class _Pasteboard:
-        def __init__(self):
-            self._store = {"public.utf8-plain-text": b"before"}
-
-        def types(self):
-            return list(self._store.keys())
-
-        def dataForType_(self, paste_type):
-            return self._store.get(paste_type)
-
-        def clearContents(self):
-            self._store = {}
-
-        def setString_forType_(self, text, paste_type):
-            self._store[paste_type] = text.encode("utf-8")
-
-        def setData_forType_(self, data, paste_type):
-            self._store[paste_type] = data
-
-    pb = _Pasteboard()
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
     monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
     monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
 
@@ -203,3 +363,118 @@ def test_replace_selection_restores_clipboard_on_failure(monkeypatch):
         inserter.replace_selection("after")
 
     assert pb.dataForType_("public.utf8-plain-text") == b"before"
+
+
+def test_insert_via_paste_schedules_clipboard_restore_without_blocking(monkeypatch):
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    sleeps = []
+    scheduled = []
+    presses = []
+
+    monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: False)
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: None)
+    monkeypatch.setattr(inserter, "_insert_via_keystroke", lambda text: False)
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(inserter, "_press_cmd_v", lambda app_name="": presses.append(app_name))
+    monkeypatch.setattr(
+        inserter,
+        "_schedule_pasteboard_restore",
+        lambda old_data, temporary_text, expected_change_count=None, delay=inserter.CLIPBOARD_RESTORE_DELAY: scheduled.append(
+            (old_data, temporary_text, expected_change_count, delay)
+        ),
+    )
+
+    assert inserter._insert_via_paste("hello", app_name="Codex") is True
+
+    assert sleeps == [inserter.PASTEBOARD_SETTLE_DELAY]
+    assert presses == ["Codex"]
+    assert pb.stringForType_(inserter.AppKit.NSPasteboardTypeString) == "hello"
+    assert scheduled == [
+        (
+            {"public.utf8-plain-text": b"before"},
+            "hello",
+            pb.changeCount(),
+            inserter.CLIPBOARD_RESTORE_DELAY,
+        )
+    ]
+
+
+def test_replace_selection_schedules_clipboard_restore_without_blocking(monkeypatch):
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    sleeps = []
+    scheduled = []
+
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(inserter, "_press_cmd_v", lambda app_name="": None)
+    monkeypatch.setattr(
+        inserter,
+        "_schedule_pasteboard_restore",
+        lambda old_data, temporary_text, expected_change_count=None, delay=inserter.CLIPBOARD_RESTORE_DELAY: scheduled.append(
+            (old_data, temporary_text, expected_change_count, delay)
+        ),
+    )
+
+    assert inserter.replace_selection("after") is True
+
+    assert sleeps == [inserter.PASTEBOARD_SETTLE_DELAY]
+    assert pb.stringForType_(inserter.AppKit.NSPasteboardTypeString) == "after"
+    assert scheduled == [
+        (
+            {"public.utf8-plain-text": b"before"},
+            "after",
+            pb.changeCount(),
+            inserter.CLIPBOARD_RESTORE_DELAY,
+        )
+    ]
+
+
+def test_snapshot_restore_data_reuses_original_clipboard_during_overlapping_pastes(monkeypatch):
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    scheduled_threads = []
+
+    class _Thread:
+        def __init__(self, target, args, daemon):
+            scheduled_threads.append((target, args, daemon))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(inserter.threading, "Thread", _Thread)
+
+    first_old_data = inserter._snapshot_restore_data(pb)
+    pb.clearContents()
+    pb.setString_forType_("first", inserter.AppKit.NSPasteboardTypeString)
+    inserter._schedule_pasteboard_restore(
+        first_old_data,
+        temporary_text="first",
+        expected_change_count=pb.changeCount(),
+    )
+
+    second_old_data = inserter._snapshot_restore_data(pb)
+
+    assert second_old_data == {"public.utf8-plain-text": b"before"}
+    assert len(scheduled_threads) == 1
+
+
+def test_restore_after_delay_skips_when_user_changed_clipboard(monkeypatch):
+    pb = _Pasteboard({"public.utf8-plain-text": b"user-new"})
+    old_data = {"public.utf8-plain-text": b"before"}
+
+    inserter._clipboard_restore_token = 3
+    inserter._clipboard_restore_data = dict(old_data)
+
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+
+    inserter._restore_pasteboard_after_delay(
+        3,
+        old_data,
+        temporary_text="hello",
+        expected_change_count=1,
+        delay=0,
+    )
+
+    assert pb.dataForType_("public.utf8-plain-text") == b"user-new"
+    assert inserter._clipboard_restore_data is None

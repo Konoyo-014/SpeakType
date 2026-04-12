@@ -180,6 +180,21 @@ class AudioRecorder:
 
     def stop(self) -> str | None:
         """Stop recording and return path to WAV file, or None if no audio."""
+        audio_data = self.stop_audio()
+        if audio_data is None:
+            return None
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sf.write(tmp.name, audio_data, self.sample_rate)
+        tmp.close()
+        return tmp.name
+
+    def stop_audio(self):
+        """Stop recording and return validated audio data, or None if unusable."""
+        frames = self._finish_recording()
+        return self._finalize_audio(frames)
+
+    def _finish_recording(self):
         with self._lock:
             if not self.is_recording:
                 return None
@@ -195,7 +210,9 @@ class AudioRecorder:
                 self._stream = None
             frames = list(self._frames)
             self._frames = []
+        return frames
 
+    def _finalize_audio(self, frames):
         if not frames:
             logger.warning("No audio frames captured at all")
             return None
@@ -217,10 +234,7 @@ class AudioRecorder:
             logger.warning(f"Audio too quiet: peak={peak:.4f} < {min_peak}")
             return None
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(tmp.name, audio_data, self.sample_rate)
-        tmp.close()
-        return tmp.name
+        return audio_data
 
     def get_level(self) -> float:
         """Get current audio level (0.0 to 1.0) for visual feedback."""

@@ -39,8 +39,8 @@ _STRINGS = {
     "notif_asr_failed": {"zh": "语音识别加载失败", "en": "ASR Load Failed"},
     "notif_llm_unavail_title": {"zh": "LLM 不可用", "en": "LLM Not Available"},
     "notif_llm_unavail_body": {
-        "zh": "请运行: ollama pull {model}\n文本润色已禁用。",
-        "en": "Run: ollama pull {model}\nText polishing disabled.",
+        "zh": "Ollama 未运行或模型不可用，文本润色/翻译会暂时回退到原始转写。\n请运行 ollama serve，并确认已拉取 {model}。",
+        "en": "Ollama is not running or the model is unavailable, so polishing/translation will temporarily fall back to raw transcription.\nRun ollama serve and make sure {model} is pulled.",
     },
     "notif_ready_title": {"zh": "就绪！", "en": "Ready!"},
     "notif_ready_body": {
@@ -69,6 +69,15 @@ _STRINGS = {
     "notif_about_subtitle": {"zh": "v{version} — Mac AI 语音输入法", "en": "v{version} — AI Voice Input for Mac"},
     "notif_cannot_test": {"zh": "录音/处理中，无法测试。", "en": "Cannot test while recording/processing."},
     "notif_error": {"zh": "错误", "en": "Error"},
+    "notif_insert_failed_title": {"zh": "插入失败", "en": "Insertion Failed"},
+    "notif_insert_failed_body": {
+        "zh": "SpeakType 没能把文本插入到 {app}。请确认该应用窗口仍在前台，并在系统设置中授予辅助功能和输入监控权限。",
+        "en": "SpeakType could not insert text into {app}. Make sure the target window is still focused and Accessibility/Input Monitoring permissions are granted.",
+    },
+    "overlay_insert_failed": {
+        "zh": "插入失败：请重新授权输入监控，或重启 SpeakType",
+        "en": "Insertion failed: re-grant Input Monitoring or restart SpeakType",
+    },
 
     # --- Settings window (settings_window.py) ---
     "settings_title": {"zh": "SpeakType 偏好设置", "en": "SpeakType Settings"},
@@ -166,9 +175,16 @@ _STRINGS = {
     # --- Download status (app.py status bar) ---
     "notif_perm_missing_title": {"zh": "权限缺失", "en": "Missing Permissions"},
     "notif_perm_missing_body": {
-        "zh": "SpeakType 缺少以下权限，无法正常工作：{missing}\n请在系统设置中授权。",
-        "en": "SpeakType is missing required permissions: {missing}\nPlease grant access in System Settings.",
+        "zh": "请在系统设置里授权：{missing}。授权后重启 SpeakType。",
+        "en": "Grant {missing} in System Settings, then restart SpeakType.",
     },
+    "perm_restart_title": {"zh": "权限已授权", "en": "Permissions Granted"},
+    "perm_restart_body": {
+        "zh": "macOS 已授予输入权限。请重启 SpeakType，让热键和插入功能生效。",
+        "en": "macOS granted input permissions. Restart SpeakType so hotkeys and insertion take effect.",
+    },
+    "perm_restart_now": {"zh": "立即重启", "en": "Restart Now"},
+    "perm_restart_later": {"zh": "稍后", "en": "Later"},
 
     "status_downloading_asr": {"zh": "下载语音模型 {pct:.0f}% ({size})", "en": "Downloading ASR {pct:.0f}% ({size})"},
     "status_loading_model": {"zh": "状态：加载模型中...", "en": "Status: Loading model..."},

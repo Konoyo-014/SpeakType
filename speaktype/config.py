@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "ui_language": "zh",  # UI language: "zh" (Chinese) or "en" (English)
     "setup_completed": False,  # True after first-launch wizard is completed
     "last_seen_version": "",  # Last app version that completed startup
+    "last_seen_bundle_fingerprint": "",  # Last bundled app build that completed startup
     "whisper_mode_enabled": True,  # Auto-detect whispers and apply real-time gain boost
     "scene_prompts_enabled": True,  # Use per-application prompt templates during polish
     "scene_prompts": {},  # User overrides keyed by scene id (defaults defined in polish.py)

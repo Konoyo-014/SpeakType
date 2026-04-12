@@ -2,6 +2,39 @@
 
 All notable changes to SpeakType will be documented in this file.
 
+## [2.1.1] - 2026-04-12
+
+### Changed
+- Reduced end-to-end dictation latency by overlapping model warmup with recording, reusing in-flight ASR loads, and avoiding unnecessary temporary wav files on the Qwen3-ASR hot path.
+- Kept Ollama models warm with async prewarm and `keep_alive`, and merged polish+translation into a single local LLM request when plugins are disabled.
+- Moved post-insert clipboard restoration and history persistence off the hot path so insertion returns sooner.
+- Strengthened the LLM polish prompt so filler-removal requests are harder for local models to ignore.
+
+### Fixed
+- Text polishing now recovers if Ollama starts after SpeakType has already seen it as unavailable. The app retries stale local-LLM failures instead of caching the failure until restart.
+- When Ollama is unavailable, SpeakType now shows one clear local-LLM fallback notification and inserts the raw transcription instead of silently appearing to ignore the polish setting.
+- Streaming preview display now strips ASR control tokens and invisible control characters before rendering, and uses character wrapping so CJK text, paths, and long technical tokens do not overflow or render oddly.
+- Stopping recording no longer waits for streaming preview cleanup, reducing release-to-transcribe delay.
+- Qwen3-ASR in-memory audio transcription skips temporary file cleanup paths that only apply to file input.
+- Paste-based insertion and replace-selection restore the user's original clipboard asynchronously and avoid overwriting a clipboard the user changed after insertion.
+- Fast hotkey release during recorder startup no longer produces impossible multi-year recording durations in logs/history.
+- Paste-mode insertion now uses clipboard paste before direct keystroke fallback, improving reliability in embedded editors such as Codex.
+- Paste-mode insertion now verifies focused text changes when Accessibility exposes them, retries via System Events if raw Quartz paste is ignored, and reports insertion failure instead of recording false success.
+- Paste/keystroke insertion now fails fast with a user-visible notification when macOS PostEvent permission is missing, avoiding false success after permission resets.
+- After a permission reset, SpeakType now watches for macOS input permissions becoming granted while the app is still running and shows a restart prompt so the new grants take effect.
+- Missing-permission notifications are shorter, so the system notification body fits in the macOS notification UI.
+- Streaming preview and final Qwen/MLX transcription now share an inference lock, preventing concurrent Metal evaluation on the same model after hotkey release.
+- Qwen streaming preview now uses chunked full-buffer decoding instead of native token-delta streaming, matching the final transcription Unicode path and avoiding transient CJK replacement glyphs in the overlay.
+- SpeakType now appends to `~/.speaktype/speaktype.log` instead of overwriting it on restart, preserving pre-crash diagnostics.
+- Text polish in auto-language mode now selects a Chinese system prompt for Chinese input and an English system prompt for English input, forbids accidental translation when the translation toggle is off, and retries Chinese polish once after obvious Chinese-to-English drift.
+- Insert failures now surface a visible overlay error and user notification instead of silently saving a failed dictation as if it had been inserted.
+- Same-version replacement builds now trigger macOS permission reset/re-request via bundled app fingerprint tracking, not only version-number changes.
+- Qwen/MLX ASR no longer writes `transcript.txt` into the signed app bundle; mandatory mlx-audio transcript output is redirected to a temporary path and removed.
+- The py2app post-build patch now rewrites `site.pyc` when no source `site.py` is emitted, preventing Homebrew `sitecustomize` from breaking bundled-Python smoke tests.
+
+### Tests
+- Test count grew to 396. New coverage includes local LLM retry/fallback behavior, language-specific polish prompts, combined polish+translation, streaming stop non-blocking behavior, in-memory ASR input, temporary ASR transcript output cleanup, ASR inference serialization, Qwen chunked preview routing, permission-grant restart prompting, async clipboard restoration, overlay display sanitization/error states, recorder-start timing races, same-version bundle permission refresh, feature-disabled negative paths, insertion verification failures, accidental translation guards, insert failure notifications, and v2.1.1 recording latency regressions.
+
 ## [2.1.0] - 2026-04-06
 
 ### Added

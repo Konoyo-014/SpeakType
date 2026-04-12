@@ -2,6 +2,7 @@
 
 import os
 import logging
+import tempfile
 import threading
 
 logger = logging.getLogger("speaktype.asr")
@@ -12,6 +13,26 @@ ASR_MODELS = [
 ]
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
+TRANSCRIPT_OUTPUT_EXTENSIONS = (".txt", ".srt", ".vtt", ".json")
+
+
+def _make_temp_transcript_output_path() -> str:
+    """Return a temporary output stem for mlx-audio's mandatory save step."""
+    fd, path = tempfile.mkstemp(prefix="speaktype-transcript-", suffix="")
+    os.close(fd)
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return path
+
+
+def _cleanup_transcript_outputs(output_path: str):
+    for suffix in TRANSCRIPT_OUTPUT_EXTENSIONS:
+        try:
+            os.unlink(f"{output_path}{suffix}")
+        except OSError:
+            pass
 
 
 class ASREngine:
@@ -25,6 +46,18 @@ class ASREngine:
         # Serialize concurrent load() calls so a fast double-tap during
         # startup never triggers two parallel HuggingFace downloads.
         self._load_lock = threading.Lock()
+        self._load_thread = None
+        self._load_thread_lock = threading.Lock()
+        # MLX/Metal model evaluation is not safe to run concurrently on the
+        # same model object. Streaming preview uses non-blocking acquisition;
+        # final transcription blocks until any in-flight preview pass exits.
+        self._inference_lock = threading.Lock()
+
+    def acquire_inference(self, blocking: bool = True) -> bool:
+        return self._inference_lock.acquire(blocking=blocking)
+
+    def release_inference(self):
+        self._inference_lock.release()
 
     def load(self, progress_callback=None):
         """Load the ASR model. progress_callback(pct, status_str) for download progress."""
@@ -38,6 +71,24 @@ class ASREngine:
                 self._load_whisper()
             else:
                 self._load_qwen(progress_callback=progress_callback)
+
+    def load_async(self, progress_callback=None):
+        """Start a background load if needed and return the worker thread."""
+        if self._loaded:
+            return None
+
+        with self._load_thread_lock:
+            if self._load_thread is not None and self._load_thread.is_alive():
+                return self._load_thread
+
+            self._load_thread = threading.Thread(
+                target=self.load,
+                kwargs={"progress_callback": progress_callback},
+                daemon=True,
+                name="SpeakTypeASRLoad",
+            )
+            self._load_thread.start()
+            return self._load_thread
 
     def _load_qwen(self, progress_callback=None):
         """Load Qwen3-ASR via mlx-audio, with optional download progress."""
@@ -104,35 +155,46 @@ class ASREngine:
         logger.info("Whisper not available, falling back to Qwen ASR")
         self._load_qwen()
 
-    def transcribe(self, audio_path: str, language: str = "auto") -> str:
-        """Transcribe an audio file to text."""
+    def transcribe(self, audio_input, language: str = "auto") -> str:
+        """Transcribe an audio file path or in-memory audio buffer to text."""
         if not self._loaded:
             self.load()
 
+        should_cleanup = isinstance(audio_input, (str, os.PathLike))
+        self.acquire_inference(blocking=True)
         try:
-            if self.backend == "whisper":
-                return self._transcribe_whisper(audio_path, language)
-            else:
-                return self._transcribe_qwen(audio_path, language)
-        finally:
             try:
-                os.unlink(audio_path)
-            except OSError:
-                pass
+                if self.backend == "whisper":
+                    return self._transcribe_whisper(audio_input, language)
+                else:
+                    return self._transcribe_qwen(audio_input, language)
+            finally:
+                self.release_inference()
+        finally:
+            if should_cleanup:
+                try:
+                    os.unlink(audio_input)
+                except OSError:
+                    pass
 
-    def _transcribe_qwen(self, audio_path: str, language: str) -> str:
+    def _transcribe_qwen(self, audio_input, language: str) -> str:
         """Transcribe using Qwen3-ASR via mlx-audio."""
         from mlx_audio.stt.generate import generate_transcription
 
+        output_path = _make_temp_transcript_output_path()
         kwargs = {
             "model": self.model,
-            "audio": audio_path,
+            "audio": audio_input,
+            "output_path": output_path,
             "verbose": False,
         }
         if language and language != "auto":
             kwargs["language"] = language
 
-        result = generate_transcription(**kwargs)
+        try:
+            result = generate_transcription(**kwargs)
+        finally:
+            _cleanup_transcript_outputs(output_path)
 
         if hasattr(result, "text"):
             return result.text.strip()

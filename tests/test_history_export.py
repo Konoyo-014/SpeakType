@@ -106,3 +106,15 @@ class TestExport:
         target = tmp_path / "nested" / "deeper" / "out.txt"
         history.export(target)
         assert target.exists()
+
+    def test_add_async_eventually_persists(self, history, tmp_path):
+        target = tmp_path / "history.json"
+        with patch("speaktype.history.HISTORY_FILE", target):
+            history.add_async("raw", "polished", app_name="Mail", duration_sec=1.2)
+            for _ in range(20):
+                if target.exists():
+                    break
+                __import__("time").sleep(0.01)
+            assert target.exists()
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            assert payload[-1]["polished"] == "polished"
