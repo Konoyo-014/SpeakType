@@ -1,5 +1,6 @@
 """Insert text at the cursor position in any application using CGEvent."""
 
+from dataclasses import dataclass
 import logging
 import threading
 import time
@@ -29,11 +30,51 @@ TARGET_ACTIVATION_DELAY = 0.3
 _clipboard_restore_lock = threading.Lock()
 _clipboard_restore_token = 0
 _clipboard_restore_data = None
+_last_insert_diagnostic = None
+
+
+@dataclass(frozen=True)
+class InsertionDiagnostic:
+    """Best-effort diagnostic for the most recent insertion attempt."""
+
+    success: bool
+    verified: bool
+    method: str
+    reason: str
+    detail: str = ""
+
+
+def reset_last_insert_diagnostic():
+    global _last_insert_diagnostic
+    _last_insert_diagnostic = None
+
+
+def get_last_insert_diagnostic() -> InsertionDiagnostic | None:
+    return _last_insert_diagnostic
+
+
+def _set_insert_diagnostic(
+    success: bool,
+    verified: bool,
+    method: str,
+    reason: str,
+    detail: str = "",
+):
+    global _last_insert_diagnostic
+    _last_insert_diagnostic = InsertionDiagnostic(
+        success=success,
+        verified=verified,
+        method=method,
+        reason=reason,
+        detail=str(detail or ""),
+    )
 
 
 def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id: str = "") -> bool:
     """Insert text at the current cursor position."""
+    reset_last_insert_diagnostic()
     if not text:
+        _set_insert_diagnostic(True, True, method, "empty_text")
         return True
     _prepare_target_app(bundle_id=bundle_id, app_name=app_name)
     logger.info(
@@ -57,6 +98,7 @@ def _insert_via_paste(text: str, app_name: str = "") -> bool:
             "Cannot use paste/keystroke insertion because PostEvent access is not granted (app=%s)",
             app_name or "Unknown",
         )
+        _set_insert_diagnostic(False, False, "paste", "post_event_denied")
         return False
 
     pb = None
@@ -78,13 +120,23 @@ def _insert_via_paste(text: str, app_name: str = "") -> bool:
         # CGEvents, especially when the editor is embedded inside Chromium.
         _press_cmd_v(app_name=app_name)
         verification = _verify_paste_result(element, value_before, text)
-        if verification is True or verification is None:
+        if verification is True:
             _schedule_pasteboard_restore(
                 old_data,
                 temporary_text=text,
                 expected_change_count=expected_change_count,
             )
-            logger.info("Clipboard paste path completed (app=%s)", app_name or "Unknown")
+            _set_insert_diagnostic(True, True, "paste", "verified_ax_value")
+            logger.info("Clipboard paste path completed with verified text insertion (app=%s)", app_name or "Unknown")
+            return True
+        if verification is None:
+            _schedule_pasteboard_restore(
+                old_data,
+                temporary_text=text,
+                expected_change_count=expected_change_count,
+            )
+            _set_insert_diagnostic(True, False, "paste", "unverifiable_target")
+            logger.info("Clipboard paste path completed without AX verification (app=%s)", app_name or "Unknown")
             return True
 
         logger.info(
@@ -93,13 +145,23 @@ def _insert_via_paste(text: str, app_name: str = "") -> bool:
         )
         if _press_cmd_v_with_osascript(app_name=app_name):
             verification = _verify_paste_result(element, value_before, text)
-            if verification is True or verification is None:
+            if verification is True:
                 _schedule_pasteboard_restore(
                     old_data,
                     temporary_text=text,
                     expected_change_count=expected_change_count,
                 )
-                logger.info("Clipboard paste path completed via System Events (app=%s)", app_name or "Unknown")
+                _set_insert_diagnostic(True, True, "paste_system_events", "verified_ax_value")
+                logger.info("Clipboard paste path completed via System Events with verified text insertion (app=%s)", app_name or "Unknown")
+                return True
+            if verification is None:
+                _schedule_pasteboard_restore(
+                    old_data,
+                    temporary_text=text,
+                    expected_change_count=expected_change_count,
+                )
+                _set_insert_diagnostic(True, False, "paste_system_events", "unverifiable_target")
+                logger.info("Clipboard paste path completed via System Events without AX verification (app=%s)", app_name or "Unknown")
                 return True
 
         if _insert_via_keystroke(text):
@@ -116,6 +178,7 @@ def _insert_via_paste(text: str, app_name: str = "") -> bool:
             return True
 
         _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+        _set_insert_diagnostic(False, False, "paste", "paste_verification_failed")
         logger.error("Clipboard paste failed verification (app=%s)", app_name or "Unknown")
         return False
 
@@ -130,6 +193,7 @@ def _insert_via_paste(text: str, app_name: str = "") -> bool:
                 app_name or "Unknown",
             )
             return True
+        _set_insert_diagnostic(False, False, "paste", "paste_exception", str(e))
         return False
 
 
@@ -254,6 +318,7 @@ def _insert_via_accessibility(text: str) -> bool:
     """Insert text into the focused accessibility element when supported."""
     element = _get_focused_element()
     if element is None:
+        _set_insert_diagnostic(False, False, "accessibility", "no_focused_element")
         return False
 
     role = _copy_ax_attribute(element, kAXRoleAttribute) or "Unknown"
@@ -269,6 +334,7 @@ def _insert_via_accessibility(text: str) -> bool:
             and value_after != value_before
             and text in value_after
         ):
+            _set_insert_diagnostic(True, True, "accessibility", "verified_ax_value")
             logger.info("Inserted text via Accessibility API (role=%s)", role)
             return True
 
@@ -280,9 +346,11 @@ def _insert_via_accessibility(text: str) -> bool:
             selected_before,
             selected_after,
         )
+        _set_insert_diagnostic(False, False, "accessibility", "accessibility_false_success", f"role={role}")
         return False
 
     logger.info("Accessibility insertion unavailable (role=%s, error=%s); falling back to keystrokes", role, err)
+    _set_insert_diagnostic(False, False, "accessibility", "accessibility_unavailable", f"role={role} error={err}")
     return False
 
 
@@ -464,6 +532,11 @@ def delete_chars(count: int):
 
 def _insert_via_keystroke(text: str):
     """Insert text character by character via CGEvent (slower fallback)."""
+    if not _can_post_synthetic_input():
+        _set_insert_diagnostic(False, False, "keystroke", "post_event_denied")
+        logger.error("Cannot use keystroke insertion because PostEvent access is not granted")
+        return False
+
     try:
         element = _get_focused_element()
         value_before = _copy_ax_attribute(element, "AXValue") if element is not None else None
@@ -480,14 +553,18 @@ def _insert_via_keystroke(text: str):
         if element is not None and isinstance(value_before, str):
             value_after = _copy_ax_attribute(element, "AXValue")
             if isinstance(value_after, str) and value_after != value_before:
+                _set_insert_diagnostic(True, True, "keystroke", "verified_ax_value")
                 return True
             logger.info(
                 "Keystroke fallback sent without AXValue change (value_before=%r, value_after=%r)",
                 value_before,
                 value_after,
             )
+            _set_insert_diagnostic(False, False, "keystroke", "keystroke_no_ax_change")
             return False
+        _set_insert_diagnostic(True, False, "keystroke", "unverifiable_target")
         return True
     except Exception as e:
         logger.error(f"Keystroke insertion failed: {e}")
+        _set_insert_diagnostic(False, False, "keystroke", "keystroke_exception", str(e))
         return False

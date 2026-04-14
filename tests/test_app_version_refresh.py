@@ -21,7 +21,11 @@ def test_existing_bundle_config_without_version_marker_triggers_refresh(monkeypa
 
     assert config["last_seen_version"] == app.APP_VERSION
     assert config["last_seen_bundle_fingerprint"] == "fp1"
-    assert saved == [{"last_seen_version": app.APP_VERSION, "last_seen_bundle_fingerprint": "fp1"}]
+    assert saved == [{
+        "last_seen_version": app.APP_VERSION,
+        "last_seen_bundle_fingerprint": "fp1",
+        app.PERMISSION_RESTART_PENDING_KEY: True,
+    }]
     assert refreshed == [app.BUNDLE_IDENTIFIER]
 
 
@@ -64,7 +68,11 @@ def test_bundled_version_change_saves_and_refreshes(monkeypatch, tmp_path):
 
     assert config["last_seen_version"] == app.APP_VERSION
     assert config["last_seen_bundle_fingerprint"] == "fp1"
-    assert saved == [{"last_seen_version": app.APP_VERSION, "last_seen_bundle_fingerprint": "fp1"}]
+    assert saved == [{
+        "last_seen_version": app.APP_VERSION,
+        "last_seen_bundle_fingerprint": "fp1",
+        app.PERMISSION_RESTART_PENDING_KEY: True,
+    }]
     assert refreshed == [app.BUNDLE_IDENTIFIER]
 
 

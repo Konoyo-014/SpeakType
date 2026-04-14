@@ -51,11 +51,20 @@ pip install -r requirements.txt
 
 ```bash
 brew install ollama
-ollama serve &
+brew services start ollama
 ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 ```
 
 Text polishing is optional. Without it, SpeakType inserts raw transcriptions.
+
+Ollama must be running for SpeakType to polish or translate text. The easiest command-line setup is `brew services start ollama`, which starts Ollama as a macOS background service; you do not need to keep a Terminal window open after that. Check it with:
+
+```bash
+brew services list | grep ollama
+curl http://localhost:11434/api/tags
+```
+
+If you prefer the Ollama desktop app, install and open Ollama.app instead; SpeakType connects to the same local server at `http://localhost:11434`. If you only run `ollama serve` in a Terminal window, that is a temporary foreground server: closing that Terminal stops Ollama, and SpeakType will insert raw transcription until Ollama is started again.
 
 **4. Run SpeakType**
 
@@ -136,6 +145,23 @@ Chinese equivalents are also supported: "句号", "逗号", "问号", "换行", 
 ### Text polishing
 
 When Ollama is running with the LLM model, SpeakType automatically polishes transcriptions: removing filler words, fixing grammar, and adjusting tone based on the active application. Toggle this on/off from the menubar.
+
+### Ollama startup options
+
+SpeakType never sends dictated audio, raw transcription, or polished text to external APIs. Ollama is used only as a local server on your Mac, normally at `http://localhost:11434`.
+
+For Homebrew installs, use `brew services start ollama` to keep Ollama running in the background after login. Use `brew services list | grep ollama` to verify the service state, and `brew services stop ollama` if you want to turn it off.
+
+For the desktop app install, open Ollama.app and leave it running in the menu bar. This is usually the simplest choice for non-terminal users.
+
+For temporary testing, `ollama serve` is fine, but it runs in the foreground. If you close that Terminal window, Ollama stops. SpeakType will keep dictation working, but text polishing and translation will be skipped and raw transcription will be inserted.
+
+After Ollama is running, install or verify the model:
+
+```bash
+ollama list
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
 
 ### Translation
 
@@ -247,9 +273,30 @@ The model is downloaded from HuggingFace. If you are behind a proxy, set `HTTP_P
 
 ### Text polishing not working
 
-1. Verify Ollama is running: `curl http://localhost:11434/api/tags`
-2. Verify the model is pulled: `ollama list` should show `huihui_ai/qwen3.5-abliterated:9b-Claude`
-3. If not, run: `ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude`
+First verify that Ollama is running:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+If that command cannot connect, start Ollama with one of these methods:
+
+```bash
+# Background service, recommended for Homebrew installs
+brew services start ollama
+
+# Temporary foreground server, stops when this Terminal closes
+ollama serve
+```
+
+Then verify the model is installed:
+
+```bash
+ollama list
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
+
+If SpeakType says polishing was skipped, dictation still worked locally; it inserted the raw transcription because Ollama was not available for the optional local LLM step.
 
 ### Text not inserted into application
 

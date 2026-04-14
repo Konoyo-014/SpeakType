@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from speaktype.polish import (
+    NO_PROXY_FOR_LOCAL_OLLAMA,
     OLLAMA_RECHECK_INTERVAL,
     PolishEngine,
     _detect_prompt_language,
@@ -229,6 +230,16 @@ class TestPolishEngineAvailability:
         assert engine._available is False
         assert "Ollama" in engine.last_error
 
+    def test_availability_check_bypasses_environment_proxy(self):
+        engine = PolishEngine()
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"models": [{"name": engine.model}]}
+
+        with patch("speaktype.polish.requests.get", return_value=response) as get:
+            assert engine.check_available() is True
+
+        assert get.call_args.kwargs["proxies"] == NO_PROXY_FOR_LOCAL_OLLAMA
+
 
 class TestLeadingFillerCleanup:
     def test_strip_chinese_filler_chain_at_start(self):
@@ -275,6 +286,7 @@ class TestPolishEngineWarmPath:
 
         payload = post.call_args.kwargs["json"]
         assert payload["keep_alive"] == "15m"
+        assert post.call_args.kwargs["proxies"] == NO_PROXY_FOR_LOCAL_OLLAMA
 
     def test_prewarm_uses_generate_endpoint(self):
         engine = PolishEngine(model="fake-model", ollama_url="http://localhost:11434")
@@ -285,6 +297,7 @@ class TestPolishEngineWarmPath:
             assert engine.prewarm() is True
 
         assert post.call_args.args[0] == "http://localhost:11434/api/generate"
+        assert post.call_args.kwargs["proxies"] == NO_PROXY_FOR_LOCAL_OLLAMA
         payload = post.call_args.kwargs["json"]
         assert payload["model"] == "fake-model"
         assert payload["keep_alive"] == "15m"

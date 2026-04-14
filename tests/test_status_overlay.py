@@ -71,13 +71,16 @@ def overlay(monkeypatch):
 class TestStateTransitions:
     def test_initial_state_is_idle(self, overlay):
         assert overlay.state == "idle"
+        assert overlay._note == ""
         assert overlay._text == ""
         assert overlay._level == 0.0
 
     def test_show_recording_sets_state_and_resets_text(self, overlay):
+        overlay._note = "stale note"
         overlay._text = "stale"
         overlay.show_recording()
         assert overlay.state == "recording"
+        assert overlay._note == ""
         assert overlay._text == ""
         assert overlay._level == 0.0
         assert overlay._start_time > 0
@@ -89,30 +92,52 @@ class TestStateTransitions:
         assert overlay.state == "transcribing"
         assert overlay._text == "hello world"
 
+    def test_show_transcribing_can_explain_wait_state(self, overlay):
+        overlay.show_recording()
+        overlay.show_transcribing("loading model")
+        assert overlay.state == "transcribing"
+        assert overlay._note == "loading model"
+        assert overlay._text == ""
+
     def test_show_polishing_overrides_text(self, overlay):
         overlay.show_recording()
+        overlay.show_transcribing("loading model")
         overlay.show_polishing("polished candidate")
         assert overlay.state == "polishing"
+        assert overlay._note == ""
         assert overlay._text == "polished candidate"
 
     def test_show_polishing_without_text_keeps_previous(self, overlay):
         overlay.show_recording()
+        overlay.show_transcribing("loading model")
         overlay.update_partial_text("partial")
         overlay.show_polishing()
         assert overlay.state == "polishing"
+        assert overlay._note == ""
         assert overlay._text == "partial"
 
     def test_show_done_sets_text(self, overlay):
         overlay.show_recording()
+        overlay.show_transcribing("loading model")
         overlay.show_done("final text", auto_hide_after=0)
         assert overlay.state == "done"
+        assert overlay._note == ""
         assert overlay._text == "final text"
 
-    def test_show_error_sets_text(self, overlay):
+    def test_show_notice_sets_note_not_text(self, overlay):
         overlay.show_recording()
+        overlay.show_notice("polish skipped", auto_hide_after=0)
+        assert overlay.state == "done"
+        assert overlay._note == "polish skipped"
+        assert overlay._text == ""
+
+    def test_show_error_sets_note_not_text(self, overlay):
+        overlay.show_recording()
+        overlay.show_transcribing("loading model")
         overlay.show_error("insert failed", auto_hide_after=0)
         assert overlay.state == "error"
-        assert overlay._text == "insert failed"
+        assert overlay._note == "insert failed"
+        assert overlay._text == ""
 
     def test_full_pipeline_state_sequence(self, overlay):
         overlay.show_recording()
@@ -195,10 +220,12 @@ def test_reset_after_hide_is_ignored_for_visible_overlay():
     overlay = StatusOverlay()
     overlay._state = "recording"
     overlay._is_visible = True
+    overlay._note = "keep note"
     overlay._text = "keep me"
 
     overlay._reset_after_hide_main()
 
+    assert overlay._note == "keep note"
     assert overlay._text == "keep me"
 
 

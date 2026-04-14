@@ -7,12 +7,14 @@ import threading
 import logging
 import AppKit
 import objc
+import requests
 from Foundation import NSObject, NSMakeRect
 
 from .i18n import t
 from .config import save_config
 from .applescript import run_osascript
 from .permissions import get_permission_status, request_missing_permissions
+from .polish import NO_PROXY_FOR_LOCAL_OLLAMA
 
 logger = logging.getLogger("speaktype.setup_wizard")
 
@@ -71,6 +73,19 @@ def _find_ollama() -> str:
 def _check_ollama_installed() -> bool:
     """Check if Ollama is installed."""
     return bool(_find_ollama())
+
+
+def _check_ollama_running(ollama_url: str = "http://localhost:11434") -> bool:
+    """Check if the local Ollama HTTP service is reachable."""
+    try:
+        resp = requests.get(
+            f"{ollama_url.rstrip('/')}/api/tags",
+            timeout=1,
+            proxies=NO_PROXY_FOR_LOCAL_OLLAMA,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def _check_ollama_model(model_name: str) -> bool:
@@ -424,9 +439,11 @@ class SetupWizardController:
         content = self.window.contentView()
         y = 390
         y = self._add_title(content, t("wizard_step_llm"), y)
-        y = self._add_body(content, t("wizard_llm_body"), y, height=60)
+        y = self._add_body(content, t("wizard_llm_body"), y, height=72)
 
         ollama_ok = _check_ollama_installed()
+        ollama_url = self.config.get("ollama_url", "http://localhost:11434")
+        ollama_running = _check_ollama_running(ollama_url) if ollama_ok else False
         model_name = self.config.get("llm_model", "huihui_ai/qwen3.5-abliterated:9b-Claude")
         model_ok = _check_ollama_model(model_name) if ollama_ok else False
 
@@ -446,24 +463,43 @@ class SetupWizardController:
             hint.setTextColor_(AppKit.NSColor.secondaryLabelColor())
             content.addSubview_(hint)
             y -= 24
-            y = self._add_command_box(content, "brew install ollama && ollama serve", y)
+            y = self._add_command_box(content, "brew install ollama", y)
 
-        y = self._add_status_row(content, "LLM Model", model_ok, y,
-                                 ok_text=t("wizard_model_ok"), fail_text=t("wizard_model_missing"))
+        if ollama_ok:
+            y = self._add_status_row(content, "Ollama Service", ollama_running, y,
+                                     ok_text=t("wizard_ollama_running_ok"),
+                                     fail_text=t("wizard_ollama_running_missing"))
 
-        if ollama_ok and not model_ok:
-            y -= 5
-            hint = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(40, y, 200, 18))
-            hint.setStringValue_(t("wizard_model_pull_hint"))
-            hint.setBezeled_(False)
-            hint.setDrawsBackground_(False)
-            hint.setEditable_(False)
-            hint.setSelectable_(False)
-            hint.setFont_(AppKit.NSFont.systemFontOfSize_(12))
-            hint.setTextColor_(AppKit.NSColor.secondaryLabelColor())
-            content.addSubview_(hint)
-            y -= 24
-            y = self._add_command_box(content, f"ollama pull {model_name}", y)
+            if not ollama_running:
+                y -= 5
+                hint = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(40, y, 280, 18))
+                hint.setStringValue_(t("wizard_ollama_start_hint"))
+                hint.setBezeled_(False)
+                hint.setDrawsBackground_(False)
+                hint.setEditable_(False)
+                hint.setSelectable_(False)
+                hint.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+                hint.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+                content.addSubview_(hint)
+                y -= 24
+                y = self._add_command_box(content, "ollama serve", y)
+
+            y = self._add_status_row(content, "LLM Model", model_ok, y,
+                                     ok_text=t("wizard_model_ok"), fail_text=t("wizard_model_missing"))
+
+            if not model_ok:
+                y -= 5
+                hint = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(40, y, 200, 18))
+                hint.setStringValue_(t("wizard_model_pull_hint"))
+                hint.setBezeled_(False)
+                hint.setDrawsBackground_(False)
+                hint.setEditable_(False)
+                hint.setSelectable_(False)
+                hint.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+                hint.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+                content.addSubview_(hint)
+                y -= 24
+                y = self._add_command_box(content, f"ollama pull {model_name}", y)
 
         self._add_button(content, t("wizard_btn_refresh"), b"onRefresh:", 40, 20, width=100)
         self._add_button(content, t("wizard_btn_skip"), b"onSkip:", 250, 20, width=100)

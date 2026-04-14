@@ -24,7 +24,13 @@ from .i18n import t, set_language, get_language
 from .audio import AudioRecorder
 from .asr import ASREngine
 from .polish import PolishEngine
-from .inserter import insert_text, replace_selection, delete_chars
+from .inserter import (
+    insert_text,
+    replace_selection,
+    delete_chars,
+    get_last_insert_diagnostic,
+    reset_last_insert_diagnostic,
+)
 from .hotkey import HotkeyListener
 from .history import DictationHistory
 from .context import get_active_app, get_tone_for_app, get_scene_for_app, get_selected_text
@@ -46,6 +52,7 @@ from .runtime import get_bundle_fingerprint
 
 logger = logging.getLogger("speaktype")
 APP_VERSION = get_runtime_version(__version__)
+PERMISSION_RESTART_PENDING_KEY = "permission_restart_pending_after_refresh"
 
 # The menubar shows a single stable icon. All state feedback
 # (recording / transcribing / polishing / done) lives in the unified
@@ -479,7 +486,58 @@ class SpeakTypeApp(rumps.App):
             _delta("inserted", "history_enqueued"),
         )
 
-    def _notify_llm_unavailable_once(self):
+    def _llm_unavailable_kind(self, error: str | None = None) -> str:
+        error_text = (error or getattr(self.polish_engine, "last_error", "") or "").lower()
+        if (
+            "not running" in error_text
+            or "connection" in error_text
+            or "connection refused" in error_text
+            or "failed to establish" in error_text
+        ):
+            return "not_running"
+        if (
+            "no ollama llm model" in error_text
+            or "model not found" in error_text
+            or "available models" in error_text
+        ):
+            return "model_missing"
+        if "timed out" in error_text or "timeout" in error_text:
+            return "timeout"
+        if "returned status" in error_text:
+            return "unhealthy"
+        return "generic"
+
+    def _llm_model_name_for_notice(self) -> str:
+        return getattr(self.polish_engine, "model", None) or self.config.get("llm_model", "")
+
+    def _llm_unavailable_notification_body(self, error: str | None = None) -> str:
+        model = self._llm_model_name_for_notice()
+        url = self.config.get("ollama_url", "http://localhost:11434")
+        kind = self._llm_unavailable_kind(error)
+        if kind == "not_running":
+            return t("notif_llm_ollama_not_running_body", model=model)
+        if kind == "model_missing":
+            return t("notif_llm_model_missing_body", model=model)
+        if kind == "timeout":
+            return t("notif_llm_ollama_timeout_body", model=model, url=url)
+        if kind == "unhealthy":
+            return t("notif_llm_ollama_unhealthy_body", model=model, url=url)
+        return t("notif_llm_unavail_body", model=model)
+
+    def _llm_fallback_overlay_text(self, error: str | None = None) -> str:
+        model = self._llm_model_name_for_notice()
+        kind = self._llm_unavailable_kind(error)
+        if kind == "not_running":
+            return t("overlay_llm_ollama_not_running_raw")
+        if kind == "model_missing":
+            return t("overlay_llm_model_missing_raw", model=model)
+        if kind == "timeout":
+            return t("overlay_llm_ollama_timeout_raw")
+        if kind == "unhealthy":
+            return t("overlay_llm_ollama_unhealthy_raw")
+        return t("overlay_llm_skipped_raw")
+
+    def _notify_llm_unavailable_once(self, error: str | None = None):
         """Warn once when local polishing/translation falls back to raw text."""
         if getattr(self, "_llm_unavailable_notified", False):
             return
@@ -487,35 +545,130 @@ class SpeakTypeApp(rumps.App):
         rumps.notification(
             "SpeakType",
             t("notif_llm_unavail_title"),
-            t("notif_llm_unavail_body", model=self.config["llm_model"]),
+            self._llm_unavailable_notification_body(error),
         )
 
-    def _observe_llm_status(self):
+    def _show_overlay_transcribing(self, text: str = ""):
+        if not hasattr(self._status_overlay, "show_transcribing"):
+            if text and hasattr(self._status_overlay, "update_partial_text"):
+                self._status_overlay.update_partial_text(text)
+            return
+        try:
+            self._status_overlay.show_transcribing(text)
+        except TypeError:
+            self._status_overlay.show_transcribing()
+            if text and hasattr(self._status_overlay, "update_partial_text"):
+                self._status_overlay.update_partial_text(text)
+
+    def _show_overlay_done(self, text: str = "", auto_hide_after: float = 0.6):
+        if not hasattr(self._status_overlay, "show_done"):
+            return
+        try:
+            self._status_overlay.show_done(text, auto_hide_after=auto_hide_after)
+        except TypeError:
+            self._status_overlay.show_done(text)
+
+    def _show_overlay_notice(self, text: str = "", auto_hide_after: float = 2.0):
+        if hasattr(self._status_overlay, "show_notice"):
+            try:
+                self._status_overlay.show_notice(text, auto_hide_after=auto_hide_after)
+                return
+            except TypeError:
+                self._status_overlay.show_notice(text)
+                return
+        self._show_overlay_done(text, auto_hide_after=auto_hide_after)
+
+    def _show_overlay_error(self, text: str = "", auto_hide_after: float = 3.0):
+        if not hasattr(self._status_overlay, "show_error"):
+            self._show_overlay_done(text, auto_hide_after=auto_hide_after)
+            return
+        try:
+            self._status_overlay.show_error(text, auto_hide_after=auto_hide_after)
+        except TypeError:
+            self._status_overlay.show_error(text)
+
+    def _observe_llm_status(self) -> bool:
         error = getattr(self.polish_engine, "last_error", "")
         if error:
-            logger.warning("LLM fallback: %s", error)
-            self._notify_llm_unavailable_once()
+            logger.warning(
+                "Local LLM post-processing fallback: polish/translation skipped for this dictation; raw or partially processed text will be inserted. reason=%s",
+                error,
+            )
+            self._notify_llm_unavailable_once(error)
+            return True
         else:
             self._llm_unavailable_notified = False
+            return False
+
+    def _insert_failure_hint(self, diagnostic=None) -> str:
+        reason = getattr(diagnostic, "reason", "") if diagnostic is not None else ""
+        if reason == "post_event_denied":
+            return t("insert_hint_post_event")
+        if reason in {"paste_verification_failed", "keystroke_no_ax_change", "accessibility_false_success"}:
+            return t("insert_hint_not_writable")
+        if reason == "no_focused_element":
+            return t("insert_hint_focus")
+        return t("insert_hint_generic")
 
     def _notify_insert_failed(self, app_info: dict | None = None):
         app_name = (app_info or {}).get("name") or "Unknown"
-        logger.error("Text insertion failed for %s", app_name)
-        try:
-            self._status_overlay.show_error(
-                t("overlay_insert_failed", app=app_name),
-                auto_hide_after=3.0,
-            )
-        except AttributeError:
-            self._status_overlay.show_done(
-                t("overlay_insert_failed", app=app_name),
-                auto_hide_after=3.0,
-            )
+        diagnostic = get_last_insert_diagnostic()
+        hint = self._insert_failure_hint(diagnostic)
+        logger.error(
+            "Text insertion failed for %s (method=%s reason=%s detail=%s)",
+            app_name,
+            getattr(diagnostic, "method", "unknown"),
+            getattr(diagnostic, "reason", "unknown"),
+            getattr(diagnostic, "detail", ""),
+        )
+        self._show_overlay_error(
+            t("overlay_insert_failed", app=app_name),
+            auto_hide_after=3.0,
+        )
         rumps.notification(
             "SpeakType",
             t("notif_insert_failed_title"),
-            t("notif_insert_failed_body", app=app_name),
+            t("notif_insert_failed_body", app=app_name, hint=hint),
         )
+
+    def _show_successful_insert_feedback(
+        self,
+        app_info: dict | None,
+        inserted_text: str,
+        llm_fallback_used: bool = False,
+    ):
+        app_name = (app_info or {}).get("name") or "Unknown"
+        diagnostic = get_last_insert_diagnostic()
+        unverified = bool(diagnostic and diagnostic.success and not diagnostic.verified)
+        if unverified and llm_fallback_used:
+            logger.warning(
+                "Text sent to %s but insertion could not be verified; LLM polish/translation was also skipped (method=%s reason=%s)",
+                app_name,
+                diagnostic.method,
+                diagnostic.reason,
+            )
+            self._show_overlay_notice(
+                t("overlay_insert_unverified_llm_skipped", app=app_name),
+                auto_hide_after=2.4,
+            )
+            return
+        if unverified:
+            logger.warning(
+                "Text sent to %s but insertion could not be verified (method=%s reason=%s)",
+                app_name,
+                diagnostic.method,
+                diagnostic.reason,
+            )
+            self._show_overlay_notice(
+                t("overlay_insert_unverified", app=app_name),
+                auto_hide_after=2.2,
+            )
+            return
+        if llm_fallback_used:
+            self._show_overlay_notice(
+                self._llm_fallback_overlay_text(),
+                auto_hide_after=2.2,
+            )
 
     def _do_setup(self):
         def init_engines():
@@ -588,6 +741,10 @@ class SpeakTypeApp(rumps.App):
 
         self._last_permission_status = status
         if status.all_granted:
+            if self.config.get(PERMISSION_RESTART_PENDING_KEY):
+                self._prompt_for_permission_restart(
+                    "Input permissions already granted after permission refresh"
+                )
             return
 
         self._permission_watch_stop.clear()
@@ -609,16 +766,32 @@ class SpeakTypeApp(rumps.App):
             previous = self._last_permission_status
             self._last_permission_status = current
             if (
-                _permission_status_transitioned_to_granted(previous, current)
+                (
+                    _permission_status_transitioned_to_granted(previous, current)
+                    or (
+                        self.config.get(PERMISSION_RESTART_PENDING_KEY)
+                        and _permission_status_has_new_grant(previous, current)
+                    )
+                )
                 and not self._permission_restart_prompt_shown
             ):
-                logger.info("Input permissions granted while SpeakType is running; restart required")
-                self._permission_restart_prompt_shown = True
-                self._permission_watch_stop.set()
-                self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    b"showPermissionRestartAlert:", None, False
+                self._prompt_for_permission_restart(
+                    "Input permissions changed while SpeakType is running"
                 )
                 return
+
+    def _prompt_for_permission_restart(self, reason: str):
+        if self._permission_restart_prompt_shown:
+            return
+        logger.info("%s; restart required", reason)
+        self._permission_restart_prompt_shown = True
+        self._permission_watch_stop.set()
+        if self.config.get(PERMISSION_RESTART_PENDING_KEY):
+            self.config[PERMISSION_RESTART_PENDING_KEY] = False
+            save_config(self.config)
+        self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+            b"showPermissionRestartAlert:", None, False
+        )
 
     def _show_permission_restart_alert_main(self):
         alert = AppKit.NSAlert.alloc().init()
@@ -733,6 +906,7 @@ class SpeakTypeApp(rumps.App):
             err = getattr(self.recorder, "last_start_error", None)
             message = str(err) if err else "Could not open microphone."
             logger.error(f"Recording failed to start: {message}")
+            self._show_overlay_error(t("overlay_mic_start_failed"), auto_hide_after=3.0)
             rumps.notification("SpeakType", t("notif_error"), message)
             return
 
@@ -807,13 +981,20 @@ class SpeakTypeApp(rumps.App):
 
         # Stop the level monitor and any streaming transcription
         self._stop_level_monitor()
+        preview_text = ""
         if self._streaming_transcriber:
-            self._streaming_transcriber.stop(wait=False)
+            preview_text = self._streaming_transcriber.stop(wait=False) or ""
             self._streaming_transcriber = None
         self.recorder.set_stream_callback(None)
 
         # Move the overlay into transcribing state while we wait on ASR
-        self._status_overlay.show_transcribing()
+        if hasattr(self.asr, "_loaded") and not getattr(self.asr, "_loaded", False):
+            logger.info("ASR model is still loading; showing cold-start transcription status")
+            self._show_overlay_transcribing(t("overlay_asr_loading"))
+        elif preview_text:
+            self._show_overlay_transcribing(t("overlay_finalizing_preview"))
+        else:
+            self._show_overlay_transcribing()
 
         can_use_in_memory_audio = (
             getattr(self.asr, "backend", "qwen") == "qwen"
@@ -822,9 +1003,17 @@ class SpeakTypeApp(rumps.App):
         )
         audio_input = self.recorder.stop_audio() if can_use_in_memory_audio else self.recorder.stop()
         if audio_input is None:
-            logger.info("No audio captured")
+            reason = getattr(self.recorder, "last_stop_reason", "") or "unknown"
+            message = getattr(self.recorder, "last_stop_message", "") or ""
+            logger.info("No usable audio captured (reason=%s message=%s duration=%.2fs)", reason, message, duration)
             self._is_processing = False
-            self._status_overlay.hide(delay=0.4)
+            overlay_key = {
+                "too_short": "overlay_audio_too_short",
+                "too_quiet": "overlay_audio_too_quiet",
+                "no_frames": "overlay_no_audio",
+                "not_recording": "overlay_no_audio",
+            }.get(reason, "overlay_no_audio")
+            self._show_overlay_error(t(overlay_key), auto_hide_after=2.0)
             return
 
         self._processing_thread = threading.Thread(
@@ -894,6 +1083,7 @@ class SpeakTypeApp(rumps.App):
 
     def _process_audio(self, audio_input, duration: float):
         marks = {"start": time.perf_counter()}
+        llm_fallback_used = False
         try:
             app_info = get_active_app()
             tone = get_tone_for_app(app_info) if self.config["context_aware_tone"] else "neutral"
@@ -903,12 +1093,14 @@ class SpeakTypeApp(rumps.App):
                 audio_input = self._plugin_manager.run_hook("pre_transcribe", audio_input) or audio_input
 
             logger.info("Transcribing...")
+            if hasattr(self.asr, "_loaded") and not getattr(self.asr, "_loaded", False):
+                self._show_overlay_transcribing(t("overlay_asr_loading"))
             raw_text = self.asr.transcribe(audio_input, language=self.config["language"])
             marks["transcribed"] = time.perf_counter()
 
             if not raw_text.strip():
                 logger.info("Empty transcription")
-                self._status_overlay.hide(delay=0.4)
+                self._show_overlay_error(t("overlay_empty_transcription"), auto_hide_after=1.8)
                 return
 
             logger.info(f"Raw: {raw_text}")
@@ -938,6 +1130,7 @@ class SpeakTypeApp(rumps.App):
             if snippet_text:
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
                 self._status_overlay.show_done(snippet_text)
+                reset_last_insert_diagnostic()
                 inserted_ok = insert_text(
                     snippet_text,
                     method=self.config["insert_method"],
@@ -947,6 +1140,7 @@ class SpeakTypeApp(rumps.App):
                 if not inserted_ok:
                     self._notify_insert_failed(app_info)
                     return
+                self._show_successful_insert_feedback(app_info, snippet_text)
                 self._remember_last_insertion(snippet_text, app_info)
                 return
 
@@ -994,7 +1188,7 @@ class SpeakTypeApp(rumps.App):
                     scene=scene_id,
                     scene_template=scene_template,
                 )
-                self._observe_llm_status()
+                llm_fallback_used = self._observe_llm_status() or llm_fallback_used
                 marks["polished"] = time.perf_counter()
                 marks["translated"] = marks["polished"]
             else:
@@ -1016,7 +1210,7 @@ class SpeakTypeApp(rumps.App):
                         scene=scene_id,
                         scene_template=scene_template,
                     )
-                    self._observe_llm_status()
+                    llm_fallback_used = self._observe_llm_status() or llm_fallback_used
                 else:
                     polished = text
                 marks["polished"] = time.perf_counter()
@@ -1031,7 +1225,7 @@ class SpeakTypeApp(rumps.App):
                     self._status_overlay.show_polishing(polished)
                     logger.info(f"Translating to {target}...")
                     polished = self.polish_engine.translate(polished, target_lang=target)
-                    self._observe_llm_status()
+                    llm_fallback_used = self._observe_llm_status() or llm_fallback_used
                 marks["translated"] = time.perf_counter()
 
             logger.info(f"Final: {polished}")
@@ -1052,6 +1246,7 @@ class SpeakTypeApp(rumps.App):
                 self.config["insert_method"],
                 app_info.get("name", "Unknown"),
             )
+            reset_last_insert_diagnostic()
             inserted_ok = insert_text(
                 polished,
                 method=self.config["insert_method"],
@@ -1062,6 +1257,7 @@ class SpeakTypeApp(rumps.App):
                 self._notify_insert_failed(app_info)
                 return
             marks["inserted"] = time.perf_counter()
+            self._show_successful_insert_feedback(app_info, polished, llm_fallback_used)
             self._remember_last_insertion(polished, app_info)
 
             # Plugin: post_insert
@@ -1079,7 +1275,7 @@ class SpeakTypeApp(rumps.App):
             marks["history_enqueued"] = time.perf_counter()
         except Exception as e:
             logger.error(f"Processing failed: {e}")
-            self._status_overlay.hide(delay=0.2)
+            self._show_overlay_error(t("overlay_processing_failed"), auto_hide_after=3.0)
             rumps.notification("SpeakType", t("notif_error"), str(e))
         finally:
             marks["end"] = time.perf_counter()
@@ -1399,10 +1595,12 @@ def _check_permissions():
         )
 
         issues = []
-        if not status.accessibility or not status.post_event:
-            issues.append("Accessibility")
+        if not status.accessibility:
+            issues.append(t("perm_name_accessibility"))
         if not status.listen_event:
-            issues.append("Input Monitoring")
+            issues.append(t("perm_name_input_monitoring"))
+        if not status.post_event:
+            issues.append(t("perm_name_post_event"))
 
         if issues:
             request_missing_permissions(status)
@@ -1449,6 +1647,17 @@ def _permission_status_transitioned_to_granted(previous, current) -> bool:
     return not previous.all_granted and current.all_granted
 
 
+def _permission_status_has_new_grant(previous, current) -> bool:
+    if previous is None or current is None:
+        return False
+    fields = ("accessibility", "listen_event", "post_event")
+    return any(
+        not bool(getattr(previous, field, False))
+        and bool(getattr(current, field, False))
+        for field in fields
+    )
+
+
 def _refresh_permissions_after_bundle_update(config: dict):
     """Force a permission re-request once per newly installed bundled build."""
     current_version = APP_VERSION
@@ -1462,14 +1671,16 @@ def _refresh_permissions_after_bundle_update(config: dict):
         config["last_seen_version"] = current_version
         if current_fingerprint:
             config["last_seen_bundle_fingerprint"] = current_fingerprint
-        save_config(config)
         if running_bundle and existing_config:
+            config[PERMISSION_RESTART_PENDING_KEY] = True
+            save_config(config)
             logger.info(
                 "Existing config has no bundle marker; forcing one-time permission refresh for %s",
                 current_version,
             )
             refresh_permissions_for_update(BUNDLE_IDENTIFIER)
             return
+        save_config(config)
         logger.info("Recording current bundle for permission refresh tracking: %s", current_version)
         return
 
@@ -1488,6 +1699,8 @@ def _refresh_permissions_after_bundle_update(config: dict):
     config["last_seen_version"] = current_version
     if current_fingerprint:
         config["last_seen_bundle_fingerprint"] = current_fingerprint
+    if running_bundle:
+        config[PERMISSION_RESTART_PENDING_KEY] = True
     save_config(config)
 
     if not running_bundle:

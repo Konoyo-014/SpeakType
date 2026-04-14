@@ -75,6 +75,10 @@ def test_insert_via_accessibility_sets_selected_text(monkeypatch):
 
     assert inserter._insert_via_accessibility("hello") is True
     assert calls == [(element, inserter.kAXSelectedTextAttribute, "hello")]
+    diagnostic = inserter.get_last_insert_diagnostic()
+    assert diagnostic.success is True
+    assert diagnostic.verified is True
+    assert diagnostic.method == "accessibility"
 
 
 def test_insert_via_accessibility_rejects_false_success(monkeypatch):
@@ -102,6 +106,9 @@ def test_insert_via_accessibility_rejects_false_success(monkeypatch):
 
     assert inserter._insert_via_accessibility("hello") is False
     assert calls == [(element, inserter.kAXSelectedTextAttribute, "hello")]
+    diagnostic = inserter.get_last_insert_diagnostic()
+    assert diagnostic.success is False
+    assert diagnostic.reason == "accessibility_false_success"
 
 
 def test_insert_via_accessibility_rejects_selection_echo(monkeypatch):
@@ -148,6 +155,9 @@ def test_insert_via_paste_fails_fast_without_post_event_permission(monkeypatch):
     )
 
     assert inserter._insert_via_paste("hello", app_name="Codex") is False
+    diagnostic = inserter.get_last_insert_diagnostic()
+    assert diagnostic.success is False
+    assert diagnostic.reason == "post_event_denied"
 
 
 def test_insert_via_paste_prefers_clipboard_before_direct_keystrokes(monkeypatch):
@@ -166,6 +176,10 @@ def test_insert_via_paste_prefers_clipboard_before_direct_keystrokes(monkeypatch
 
     assert presses == ["Codex"]
     assert pb.stringForType_(inserter.AppKit.NSPasteboardTypeString) == "hello"
+    diagnostic = inserter.get_last_insert_diagnostic()
+    assert diagnostic.success is True
+    assert diagnostic.verified is False
+    assert diagnostic.reason == "unverifiable_target"
 
 
 def test_insert_via_paste_retries_system_events_when_observable_paste_does_not_change_target(monkeypatch):
@@ -197,6 +211,10 @@ def test_insert_via_paste_retries_system_events_when_observable_paste_does_not_c
 
     assert quartz_presses == ["Codex"]
     assert osascript_presses == ["Codex"]
+    diagnostic = inserter.get_last_insert_diagnostic()
+    assert diagnostic.success is True
+    assert diagnostic.verified is True
+    assert diagnostic.method == "paste_system_events"
     assert scheduled == [
         (
             {"public.utf8-plain-text": b"before"},

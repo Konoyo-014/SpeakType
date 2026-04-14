@@ -2,6 +2,28 @@
 
 All notable changes to SpeakType will be documented in this file.
 
+## [2.1.2] - 2026-04-14
+
+### Fixed
+- Added clearer in-overlay feedback when local Ollama polish/translation is unavailable: SpeakType now explicitly says polish/translation was skipped and raw transcription was inserted.
+- Added ASR cold-start and finalization overlay text so slow Qwen3-ASR model loading or live-preview-to-final delays no longer look like a stuck recording.
+- Added recorder stop reasons for empty, too-short, and too-quiet audio, with user-facing overlay prompts for fast hotkey releases, missing audio, and weak microphone input.
+- Added insertion diagnostics that distinguish verified insertion, unverified-but-sent insertion, PostEvent denial, missing focused fields, and target controls that do not confirm text changes.
+- Improved insertion failure notifications with actionable hints for Input Monitoring/PostEvent, focus loss, and non-writable web or app input controls.
+- Split startup permission labels so missing PostEvent access is reported as synthetic input permission, not as a generic Accessibility issue.
+- Restored the post-authorization restart prompt when permissions are reset during bundled app replacement, including the macOS case where the current process still cannot read new PostEvent grants until restart.
+- Separated overlay system notes from dictated text, using smaller secondary status text plus a wider/taller preview window so long prompts and streaming preview text fit more reliably.
+- Removed live transcription text from the gray finalization note; that note now stays a short system status message.
+- Prevented pending permission refresh state from showing a restart prompt before the user has granted any refreshed permission.
+- Moved completed-state system notices such as local LLM fallback and unverified insertion out of the main dictated-text layer; these now render as status notes instead of black transcription text.
+- Local Ollama calls now bypass system HTTP/HTTPS proxy settings, so `localhost:11434` health checks and polish requests do not get sent through a proxy such as `127.0.0.1:7897`.
+- The local LLM fallback overlay no longer appends raw transcription text after the notice.
+- Local LLM fallback notifications now distinguish Ollama not running, missing models, timeouts, and abnormal Ollama responses, with explicit local startup or `ollama pull` guidance.
+- The first-run setup wizard now shows whether Ollama is installed but not running, and gives a direct `ollama serve` startup command without adding a new product mode or setting.
+
+### Tests
+- Test count grew to 410. New coverage includes ASR cold-start overlay text, audio negative-path reasons, LLM fallback raw-insert notices, Ollama not-running/model-missing/timeout fallback guidance, unverified insertion notices, insertion diagnostics, transcribing-state wait messages, partial permission-grant detection, no-premature-restart prompting while refreshed permissions are still ungranted, local Ollama proxy bypass, and system-notice overlay rendering.
+
 ## [2.1.1] - 2026-04-12
 
 ### Changed

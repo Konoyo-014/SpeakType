@@ -19,6 +19,7 @@ FALLBACK_MODELS = [
 OLLAMA_KEEP_ALIVE = "15m"
 OLLAMA_PREWARM_MIN_INTERVAL = 30.0
 OLLAMA_RECHECK_INTERVAL = 10.0
+NO_PROXY_FOR_LOCAL_OLLAMA = {"http": None, "https": None}
 LANGUAGE_NAMES = {
     "en": "English",
     "zh": "Chinese (Simplified)",
@@ -31,6 +32,12 @@ LANGUAGE_NAMES = {
     "pt": "Portuguese",
     "ar": "Arabic",
 }
+
+
+def _response_error_detail(resp) -> str:
+    detail = (getattr(resp, "text", "") or "").strip()
+    detail = " ".join(detail.split())
+    return detail[:200]
 
 # Scene-specific prompt fragments. The active app maps to a scene id (see
 # context.get_scene_for_app), and that id picks the matching template here.
@@ -301,7 +308,11 @@ class PolishEngine:
         """Check if Ollama is running and the model is available."""
         self._last_availability_check_at = time.monotonic()
         try:
-            resp = requests.get(f"{self.ollama_url}/api/tags", timeout=3)
+            resp = requests.get(
+                f"{self.ollama_url}/api/tags",
+                timeout=3,
+                proxies=NO_PROXY_FOR_LOCAL_OLLAMA,
+            )
             if resp.status_code == 200:
                 models = resp.json().get("models", [])
                 model_names = [m.get("name", "") for m in models]
@@ -328,7 +339,9 @@ class PolishEngine:
                 self._available = False
                 return False
 
-            self.last_error = f"Ollama returned status {resp.status_code} while listing models"
+            detail = _response_error_detail(resp)
+            suffix = f": {detail}" if detail else ""
+            self.last_error = f"Ollama returned status {resp.status_code} while listing models{suffix}"
             logger.warning(self.last_error)
             self._available = False
         except requests.ConnectionError:
@@ -371,6 +384,7 @@ class PolishEngine:
                     },
                 },
                 timeout=120,
+                proxies=NO_PROXY_FOR_LOCAL_OLLAMA,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -378,7 +392,9 @@ class PolishEngine:
                 self.last_error = ""
                 return content
             else:
-                self.last_error = f"Ollama returned status {resp.status_code}"
+                detail = _response_error_detail(resp)
+                suffix = f": {detail}" if detail else ""
+                self.last_error = f"Ollama returned status {resp.status_code}{suffix}"
                 logger.warning(self.last_error)
         except requests.Timeout:
             self.last_error = "Ollama request timed out"
@@ -411,6 +427,7 @@ class PolishEngine:
                     "keep_alive": keep_alive,
                 },
                 timeout=10,
+                proxies=NO_PROXY_FOR_LOCAL_OLLAMA,
             )
             success = resp.status_code == 200
             if not success:

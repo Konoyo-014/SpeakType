@@ -51,11 +51,20 @@ pip install -r requirements.txt
 
 ```bash
 brew install ollama
-ollama serve &
+brew services start ollama
 ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 ```
 
 文本润色是可选功能。不安装 Ollama 时，SpeakType 会直接插入原始转写文本。
+
+SpeakType 只有在 Ollama 正在运行时才会执行文本润色或翻译。命令行用户推荐用 `brew services start ollama`，这样 Ollama 会作为 macOS 后台服务运行，不需要一直保留终端窗口。可以用下面的命令确认状态：
+
+```bash
+brew services list | grep ollama
+curl http://localhost:11434/api/tags
+```
+
+如果你使用 Ollama 桌面应用，打开 Ollama.app 并让它在菜单栏后台运行即可；SpeakType 会连接同一个本地服务 `http://localhost:11434`。如果你只是在终端里直接运行 `ollama serve`，那只是临时前台服务：关闭这个终端窗口后 Ollama 会停止，SpeakType 会继续听写，但会跳过润色并插入原始转写文本。
 
 **4. 运行 SpeakType**
 
@@ -142,6 +151,23 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 ### 文本润色
 
 当 Ollama 运行并加载了 LLM 模型时，SpeakType 会自动润色转写结果：去除语气词、修正语法、根据当前应用调整语气。可从菜单栏开关此功能。
+
+### Ollama 启动方式
+
+SpeakType 不会把录音、原始转写或润色文本发送到外部 API。Ollama 只是运行在你 Mac 本机的本地服务，默认地址是 `http://localhost:11434`。
+
+如果通过 Homebrew 安装，推荐运行 `brew services start ollama`，让 Ollama 登录后作为后台服务运行。用 `brew services list | grep ollama` 检查状态；如果想关闭，用 `brew services stop ollama`。
+
+如果安装的是桌面版，直接打开 Ollama.app，并让它留在菜单栏后台运行。这对不想使用终端的用户最简单。
+
+如果只是临时测试，可以运行 `ollama serve`。但它是前台进程，关闭终端窗口后 Ollama 就会停止。SpeakType 仍然会正常听写，只是文本润色和翻译会被跳过，并插入原始转写。
+
+Ollama 运行后，再安装或确认模型：
+
+```bash
+ollama list
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
 
 ### 翻译
 
@@ -253,9 +279,30 @@ def post_transcribe(text):
 
 ### 文本润色不工作
 
-1. 验证 Ollama 是否在运行：`curl http://localhost:11434/api/tags`
-2. 验证模型是否已拉取：`ollama list` 应显示 `huihui_ai/qwen3.5-abliterated:9b-Claude`
-3. 如果没有，运行：`ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude`
+先确认 Ollama 本地服务是否在运行：
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+如果无法连接，请用其中一种方式启动 Ollama：
+
+```bash
+# Homebrew 安装推荐，用后台服务方式运行
+brew services start ollama
+
+# 临时前台服务，关闭这个终端后会停止
+ollama serve
+```
+
+然后确认模型已经安装：
+
+```bash
+ollama list
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
+
+如果 SpeakType 提示润色被跳过，说明听写本身已经成功；它只是因为 Ollama 暂时不可用而插入了原始转写。
 
 ### 文字没有插入到应用中
 

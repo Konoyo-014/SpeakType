@@ -38,6 +38,8 @@ class AudioRecorder:
         self._start_monotonic = 0.0
         self._on_max_duration_reached = None
         self._last_start_error = None
+        self._last_stop_reason = None
+        self._last_stop_message = ""
 
     def start(self, max_seconds: float | None = None, on_max_duration=None):
         """Begin recording.
@@ -60,6 +62,8 @@ class AudioRecorder:
             self._start_monotonic = time.monotonic()
             self.is_recording = True
             self._last_start_error = None
+            self._last_stop_reason = None
+            self._last_stop_message = ""
 
             for attempt in range(MAX_RETRIES):
                 try:
@@ -140,6 +144,14 @@ class AudioRecorder:
     def last_start_error(self):
         return self._last_start_error
 
+    @property
+    def last_stop_reason(self):
+        return self._last_stop_reason
+
+    @property
+    def last_stop_message(self):
+        return self._last_stop_message
+
     def _callback(self, indata, frames, time_info, status):
         if not self.is_recording:
             return
@@ -197,6 +209,8 @@ class AudioRecorder:
     def _finish_recording(self):
         with self._lock:
             if not self.is_recording:
+                self._last_stop_reason = "not_recording"
+                self._last_stop_message = "Recorder was not active when stop was requested"
                 return None
             self.is_recording = False
             self._max_recording_seconds = None
@@ -215,6 +229,8 @@ class AudioRecorder:
     def _finalize_audio(self, frames):
         if not frames:
             logger.warning("No audio frames captured at all")
+            self._last_stop_reason = "no_frames"
+            self._last_stop_message = "No audio frames were captured"
             return None
 
         audio_data = np.concatenate(frames, axis=0).flatten()
@@ -227,13 +243,19 @@ class AudioRecorder:
 
         if len(audio_data) < self.sample_rate * 0.3:
             logger.warning(f"Audio too short: {duration:.2f}s < 0.3s")
+            self._last_stop_reason = "too_short"
+            self._last_stop_message = f"Recording was too short ({duration:.2f}s)"
             return None
 
         min_peak = MIN_PEAK_WHISPER if whisper_was_active else MIN_PEAK_NORMAL
         if peak < min_peak:
             logger.warning(f"Audio too quiet: peak={peak:.4f} < {min_peak}")
+            self._last_stop_reason = "too_quiet"
+            self._last_stop_message = f"Audio peak was too quiet ({peak:.4f})"
             return None
 
+        self._last_stop_reason = None
+        self._last_stop_message = ""
         return audio_data
 
     def get_level(self) -> float:

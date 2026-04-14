@@ -37,10 +37,26 @@ _STRINGS = {
         "en": "Hold {hotkey} to start dictating.\nGrant Microphone and Accessibility access when prompted.\nUse Preferences (⌘,) to customize settings.",
     },
     "notif_asr_failed": {"zh": "语音识别加载失败", "en": "ASR Load Failed"},
-    "notif_llm_unavail_title": {"zh": "LLM 不可用", "en": "LLM Not Available"},
+    "notif_llm_unavail_title": {"zh": "文本润色暂时不可用", "en": "Text Polishing Temporarily Unavailable"},
     "notif_llm_unavail_body": {
-        "zh": "Ollama 未运行或模型不可用，文本润色/翻译会暂时回退到原始转写。\n请运行 ollama serve，并确认已拉取 {model}。",
-        "en": "Ollama is not running or the model is unavailable, so polishing/translation will temporarily fall back to raw transcription.\nRun ollama serve and make sure {model} is pulled.",
+        "zh": "文本润色已开启，但本地 Ollama 暂时不可用，所以这次已插入原始转写。\n请打开 Ollama 应用，或在终端运行：ollama serve。模型缺失时再运行：ollama pull {model}。",
+        "en": "Text polishing is enabled, but local Ollama is temporarily unavailable, so raw transcription was inserted this time.\nOpen the Ollama app or run: ollama serve. If the model is missing, run: ollama pull {model}.",
+    },
+    "notif_llm_ollama_not_running_body": {
+        "zh": "文本润色已开启，但本地 Ollama 没有运行，所以这次已插入原始转写。\n请打开 Ollama 应用；如果你用命令行安装，请在终端运行：ollama serve。随后如果提示模型缺失，再运行：ollama pull {model}。",
+        "en": "Text polishing is enabled, but local Ollama is not running, so raw transcription was inserted this time.\nOpen the Ollama app; if you installed it from the command line, run: ollama serve. If the model is still missing, run: ollama pull {model}.",
+    },
+    "notif_llm_model_missing_body": {
+        "zh": "文本润色已开启，但本地 Ollama 找不到模型 {model}，所以这次已插入原始转写。\n请保持 Ollama 运行，然后在终端运行：ollama pull {model}。",
+        "en": "Text polishing is enabled, but local Ollama cannot find model {model}, so raw transcription was inserted this time.\nKeep Ollama running, then run: ollama pull {model}.",
+    },
+    "notif_llm_ollama_timeout_body": {
+        "zh": "文本润色已开启，但 Ollama 没有及时响应，所以这次已插入原始转写。\n请确认 Ollama 已打开，地址是 {url}，模型 {model} 已安装。",
+        "en": "Text polishing is enabled, but Ollama did not respond in time, so raw transcription was inserted this time.\nMake sure Ollama is open, the URL is {url}, and model {model} is installed.",
+    },
+    "notif_llm_ollama_unhealthy_body": {
+        "zh": "文本润色已开启，但 Ollama 返回异常状态，所以这次已插入原始转写。\n请重启 Ollama 应用，或在终端重新运行：ollama serve。当前地址：{url}，模型：{model}。",
+        "en": "Text polishing is enabled, but Ollama returned an unexpected status, so raw transcription was inserted this time.\nRestart the Ollama app or rerun: ollama serve. Current URL: {url}. Model: {model}.",
     },
     "notif_ready_title": {"zh": "就绪！", "en": "Ready!"},
     "notif_ready_body": {
@@ -71,12 +87,88 @@ _STRINGS = {
     "notif_error": {"zh": "错误", "en": "Error"},
     "notif_insert_failed_title": {"zh": "插入失败", "en": "Insertion Failed"},
     "notif_insert_failed_body": {
-        "zh": "SpeakType 没能把文本插入到 {app}。请确认该应用窗口仍在前台，并在系统设置中授予辅助功能和输入监控权限。",
-        "en": "SpeakType could not insert text into {app}. Make sure the target window is still focused and Accessibility/Input Monitoring permissions are granted.",
+        "zh": "SpeakType 没能把文本插入到 {app}。{hint}",
+        "en": "SpeakType could not insert text into {app}. {hint}",
+    },
+    "insert_hint_post_event": {
+        "zh": "系统拒绝模拟输入。请在系统设置中重新授权输入监控，然后重启 SpeakType。",
+        "en": "macOS rejected synthetic input. Re-grant Input Monitoring in System Settings, then restart SpeakType.",
+    },
+    "insert_hint_focus": {
+        "zh": "没有检测到可写输入框。请点击目标输入框后重试。",
+        "en": "No writable focused input was detected. Click the target text field and try again.",
+    },
+    "insert_hint_not_writable": {
+        "zh": "目标输入框没有确认接收文本。请点回可编辑输入框后重试；网页聊天框可能需要重新聚焦。",
+        "en": "The target input did not confirm that it accepted text. Refocus the editable field and try again; web chat boxes may need a fresh click.",
+    },
+    "insert_hint_generic": {
+        "zh": "请确认目标窗口仍在前台，并确认辅助功能与输入监控权限已授权。",
+        "en": "Make sure the target window is still focused and Accessibility/Input Monitoring permissions are granted.",
     },
     "overlay_insert_failed": {
-        "zh": "插入失败：请重新授权输入监控，或重启 SpeakType",
-        "en": "Insertion failed: re-grant Input Monitoring or restart SpeakType",
+        "zh": "插入失败：{app} 没有接收文本",
+        "en": "Insertion failed: {app} did not receive text",
+    },
+    "overlay_insert_unverified": {
+        "zh": "已发送到 {app}，但无法确认文本已进入输入框",
+        "en": "Sent to {app}, but text insertion could not be verified",
+    },
+    "overlay_insert_unverified_llm_skipped": {
+        "zh": "已发送原始转写到 {app}，但无法确认输入框已接收",
+        "en": "Sent raw transcription to {app}, but insertion could not be verified",
+    },
+    "overlay_llm_skipped_raw": {
+        "zh": "润色/翻译已临时跳过，已插入原始转写",
+        "en": "Polish/translation was temporarily skipped; inserted raw transcription",
+    },
+    "overlay_llm_ollama_not_running_raw": {
+        "zh": "Ollama 未运行，已插入原始转写。打开 Ollama 应用，或运行：ollama serve",
+        "en": "Ollama is not running; inserted raw transcription. Open the Ollama app or run: ollama serve",
+    },
+    "overlay_llm_model_missing_raw": {
+        "zh": "Ollama 缺少模型，已插入原始转写。运行：ollama pull {model}",
+        "en": "Ollama model is missing; inserted raw transcription. Run: ollama pull {model}",
+    },
+    "overlay_llm_ollama_timeout_raw": {
+        "zh": "Ollama 响应超时，已插入原始转写。确认 Ollama 已打开后重试",
+        "en": "Ollama timed out; inserted raw transcription. Make sure Ollama is open and try again",
+    },
+    "overlay_llm_ollama_unhealthy_raw": {
+        "zh": "Ollama 状态异常，已插入原始转写。重启 Ollama 后重试",
+        "en": "Ollama returned an error; inserted raw transcription. Restart Ollama and try again",
+    },
+    "overlay_asr_loading": {
+        "zh": "正在加载本地语音识别模型，首次启动可能需要一两分钟…",
+        "en": "Loading the local speech recognition model. First launch can take a minute or two…",
+    },
+    "overlay_finalizing_preview": {
+        "zh": "正在生成最终文本，实时预览可能会被校正",
+        "en": "Finalizing transcription; the live preview may be corrected",
+    },
+    "overlay_empty_transcription": {
+        "zh": "没有识别到文字：请再说一次",
+        "en": "No words were recognized. Please try again.",
+    },
+    "overlay_no_audio": {
+        "zh": "没有录到声音：请检查麦克风或输入设备",
+        "en": "No audio was captured. Check the microphone or input device.",
+    },
+    "overlay_audio_too_short": {
+        "zh": "录音太短：请按住快捷键后再开始说话",
+        "en": "Recording was too short. Hold the hotkey before speaking.",
+    },
+    "overlay_audio_too_quiet": {
+        "zh": "声音太小：请靠近麦克风或换输入设备",
+        "en": "Audio was too quiet. Move closer to the microphone or choose another input.",
+    },
+    "overlay_mic_start_failed": {
+        "zh": "麦克风打不开：请检查权限或输入设备",
+        "en": "Could not open microphone. Check permissions or the input device.",
+    },
+    "overlay_processing_failed": {
+        "zh": "处理失败：请查看通知或日志",
+        "en": "Processing failed. Check the notification or log.",
     },
 
     # --- Settings window (settings_window.py) ---
@@ -178,10 +270,13 @@ _STRINGS = {
         "zh": "请在系统设置里授权：{missing}。授权后重启 SpeakType。",
         "en": "Grant {missing} in System Settings, then restart SpeakType.",
     },
-    "perm_restart_title": {"zh": "权限已授权", "en": "Permissions Granted"},
+    "perm_name_accessibility": {"zh": "辅助功能", "en": "Accessibility"},
+    "perm_name_input_monitoring": {"zh": "输入监控（监听热键）", "en": "Input Monitoring (hotkey listening)"},
+    "perm_name_post_event": {"zh": "输入监控（模拟按键）", "en": "Input Monitoring (synthetic input)"},
+    "perm_restart_title": {"zh": "需要重启以完成权限更新", "en": "Restart Required for Permissions"},
     "perm_restart_body": {
-        "zh": "macOS 已授予输入权限。请重启 SpeakType，让热键和插入功能生效。",
-        "en": "macOS granted input permissions. Restart SpeakType so hotkeys and insertion take effect.",
+        "zh": "如果你刚完成授权，请重启 SpeakType，让热键和插入功能在当前版本里生效。",
+        "en": "If you just granted permissions, restart SpeakType so hotkeys and insertion take effect in this build.",
     },
     "perm_restart_now": {"zh": "立即重启", "en": "Restart Now"},
     "perm_restart_later": {"zh": "稍后", "en": "Later"},
@@ -228,12 +323,15 @@ _STRINGS = {
     "wizard_asr_error": {"zh": "✗ 下载失败：{error}", "en": "✗ Download failed: {error}"},
 
     "wizard_llm_body": {
-        "zh": "文本润色使用本地大语言模型（通过 Ollama）。\n这是可选功能 — 不安装也能正常使用语音输入。",
-        "en": "Text polishing uses a local LLM via Ollama.\nThis is optional — voice input works without it.",
+        "zh": "文本润色完全在本机通过 Ollama 运行。\n如果 Ollama 没有启动，SpeakType 会先插入原始转写，并告诉你怎么启动。",
+        "en": "Text polishing runs fully on this Mac through Ollama.\nIf Ollama is not running, SpeakType inserts raw transcription first and tells you how to start it.",
     },
     "wizard_ollama_ok": {"zh": "✓ Ollama 已安装", "en": "✓ Ollama installed"},
     "wizard_ollama_missing": {"zh": "✗ 未检测到 Ollama", "en": "✗ Ollama not detected"},
     "wizard_ollama_install_hint": {"zh": "安装命令：", "en": "Install command:"},
+    "wizard_ollama_running_ok": {"zh": "✓ Ollama 正在运行", "en": "✓ Ollama running"},
+    "wizard_ollama_running_missing": {"zh": "✗ Ollama 未运行", "en": "✗ Ollama not running"},
+    "wizard_ollama_start_hint": {"zh": "启动方式：打开 Ollama 应用，或运行命令：", "en": "Start Ollama by opening the app, or run:"},
     "wizard_model_ok": {"zh": "✓ LLM 模型已就绪", "en": "✓ LLM model ready"},
     "wizard_model_missing": {"zh": "✗ 未检测到 LLM 模型", "en": "✗ LLM model not found"},
     "wizard_model_pull_hint": {"zh": "拉取命令：", "en": "Pull command:"},

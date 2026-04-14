@@ -12,8 +12,9 @@ Designed as a continuous-curve squircle HUD with:
     error        -> SF Symbol warning    (tinted red)
 - An SF Symbol ``moon.stars.fill`` whisper indicator (no more emoji clipping).
 - No numeric timer — the waveform itself IS the "recording is active" cue.
+- Separate visual hierarchy for system state notes and user transcription text.
 - Word-wrapped transcription with fluid top-anchored window growth: the
-  pill expands vertically as new text arrives, capped at 200pt.
+  pill expands vertically as new text arrives, capped at 280pt.
 - Subtle slide-up + fade-out hide animation.
 
 All public methods are safe to call from any thread — UI work dispatches
@@ -44,9 +45,9 @@ logger = logging.getLogger("speaktype.status_overlay")
 # Geometry                                                              #
 # -------------------------------------------------------------------- #
 
-WINDOW_WIDTH = 380
+WINDOW_WIDTH = 460
 WINDOW_HEIGHT_MIN = 48
-WINDOW_HEIGHT_MAX = 200
+WINDOW_HEIGHT_MAX = 280
 CORNER_RADIUS = 24
 TOP_OFFSET = 64  # distance from top of visible screen
 
@@ -64,6 +65,10 @@ WHISPER_SIZE = 16
 WHISPER_TEXT_GAP = 8  # reserved between text's right edge and whisper icon
 
 # Text
+NOTE_FONT_SIZE = 12
+NOTE_LINE_HEIGHT = 16
+NOTE_TEXT_GAP = 5
+NOTE_MAX_HEIGHT = NOTE_LINE_HEIGHT * 3
 TEXT_FONT_SIZE = 15
 TEXT_LINE_HEIGHT = 20
 TEXT_LEFT = LEFT_PADDING + INDICATOR_SIZE + INDICATOR_TO_TEXT_GAP  # 48
@@ -487,11 +492,13 @@ class StatusOverlay:
         self._window = None
         self._effect_view = None
         self._indicator = None
+        self._note_field = None
         self._text_field = None
         self._whisper_view = None
 
         self._lock = threading.Lock()
         self._state = "idle"
+        self._note = ""
         self._text = ""
         self._level = 0.0
         self._whisper_mode = False
@@ -511,6 +518,7 @@ class StatusOverlay:
 
         with self._lock:
             self._state = "recording"
+            self._note = ""
             self._text = ""
             self._level = 0.0
             self._whisper_mode = False
@@ -518,16 +526,21 @@ class StatusOverlay:
         self._cancel_auto_hide()
         self._dispatch_main(b"showMain:")
 
-    def show_transcribing(self):
-        """Switch to transcribing state. Keeps any current text."""
+    def show_transcribing(self, text: str = ""):
+        """Switch to transcribing state, optionally showing a system note."""
         with self._lock:
             self._state = "transcribing"
+            if text:
+                self._note = _sanitize_display_text(text)
+            else:
+                self._note = ""
         self._dispatch_main(b"refreshMain:")
 
     def show_polishing(self, text: str = ""):
         """Switch to polishing state, optionally replacing the shown text."""
         with self._lock:
             self._state = "polishing"
+            self._note = ""
             if text:
                 self._text = _sanitize_display_text(text)
         self._dispatch_main(b"refreshMain:")
@@ -536,8 +549,19 @@ class StatusOverlay:
         """Switch to done state with the final text, then auto-hide."""
         with self._lock:
             self._state = "done"
+            self._note = ""
             if text:
                 self._text = _sanitize_display_text(text)
+        self._dispatch_main(b"refreshMain:")
+        if auto_hide_after > 0:
+            self._schedule_auto_hide(auto_hide_after)
+
+    def show_notice(self, text: str = "", auto_hide_after: float = 2.0):
+        """Switch to done state with a system notice, not dictated text."""
+        with self._lock:
+            self._state = "done"
+            self._note = _sanitize_display_text(text)
+            self._text = ""
         self._dispatch_main(b"refreshMain:")
         if auto_hide_after > 0:
             self._schedule_auto_hide(auto_hide_after)
@@ -546,8 +570,8 @@ class StatusOverlay:
         """Switch to error state with a visible message, then auto-hide."""
         with self._lock:
             self._state = "error"
-            if text:
-                self._text = _sanitize_display_text(text)
+            self._note = _sanitize_display_text(text)
+            self._text = ""
         self._dispatch_main(b"refreshMain:")
         if auto_hide_after > 0:
             self._schedule_auto_hide(auto_hide_after)
@@ -671,6 +695,40 @@ class StatusOverlay:
         )
         content.addSubview_(self._indicator)
 
+        # System note — smaller and secondary so internal status cannot be
+        # mistaken for dictated user text.
+        note_width = WINDOW_WIDTH - TEXT_LEFT - RIGHT_PADDING
+        note_y = WINDOW_HEIGHT_MIN - TEXT_V_PADDING - NOTE_LINE_HEIGHT
+        self._note_field = AppKit.NSTextField.alloc().initWithFrame_(
+            NSMakeRect(TEXT_LEFT, note_y, note_width, NOTE_LINE_HEIGHT)
+        )
+        self._note_field.setBezeled_(False)
+        self._note_field.setDrawsBackground_(False)
+        self._note_field.setEditable_(False)
+        self._note_field.setSelectable_(False)
+        try:
+            self._note_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+        except Exception:
+            self._note_field.setTextColor_(AppKit.NSColor.lightGrayColor())
+        self._note_field.setFont_(
+            AppKit.NSFont.systemFontOfSize_weight_(
+                NOTE_FONT_SIZE, AppKit.NSFontWeightRegular
+            )
+        )
+        self._note_field.setAlignment_(AppKit.NSTextAlignmentLeft)
+        self._note_field.setStringValue_("")
+        note_cell = self._note_field.cell()
+        if note_cell is not None:
+            try:
+                note_cell.setUsesSingleLineMode_(False)
+                note_cell.setWraps_(True)
+                note_cell.setTruncatesLastVisibleLine_(False)
+                note_cell.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
+                note_cell.setScrollable_(False)
+            except Exception:
+                pass
+        content.addSubview_(self._note_field)
+
         # Text field — character-wrapped so CJK, paths, and long tokens do not overflow.
         text_width = WINDOW_WIDTH - TEXT_LEFT - RIGHT_PADDING
         self._text_field = AppKit.NSTextField.alloc().initWithFrame_(
@@ -691,7 +749,7 @@ class StatusOverlay:
             self._text_field.setTextColor_(AppKit.NSColor.whiteColor())
         self._text_field.setFont_(
             AppKit.NSFont.systemFontOfSize_weight_(
-                TEXT_FONT_SIZE, AppKit.NSFontWeightMedium
+                TEXT_FONT_SIZE, AppKit.NSFontWeightRegular
             )
         )
         self._text_field.setAlignment_(AppKit.NSTextAlignmentLeft)
@@ -811,8 +869,12 @@ class StatusOverlay:
                 return
         if self._indicator is not None:
             self._indicator.set_state("idle")
+        if self._note_field is not None:
+            self._note_field.setStringValue_("")
+            self._note_field.setHidden_(True)
         if self._text_field is not None:
             self._text_field.setStringValue_("")
+            self._text_field.setHidden_(True)
         if self._whisper_view is not None:
             self._whisper_view.setHidden_(True)
 
@@ -824,13 +886,20 @@ class StatusOverlay:
 
         with self._lock:
             state = self._state
+            note = self._note
             text = self._text
             whisper = self._whisper_mode
 
-        display_text = text if text else STATE_LABELS.get(state, "")
+        display_text = text
+        display_note = note or STATE_LABELS.get(state, "")
+
+        if self._note_field is not None:
+            self._note_field.setStringValue_(display_note)
+            self._note_field.setHidden_(not bool(display_note))
 
         if self._text_field is not None:
             self._text_field.setStringValue_(display_text)
+            self._text_field.setHidden_(not bool(display_text))
 
         has_whisper = state == "recording" and whisper
         if self._whisper_view is not None:
@@ -842,9 +911,31 @@ class StatusOverlay:
         )
         text_width = WINDOW_WIDTH - TEXT_LEFT - text_right_pad
 
-        # Measure how tall the text needs to be at this width.
-        text_height = self._measure_text_height(display_text, text_width)
-        required_h = int(math.ceil(text_height)) + TEXT_V_PADDING * 2
+        # Measure how tall each visual layer needs to be at this width.
+        note_height = min(
+            NOTE_MAX_HEIGHT,
+            self._measure_text_height(
+                display_note,
+                text_width,
+                font_size=NOTE_FONT_SIZE,
+                font_weight=AppKit.NSFontWeightRegular,
+                line_height=NOTE_LINE_HEIGHT,
+                empty_height=0,
+            ),
+        )
+        text_height = self._measure_text_height(
+            display_text,
+            text_width,
+            font_size=TEXT_FONT_SIZE,
+            font_weight=AppKit.NSFontWeightRegular,
+            line_height=TEXT_LINE_HEIGHT,
+            empty_height=0,
+        )
+        gap = NOTE_TEXT_GAP if display_note and display_text else 0
+        required_h = (
+            int(math.ceil(note_height + gap + text_height))
+            + TEXT_V_PADDING * 2
+        )
         new_height = max(
             WINDOW_HEIGHT_MIN,
             min(WINDOW_HEIGHT_MAX, required_h),
@@ -852,18 +943,33 @@ class StatusOverlay:
 
         # Resize window (top-anchored) and reposition subviews.
         self._resize_window_main(new_height, animate_resize and self._is_visible)
-        self._relayout_main(new_height, text_width, has_whisper)
+        self._relayout_main(
+            new_height,
+            text_width,
+            has_whisper,
+            note_height if display_note else 0,
+            bool(display_text),
+        )
 
         # Apply state to the indicator (color + visible child swap).
         if self._indicator is not None:
             self._indicator.set_state(state)
 
-    def _measure_text_height(self, text: str, width: float) -> float:
+    def _measure_text_height(
+        self,
+        text: str,
+        width: float,
+        *,
+        font_size: float = TEXT_FONT_SIZE,
+        font_weight=AppKit.NSFontWeightRegular,
+        line_height: float = TEXT_LINE_HEIGHT,
+        empty_height: float | None = None,
+    ) -> float:
         if not text or width <= 0:
-            return TEXT_LINE_HEIGHT
+            return line_height if empty_height is None else empty_height
         try:
             font = AppKit.NSFont.systemFontOfSize_weight_(
-                TEXT_FONT_SIZE, AppKit.NSFontWeightMedium
+                font_size, font_weight
             )
             paragraph = AppKit.NSMutableParagraphStyle.alloc().init()
             paragraph.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
@@ -879,10 +985,10 @@ class StatusOverlay:
                 AppKit.NSStringDrawingUsesLineFragmentOrigin
                 | AppKit.NSStringDrawingUsesFontLeading,
             )
-            return max(TEXT_LINE_HEIGHT, rect.size.height)
+            return max(line_height, rect.size.height)
         except Exception as e:
             logger.debug(f"Text measure failed: {e}")
-            return TEXT_LINE_HEIGHT
+            return line_height if empty_height is None else empty_height
 
     def _resize_window_main(self, new_height: float, animated: bool):
         if self._window is None:
@@ -913,9 +1019,35 @@ class StatusOverlay:
         else:
             self._window.setFrame_display_(new_frame, False)
 
-    def _relayout_main(self, window_height: float, text_width: float, has_whisper: bool):
-        # Text field — top-aligned, 14pt from top, full remaining height.
-        text_field_h = window_height - TEXT_V_PADDING * 2
+    def _relayout_main(
+        self,
+        window_height: float,
+        text_width: float,
+        has_whisper: bool,
+        note_height: float = 0,
+        has_text: bool = True,
+    ):
+        content_top = window_height - TEXT_V_PADDING
+        text_top = content_top
+
+        if self._note_field is not None:
+            if note_height > 0:
+                note_y = content_top - note_height
+                self._note_field.setFrame_(
+                    NSMakeRect(TEXT_LEFT, note_y, text_width, note_height)
+                )
+                text_top = note_y - (NOTE_TEXT_GAP if has_text else 0)
+            else:
+                self._note_field.setFrame_(
+                    NSMakeRect(
+                        TEXT_LEFT,
+                        content_top - NOTE_LINE_HEIGHT,
+                        text_width,
+                        NOTE_LINE_HEIGHT,
+                    )
+                )
+
+        text_field_h = max(0, text_top - TEXT_V_PADDING)
         if self._text_field is not None:
             self._text_field.setFrame_(
                 NSMakeRect(
@@ -927,7 +1059,7 @@ class StatusOverlay:
             )
 
         # State indicator — pinned at the top so it aligns with the first line.
-        indicator_y = window_height - TEXT_V_PADDING - INDICATOR_SIZE
+        indicator_y = content_top - INDICATOR_SIZE
         if self._indicator is not None:
             self._indicator.setFrame_(
                 NSMakeRect(
@@ -940,11 +1072,8 @@ class StatusOverlay:
 
         # Whisper indicator — right side, centered on the first line.
         if self._whisper_view is not None:
-            whisper_y = (
-                window_height
-                - TEXT_V_PADDING
-                - (TEXT_LINE_HEIGHT + WHISPER_SIZE) / 2
-            )
+            first_line_h = NOTE_LINE_HEIGHT if note_height > 0 else TEXT_LINE_HEIGHT
+            whisper_y = content_top - (first_line_h + WHISPER_SIZE) / 2
             self._whisper_view.setFrame_(
                 NSMakeRect(
                     WINDOW_WIDTH - RIGHT_PADDING - WHISPER_SIZE,
