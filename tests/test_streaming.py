@@ -5,9 +5,17 @@ import threading
 import time
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
-from speaktype.streaming import StreamingTranscriber, _extract_text, _should_use_native_stream
+from speaktype.streaming import (
+    DEFAULT_INTERVAL,
+    StreamingTranscriber,
+    _extract_text,
+    _next_preview_interval,
+    _should_use_native_stream,
+    _tail_is_quiet,
+)
 
 
 class _FakeASR:
@@ -79,13 +87,39 @@ def test_non_qwen_backend_can_use_native_stream_method():
     assert _should_use_native_stream(asr, model) is True
 
 
+def test_next_preview_interval_runs_early_on_quiet_tail():
+    assert _next_preview_interval(12.0, quiet_tail=True, configured_interval=DEFAULT_INTERVAL) < DEFAULT_INTERVAL
+    assert _next_preview_interval(12.0, quiet_tail=False, configured_interval=DEFAULT_INTERVAL) > DEFAULT_INTERVAL
+
+
+def test_tail_is_quiet_detects_recent_silence():
+    speech = np.ones(16000, dtype="float32") * 0.2
+    quiet = np.zeros(8000, dtype="float32")
+    active_tail = np.ones(8000, dtype="float32") * 0.2
+
+    assert _tail_is_quiet(np.concatenate([speech, quiet]), 16000) is True
+    assert _tail_is_quiet(np.concatenate([speech, active_tail]), 16000) is False
+
+
 def test_emit_partial_invokes_callback():
     received = []
     asr = _FakeASR(loaded=False)  # loaded=False means stream loop won't run
     transcriber = StreamingTranscriber(asr, on_partial_text=received.append)
-    transcriber._emit_partial("  hello ")
+    transcriber._emit_partial("  hello ", sample_count=1234)
     assert received == ["hello"]
     assert transcriber.accumulated_text == "hello"
+    assert transcriber.snapshot().text == "hello"
+    assert transcriber.snapshot().covered_samples == 1234
+    assert transcriber.snapshot().reason == "preview"
+
+
+def test_emit_partial_tracks_prefinal_reason():
+    asr = _FakeASR(loaded=False)
+    transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
+
+    transcriber._emit_partial("final-ish", sample_count=32000, reason="quiet_tail")
+
+    assert transcriber.snapshot().reason == "quiet_tail"
 
 
 def test_emit_partial_skips_empty():
@@ -102,6 +136,15 @@ def test_stop_returns_accumulated_text():
     transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
     transcriber._accumulated_text = "captured"
     assert transcriber.stop() == "captured"
+
+
+def test_snapshot_survives_stop():
+    asr = _FakeASR(loaded=False)
+    transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
+    transcriber._emit_partial("captured", sample_count=32000)
+
+    assert transcriber.stop(wait=False) == "captured"
+    assert transcriber.snapshot().covered_samples == 32000
 
 
 def test_stop_can_skip_join(monkeypatch):
@@ -347,11 +390,25 @@ def test_run_chunked_uses_temp_output_path_and_cleans_mlx_transcript(tmp_path, m
     monkeypatch.setattr("speaktype.asr._make_temp_transcript_output_path", lambda: output_stem)
     monkeypatch.setattr("mlx_audio.stt.generate.generate_transcription", fake_generate_transcription)
 
-    transcriber._run_chunked(audio_data=b"x", language="auto")
+    transcriber._run_chunked(audio_data=b"xxxx", language="auto")
 
     assert received == ["partial"]
+    assert transcriber.snapshot().covered_samples == 4
     assert calls and calls[0]["output_path"] == output_stem
     assert not (tmp_path / "stream-output.txt").exists()
+
+
+def test_run_chunked_marks_quiet_tail_reason(tmp_path, monkeypatch):
+    output_stem = str(tmp_path / "stream-output")
+    asr = _FakeASR(model=object(), loaded=True, backend="qwen")
+    transcriber = StreamingTranscriber(asr, on_partial_text=lambda _: None)
+
+    monkeypatch.setattr("speaktype.asr._make_temp_transcript_output_path", lambda: output_stem)
+    monkeypatch.setattr("mlx_audio.stt.generate.generate_transcription", lambda **kwargs: SimpleNamespace(text="partial"))
+
+    transcriber._run_chunked(audio_data=b"xxxx", language="auto", reason="quiet_tail")
+
+    assert transcriber.snapshot().reason == "quiet_tail"
 
 
 def test_run_chunked_skips_when_inference_busy(monkeypatch):

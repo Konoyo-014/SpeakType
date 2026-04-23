@@ -21,6 +21,18 @@ RETRY_DELAY = 0.3
 # clear the normal threshold for very short whispers.
 MIN_PEAK_NORMAL = 0.005
 MIN_PEAK_WHISPER = 0.0015
+EDGE_TRIM_FRAME_SECONDS = 0.02
+EDGE_TRIM_PADDING_SECONDS = 0.16
+EDGE_TRIM_MIN_AUDIO_SECONDS = 0.8
+EDGE_TRIM_MIN_SAVED_SECONDS = 0.2
+EDGE_TRIM_RATIO_NORMAL = 0.035
+EDGE_TRIM_RATIO_WHISPER = 0.018
+EDGE_TRIM_FLOOR_NORMAL = 0.001
+EDGE_TRIM_FLOOR_WHISPER = 0.0004
+TAIL_QUIET_SECONDS = 0.35
+# Keep final ASR on the full captured buffer. Short Mandarin phrases can lose
+# enough acoustic context from edge trimming to bias Qwen toward near-homophones.
+FINAL_ASR_EDGE_TRIM_ENABLED = False
 
 
 class AudioRecorder:
@@ -40,6 +52,11 @@ class AudioRecorder:
         self._last_start_error = None
         self._last_stop_reason = None
         self._last_stop_message = ""
+        self._last_audio_original_samples = 0
+        self._last_audio_trim_start = 0
+        self._last_audio_trim_end = 0
+        self._last_audio_tail_rms = 0.0
+        self._last_audio_tail_quiet = False
 
     def start(self, max_seconds: float | None = None, on_max_duration=None):
         """Begin recording.
@@ -64,6 +81,11 @@ class AudioRecorder:
             self._last_start_error = None
             self._last_stop_reason = None
             self._last_stop_message = ""
+            self._last_audio_original_samples = 0
+            self._last_audio_trim_start = 0
+            self._last_audio_trim_end = 0
+            self._last_audio_tail_rms = 0.0
+            self._last_audio_tail_quiet = False
 
             for attempt in range(MAX_RETRIES):
                 try:
@@ -152,6 +174,26 @@ class AudioRecorder:
     def last_stop_message(self):
         return self._last_stop_message
 
+    @property
+    def last_audio_original_samples(self) -> int:
+        return self._last_audio_original_samples
+
+    @property
+    def last_audio_trim_start(self) -> int:
+        return self._last_audio_trim_start
+
+    @property
+    def last_audio_trim_end(self) -> int:
+        return self._last_audio_trim_end
+
+    @property
+    def last_audio_tail_rms(self) -> float:
+        return self._last_audio_tail_rms
+
+    @property
+    def last_audio_tail_quiet(self) -> bool:
+        return self._last_audio_tail_quiet
+
     def _callback(self, indata, frames, time_info, status):
         if not self.is_recording:
             return
@@ -237,6 +279,15 @@ class AudioRecorder:
         duration = len(audio_data) / self.sample_rate
         peak = float(np.max(np.abs(audio_data)))
         whisper_was_active = self._whisper_detector.was_active
+        self._last_audio_original_samples = len(audio_data)
+        self._last_audio_trim_start = 0
+        self._last_audio_trim_end = len(audio_data)
+        self._last_audio_tail_rms = _tail_rms(audio_data, self.sample_rate)
+        self._last_audio_tail_quiet = _is_quiet_edge(
+            self._last_audio_tail_rms,
+            peak,
+            whisper_was_active,
+        )
         logger.info(
             f"Audio: {len(frames)} frames, {duration:.1f}s, peak={peak:.4f}, whisper={whisper_was_active}"
         )
@@ -256,6 +307,25 @@ class AudioRecorder:
 
         self._last_stop_reason = None
         self._last_stop_message = ""
+        if FINAL_ASR_EDGE_TRIM_ENABLED:
+            trimmed, trim_start, trim_end = _trim_silence_edges(
+                audio_data,
+                self.sample_rate,
+                peak,
+                whisper_was_active,
+            )
+            self._last_audio_trim_start = trim_start
+            self._last_audio_trim_end = trim_end
+            if len(trimmed) != len(audio_data):
+                logger.info(
+                    "Trimmed quiet recording edges: %.3fs -> %.3fs (start=%.3fs end=%.3fs)",
+                    duration,
+                    len(trimmed) / self.sample_rate,
+                    trim_start / self.sample_rate,
+                    (len(audio_data) - trim_end) / self.sample_rate,
+                )
+            return trimmed
+
         return audio_data
 
     def get_level(self) -> float:
@@ -267,3 +337,49 @@ class AudioRecorder:
         except (IndexError, ValueError):
             pass
         return 0.0
+
+
+def _edge_trim_threshold(peak: float, whisper_was_active: bool) -> float:
+    ratio = EDGE_TRIM_RATIO_WHISPER if whisper_was_active else EDGE_TRIM_RATIO_NORMAL
+    floor = EDGE_TRIM_FLOOR_WHISPER if whisper_was_active else EDGE_TRIM_FLOOR_NORMAL
+    return max(float(peak) * ratio, floor)
+
+
+def _is_quiet_edge(rms: float, peak: float, whisper_was_active: bool) -> bool:
+    return float(rms) <= _edge_trim_threshold(peak, whisper_was_active)
+
+
+def _tail_rms(audio_data, sample_rate: int) -> float:
+    samples = int(sample_rate * TAIL_QUIET_SECONDS)
+    if samples <= 0 or len(audio_data) == 0:
+        return 0.0
+    tail = audio_data[-min(samples, len(audio_data)):]
+    return float(np.sqrt(np.mean(np.square(tail)))) if len(tail) else 0.0
+
+
+def _trim_silence_edges(audio_data, sample_rate: int, peak: float, whisper_was_active: bool):
+    if len(audio_data) < int(sample_rate * EDGE_TRIM_MIN_AUDIO_SECONDS):
+        return audio_data, 0, len(audio_data)
+
+    frame_size = max(1, int(sample_rate * EDGE_TRIM_FRAME_SECONDS))
+    threshold = _edge_trim_threshold(peak, whisper_was_active)
+    active_frames = []
+    for start in range(0, len(audio_data), frame_size):
+        frame = audio_data[start:start + frame_size]
+        if len(frame) == 0:
+            continue
+        rms = float(np.sqrt(np.mean(np.square(frame))))
+        if rms > threshold:
+            active_frames.append((start, min(start + frame_size, len(audio_data))))
+
+    if not active_frames:
+        return audio_data, 0, len(audio_data)
+
+    padding = int(sample_rate * EDGE_TRIM_PADDING_SECONDS)
+    trim_start = max(0, active_frames[0][0] - padding)
+    trim_end = min(len(audio_data), active_frames[-1][1] + padding)
+    if len(audio_data) - (trim_end - trim_start) < int(sample_rate * EDGE_TRIM_MIN_SAVED_SECONDS):
+        return audio_data, 0, len(audio_data)
+    if trim_end - trim_start < int(sample_rate * 0.3):
+        return audio_data, 0, len(audio_data)
+    return audio_data[trim_start:trim_end], trim_start, trim_end

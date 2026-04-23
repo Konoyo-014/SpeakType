@@ -19,18 +19,42 @@ from ApplicationServices import (
 
 logger = logging.getLogger("speaktype.inserter")
 
-PASTEBOARD_SETTLE_DELAY = 0.08
-PASTE_VERIFY_INTERVAL = 0.05
+PASTEBOARD_SETTLE_DELAY = 0.005
+PASTE_VERIFY_INTERVAL = 0.03
 PASTE_VERIFY_ATTEMPTS = 7
+AX_VERIFY_INTERVAL = 0.01
+AX_VERIFY_ATTEMPTS = 2
 CLIPBOARD_RESTORE_DELAY = 0.75
 KEYCODE_V = 9
 KEYCODE_COMMAND = 55
 TARGET_ACTIVATION_DELAY = 0.3
+PASTE_FIRST_BUNDLE_MARKERS = (
+    "com.openai.codex",
+    "com.anthropic.claudefordesktop",
+    "com.google.chrome",
+    "com.microsoft.edgemac",
+    "com.brave.browser",
+    "company.thebrowser.browser",
+    "com.openai.chat",
+    "com.todesktop",
+)
+PASTE_FIRST_APP_MARKERS = (
+    "codex",
+    "claude",
+    "chrome",
+    "chatgpt",
+    "gemini",
+    "edge",
+    "brave",
+    "arc",
+    "cursor",
+)
 
 _clipboard_restore_lock = threading.Lock()
 _clipboard_restore_token = 0
 _clipboard_restore_data = None
 _last_insert_diagnostic = None
+_manual_accessibility_enabled_pids = set()
 
 
 @dataclass(frozen=True)
@@ -42,6 +66,21 @@ class InsertionDiagnostic:
     method: str
     reason: str
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class FocusedInputDiagnostic:
+    """Read-only snapshot of the currently focused Accessibility element."""
+
+    app_name: str = ""
+    bundle_id: str = ""
+    has_focused_element: bool = False
+    role: str = ""
+    has_value: bool = False
+    selected_text_readable: bool = False
+    post_event_allowed: bool = True
+    likely_writable: bool = False
+    reason: str = ""
 
 
 def reset_last_insert_diagnostic():
@@ -85,13 +124,13 @@ def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id:
         bundle_id or "",
     )
     if method == "paste":
-        return _insert_via_paste(text, app_name=app_name)
+        return _insert_via_paste(text, app_name=app_name, bundle_id=bundle_id)
     return _insert_via_keystroke(text)
 
 
-def _insert_via_paste(text: str, app_name: str = "") -> bool:
+def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> bool:
     """Insert text by setting pasteboard and simulating Cmd+V via CGEvent."""
-    if _insert_via_accessibility(text):
+    if _should_try_accessibility_first(app_name=app_name, bundle_id=bundle_id) and _insert_via_accessibility(text):
         return True
     if not _can_post_synthetic_input():
         logger.error(
@@ -114,7 +153,8 @@ def _insert_via_paste(text: str, app_name: str = "") -> bool:
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
         expected_change_count = _get_pasteboard_change_count(pb)
 
-        time.sleep(PASTEBOARD_SETTLE_DELAY)
+        if PASTEBOARD_SETTLE_DELAY > 0:
+            time.sleep(PASTEBOARD_SETTLE_DELAY)
 
         # Some desktop shells handle UI scripting paste more reliably than raw
         # CGEvents, especially when the editor is embedded inside Chromium.
@@ -218,6 +258,56 @@ def _can_post_synthetic_input() -> bool:
         return True
 
 
+def _should_try_accessibility_first(app_name: str = "", bundle_id: str = "") -> bool:
+    app_text = (app_name or "").lower()
+    bundle_text = (bundle_id or "").lower()
+    if any(marker in bundle_text for marker in PASTE_FIRST_BUNDLE_MARKERS):
+        return False
+    if any(marker in app_text for marker in PASTE_FIRST_APP_MARKERS):
+        return False
+    return True
+
+
+def inspect_focused_input(app_name: str = "", bundle_id: str = "") -> FocusedInputDiagnostic:
+    """Inspect whether the current focus looks usable for text insertion.
+
+    This is intentionally read-only. It does not set AX attributes, mutate the
+    pasteboard, or send keyboard events.
+    """
+    post_event_allowed = _can_post_synthetic_input()
+    element = _get_focused_element()
+    if element is None:
+        return FocusedInputDiagnostic(
+            app_name=app_name,
+            bundle_id=bundle_id,
+            has_focused_element=False,
+            post_event_allowed=post_event_allowed,
+            reason="no_focused_element",
+        )
+
+    role = _copy_ax_attribute(element, kAXRoleAttribute) or "Unknown"
+    value = _copy_ax_attribute(element, "AXValue")
+    selected_text = _copy_ax_attribute(element, kAXSelectedTextAttribute)
+    has_value = isinstance(value, str)
+    selected_text_readable = isinstance(selected_text, str)
+    likely_writable = post_event_allowed and (has_value or selected_text_readable)
+    reason = "ready" if likely_writable else "not_writable"
+    if not post_event_allowed:
+        reason = "post_event_denied"
+
+    return FocusedInputDiagnostic(
+        app_name=app_name,
+        bundle_id=bundle_id,
+        has_focused_element=True,
+        role=str(role),
+        has_value=has_value,
+        selected_text_readable=selected_text_readable,
+        post_event_allowed=post_event_allowed,
+        likely_writable=likely_writable,
+        reason=reason,
+    )
+
+
 def _press_cmd_v_with_osascript(app_name: str = "") -> bool:
     """Retry paste through System Events for apps that ignore raw CGEvents."""
     script = 'tell application "System Events" to keystroke "v" using command down'
@@ -243,8 +333,7 @@ def _verify_paste_result(element, value_before, inserted_text: str):
     if element is None or not isinstance(value_before, str):
         return None
     value_after = value_before
-    for _ in range(PASTE_VERIFY_ATTEMPTS):
-        time.sleep(PASTE_VERIFY_INTERVAL)
+    for attempt in range(PASTE_VERIFY_ATTEMPTS):
         value_after = _copy_ax_attribute(element, "AXValue")
         if not isinstance(value_after, str):
             return None
@@ -257,6 +346,8 @@ def _verify_paste_result(element, value_before, inserted_text: str):
                 value_after,
             )
             return False
+        if attempt < PASTE_VERIFY_ATTEMPTS - 1:
+            time.sleep(PASTE_VERIFY_INTERVAL)
     if not isinstance(value_after, str):
         return None
     logger.info(
@@ -284,7 +375,7 @@ def _prepare_target_app(bundle_id: str = "", app_name: str = ""):
         if not app.isActive():
             app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
             time.sleep(TARGET_ACTIVATION_DELAY)
-        _enable_manual_accessibility(app.processIdentifier())
+        _enable_manual_accessibility_once(app.processIdentifier())
     except Exception as e:
         logger.debug(f"Failed to prepare target app {bundle_id or app_name}: {e}")
 
@@ -304,6 +395,13 @@ def _find_running_app(bundle_id: str = "", app_name: str = ""):
                 pass
 
     return None
+
+
+def _enable_manual_accessibility_once(pid: int):
+    if pid in _manual_accessibility_enabled_pids:
+        return
+    _enable_manual_accessibility(pid)
+    _manual_accessibility_enabled_pids.add(pid)
 
 
 def _enable_manual_accessibility(pid: int):
@@ -326,9 +424,11 @@ def _insert_via_accessibility(text: str) -> bool:
     selected_before = _copy_ax_attribute(element, kAXSelectedTextAttribute)
     err = _set_ax_attribute(element, kAXSelectedTextAttribute, text)
     if err == 0:
-        time.sleep(0.05)
-        value_after = _copy_ax_attribute(element, "AXValue")
-        selected_after = _copy_ax_attribute(element, kAXSelectedTextAttribute)
+        value_after, selected_after = _wait_for_accessibility_insert_result(
+            element,
+            value_before,
+            text,
+        )
         if (
             isinstance(value_after, str)
             and value_after != value_before
@@ -352,6 +452,30 @@ def _insert_via_accessibility(text: str) -> bool:
     logger.info("Accessibility insertion unavailable (role=%s, error=%s); falling back to keystrokes", role, err)
     _set_insert_diagnostic(False, False, "accessibility", "accessibility_unavailable", f"role={role} error={err}")
     return False
+
+
+def _wait_for_accessibility_insert_result(element, value_before, inserted_text: str):
+    value_after = value_before
+    selected_after = None
+    for attempt in range(AX_VERIFY_ATTEMPTS):
+        value_after = _copy_ax_attribute(element, "AXValue")
+        selected_after = _copy_ax_attribute(element, kAXSelectedTextAttribute)
+        if (
+            isinstance(value_after, str)
+            and value_after != value_before
+            and inserted_text in value_after
+        ):
+            return value_after, selected_after
+        if (
+            isinstance(value_after, str)
+            and value_after == value_before
+            and isinstance(selected_after, str)
+            and selected_after == inserted_text
+        ):
+            return value_after, selected_after
+        if attempt < AX_VERIFY_ATTEMPTS - 1:
+            time.sleep(AX_VERIFY_INTERVAL)
+    return value_after, selected_after
 
 
 def _get_focused_element():

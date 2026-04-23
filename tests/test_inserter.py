@@ -44,10 +44,12 @@ class _Pasteboard:
 def _reset_clipboard_restore_state(monkeypatch):
     inserter._clipboard_restore_token = 0
     inserter._clipboard_restore_data = None
+    inserter._manual_accessibility_enabled_pids.clear()
     monkeypatch.setattr(inserter, "_can_post_synthetic_input", lambda: True)
     yield
     inserter._clipboard_restore_token = 0
     inserter._clipboard_restore_data = None
+    inserter._manual_accessibility_enabled_pids.clear()
 
 
 def test_insert_via_accessibility_sets_selected_text(monkeypatch):
@@ -86,8 +88,8 @@ def test_insert_via_accessibility_rejects_false_success(monkeypatch):
     calls = []
     values = {
         (element, inserter.kAXRoleAttribute): ["AXTextArea"],
-        (element, "AXValue"): ["same", "same"],
-        (element, inserter.kAXSelectedTextAttribute): ["", ""],
+        (element, "AXValue"): ["same", "same", "same", "same", "same"],
+        (element, inserter.kAXSelectedTextAttribute): ["", "", "", "", ""],
     }
 
     monkeypatch.setattr(inserter, "_get_focused_element", lambda: element)
@@ -182,6 +184,31 @@ def test_insert_via_paste_prefers_clipboard_before_direct_keystrokes(monkeypatch
     assert diagnostic.reason == "unverifiable_target"
 
 
+def test_insert_via_paste_skips_accessibility_for_paste_first_apps(monkeypatch):
+    monkeypatch.setattr(
+        inserter,
+        "_insert_via_accessibility",
+        lambda text: (_ for _ in ()).throw(AssertionError("accessibility should be skipped")),
+    )
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: None)
+    pb = _Pasteboard({"public.utf8-plain-text": b"before"})
+    presses = []
+
+    monkeypatch.setattr(inserter, "_insert_via_keystroke", lambda text: False)
+    monkeypatch.setattr(inserter, "_get_pasteboard", lambda: pb)
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(inserter, "_press_cmd_v", lambda app_name="": presses.append(app_name))
+    monkeypatch.setattr(inserter, "_schedule_pasteboard_restore", lambda *args, **kwargs: None)
+
+    assert inserter._insert_via_paste(
+        "hello",
+        app_name="Codex",
+        bundle_id="com.openai.codex",
+    ) is True
+
+    assert presses == ["Codex"]
+
+
 def test_insert_via_paste_retries_system_events_when_observable_paste_does_not_change_target(monkeypatch):
     monkeypatch.setattr(inserter, "_insert_via_accessibility", lambda text: False)
     element = object()
@@ -264,6 +291,17 @@ def test_verify_paste_result_detects_changed_ax_value(monkeypatch):
     assert inserter._verify_paste_result(element, "before", "hello") is True
 
 
+def test_verify_paste_result_checks_before_sleep(monkeypatch):
+    element = object()
+    sleeps = []
+
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: "beforehello")
+
+    assert inserter._verify_paste_result(element, "before", "hello") is True
+    assert sleeps == []
+
+
 def test_verify_paste_result_rejects_unrelated_ax_change(monkeypatch):
     element = object()
 
@@ -275,6 +313,72 @@ def test_verify_paste_result_rejects_unrelated_ax_change(monkeypatch):
 
 def test_verify_paste_result_is_inconclusive_without_ax_value():
     assert inserter._verify_paste_result(None, None, "hello") is None
+
+
+def test_wait_for_accessibility_insert_result_checks_before_sleep(monkeypatch):
+    element = object()
+    sleeps = []
+    values = {
+        (element, "AXValue"): ["beforehello"],
+        (element, inserter.kAXSelectedTextAttribute): [""],
+    }
+
+    monkeypatch.setattr(inserter.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        inserter,
+        "_copy_ax_attribute",
+        lambda elem, attr: values[(elem, attr)].pop(0),
+    )
+
+    value_after, selected_after = inserter._wait_for_accessibility_insert_result(
+        element,
+        "before",
+        "hello",
+    )
+
+    assert value_after == "beforehello"
+    assert selected_after == ""
+    assert sleeps == []
+
+
+def test_inspect_focused_input_reports_ready_text_field(monkeypatch):
+    element = object()
+    values = {
+        (element, inserter.kAXRoleAttribute): "AXTextArea",
+        (element, "AXValue"): "hello",
+        (element, inserter.kAXSelectedTextAttribute): "",
+    }
+
+    monkeypatch.setattr(inserter, "_can_post_synthetic_input", lambda: True)
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: element)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: values[(elem, attr)])
+
+    diagnostic = inserter.inspect_focused_input(app_name="Codex", bundle_id="com.openai.codex")
+
+    assert diagnostic.has_focused_element is True
+    assert diagnostic.post_event_allowed is True
+    assert diagnostic.likely_writable is True
+    assert diagnostic.reason == "ready"
+
+
+def test_inspect_focused_input_reports_post_event_denied(monkeypatch):
+    element = object()
+    values = {
+        (element, inserter.kAXRoleAttribute): "AXTextArea",
+        (element, "AXValue"): "hello",
+        (element, inserter.kAXSelectedTextAttribute): "",
+    }
+
+    monkeypatch.setattr(inserter, "_can_post_synthetic_input", lambda: False)
+    monkeypatch.setattr(inserter, "_get_focused_element", lambda: element)
+    monkeypatch.setattr(inserter, "_copy_ax_attribute", lambda elem, attr: values[(elem, attr)])
+
+    diagnostic = inserter.inspect_focused_input(app_name="Codex")
+
+    assert diagnostic.has_focused_element is True
+    assert diagnostic.post_event_allowed is False
+    assert diagnostic.likely_writable is False
+    assert diagnostic.reason == "post_event_denied"
 
 
 def test_press_cmd_v_posts_annotated_session_events(monkeypatch):
@@ -316,6 +420,22 @@ def test_prepare_target_app_activates_and_enables_accessibility(monkeypatch):
     assert enabled == [4242]
 
 
+def test_prepare_target_app_enables_manual_accessibility_once_per_pid(monkeypatch):
+    app = SimpleNamespace()
+    enabled = []
+
+    app.isActive = lambda: True
+    app.processIdentifier = lambda: 4242
+
+    monkeypatch.setattr(inserter, "_find_running_app", lambda bundle_id="", app_name="": app)
+    monkeypatch.setattr(inserter, "_enable_manual_accessibility", lambda pid: enabled.append(pid))
+
+    inserter._prepare_target_app(bundle_id="com.openai.codex", app_name="Codex")
+    inserter._prepare_target_app(bundle_id="com.openai.codex", app_name="Codex")
+
+    assert enabled == [4242]
+
+
 def test_insert_text_prepares_target_app(monkeypatch):
     prepared = []
     inserted = []
@@ -328,18 +448,18 @@ def test_insert_text_prepares_target_app(monkeypatch):
     monkeypatch.setattr(
         inserter,
         "_insert_via_paste",
-        lambda text, app_name="": inserted.append((text, app_name)) or True,
+        lambda text, app_name="", bundle_id="": inserted.append((text, app_name, bundle_id)) or True,
     )
 
     assert inserter.insert_text("hello", method="paste", app_name="Codex", bundle_id="com.openai.codex") is True
 
     assert prepared == [("com.openai.codex", "Codex")]
-    assert inserted == [("hello", "Codex")]
+    assert inserted == [("hello", "Codex", "com.openai.codex")]
 
 
 def test_insert_text_returns_false_when_fallbacks_fail(monkeypatch):
     monkeypatch.setattr(inserter, "_prepare_target_app", lambda bundle_id="", app_name="": None)
-    monkeypatch.setattr(inserter, "_insert_via_paste", lambda text, app_name="": False)
+    monkeypatch.setattr(inserter, "_insert_via_paste", lambda text, app_name="", bundle_id="": False)
 
     assert inserter.insert_text("hello", method="paste", app_name="Codex") is False
 

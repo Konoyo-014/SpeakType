@@ -10,6 +10,11 @@ try:
 except Exception:  # pragma: no cover - AppKit is only available on macOS
     AppKit = None
 
+try:
+    import Quartz
+except Exception:  # pragma: no cover - Quartz is only available on macOS
+    Quartz = None
+
 from pynput import keyboard
 
 logger = logging.getLogger("speaktype.hotkey")
@@ -38,7 +43,33 @@ NATIVE_KEYCODE_MAP = {
     97: "f6",
 }
 
+KEY_NAME_TO_NATIVE_KEYCODE = {
+    "space": 49,
+    "cmd_r": 54,
+    "cmd_l": 55,
+    "shift_l": 56,
+    "alt_l": 58,
+    "ctrl_l": 59,
+    "shift_r": 60,
+    "alt_r": 61,
+    "ctrl_r": 62,
+    "fn": 63,
+    "f5": 96,
+    "f6": 97,
+}
+
 if AppKit is not None:
+    KEY_NAME_TO_NATIVE_MODIFIER_FLAG = {
+        "cmd_r": AppKit.NSEventModifierFlagCommand,
+        "cmd_l": AppKit.NSEventModifierFlagCommand,
+        "alt_l": AppKit.NSEventModifierFlagOption,
+        "alt_r": AppKit.NSEventModifierFlagOption,
+        "ctrl_l": AppKit.NSEventModifierFlagControl,
+        "ctrl_r": AppKit.NSEventModifierFlagControl,
+        "shift_l": AppKit.NSEventModifierFlagShift,
+        "shift_r": AppKit.NSEventModifierFlagShift,
+        "fn": AppKit.NSEventModifierFlagFunction,
+    }
     NATIVE_MODIFIER_MAP = {
         54: ("cmd_r", AppKit.NSEventModifierFlagCommand),
         55: ("cmd_l", AppKit.NSEventModifierFlagCommand),
@@ -51,6 +82,7 @@ if AppKit is not None:
         56: ("shift_l", AppKit.NSEventModifierFlagShift),
     }
 else:  # pragma: no cover - kept for import-time safety outside macOS
+    KEY_NAME_TO_NATIVE_MODIFIER_FLAG = {}
     NATIVE_MODIFIER_MAP = {}
 
 
@@ -255,6 +287,22 @@ class HotkeyListener:
             return self._toggle_active
         return self._is_pressed
 
+    def clear_pressed_state(self):
+        """Clear stale pressed state after an external recovery stop."""
+        self._is_pressed = False
+        self._combo_keys.clear()
+
+    def is_physically_pressed(self) -> bool | None:
+        """Best-effort macOS physical key state for missed-keyup recovery."""
+        if sys.platform != "darwin" or Quartz is None:
+            return None
+        if self.mode == "toggle":
+            return None
+        if self._is_combo_hotkey():
+            return self._combo_physically_pressed()
+        target = self._get_target_key_name()
+        return _native_key_is_pressed(target)
+
     def _start_backend(self):
         if self._backend_factory is not None:
             backend = self._backend_factory(self._handle_backend_event)
@@ -354,3 +402,53 @@ class HotkeyListener:
             if not any(alias in self._combo_keys for alias in aliases):
                 return False
         return True
+
+    def _combo_physically_pressed(self) -> bool | None:
+        saw_supported_key = False
+        for part in (p.strip().lower() for p in self.hotkey_name.split("+")):
+            if part == "space":
+                state = _native_key_is_pressed("space")
+                if state is None:
+                    return None
+                saw_supported_key = True
+                if not state:
+                    return False
+                continue
+
+            aliases = MODIFIER_GROUPS.get(part, {part})
+            alias_states = []
+            for alias in aliases:
+                state = _native_key_is_pressed(alias)
+                if state is not None:
+                    saw_supported_key = True
+                    alias_states.append(state)
+            if alias_states and not any(alias_states):
+                return False
+            if not alias_states:
+                return None
+        return True if saw_supported_key else None
+
+
+def _native_key_is_pressed(key_name: str | None) -> bool | None:
+    if not key_name:
+        return None
+    modifier_flag = KEY_NAME_TO_NATIVE_MODIFIER_FLAG.get(key_name)
+    if modifier_flag is not None and AppKit is not None:
+        try:
+            return bool(AppKit.NSEvent.modifierFlags() & modifier_flag)
+        except Exception:
+            pass
+    if Quartz is None:
+        return None
+    keycode = KEY_NAME_TO_NATIVE_KEYCODE.get(key_name)
+    if keycode is None:
+        return None
+    try:
+        return bool(
+            Quartz.CGEventSourceKeyState(
+                Quartz.kCGEventSourceStateHIDSystemState,
+                keycode,
+            )
+        )
+    except Exception:
+        return None

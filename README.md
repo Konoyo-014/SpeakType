@@ -146,6 +146,12 @@ Chinese equivalents are also supported: "句号", "逗号", "问号", "换行", 
 
 When Ollama is running with the LLM model, SpeakType automatically polishes transcriptions: removing filler words, fixing grammar, and adjusting tone based on the active application. Toggle this on/off from the menubar.
 
+### Local diagnostics
+
+Use **Local Diagnostics...** from the menubar when SpeakType records, transcribes, polishes, or inserts differently than expected. The report checks only local runtime state: macOS input permissions, microphone discovery, Qwen3-ASR cache/load state, Ollama installation, Ollama local service status, configured Ollama model availability, and whether the current focused app exposes a writable text field.
+
+The diagnostics window does not read dictated content and does not upload anything. Its purpose is to tell you whether the local chain is ready before another dictation attempt. If Ollama is missing or stopped, it will show the exact local startup path; if the polish model is missing, it will show the `ollama pull ...` command; if insertion cannot be verified, it will tell you to click an editable field or fix macOS input permissions.
+
 ### Ollama startup options
 
 SpeakType never sends dictated audio, raw transcription, or polished text to external APIs. Ollama is used only as a local server on your Mac, normally at `http://localhost:11434`.

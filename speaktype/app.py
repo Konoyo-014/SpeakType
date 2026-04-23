@@ -53,6 +53,15 @@ from .runtime import get_bundle_fingerprint
 logger = logging.getLogger("speaktype")
 APP_VERSION = get_runtime_version(__version__)
 PERMISSION_RESTART_PENDING_KEY = "permission_restart_pending_after_refresh"
+PREVIEW_REUSE_MAX_UNCOVERED_SECONDS = 0.65
+PREVIEW_REUSE_MAX_AGE_SECONDS = 8.0
+TAIL_ASR_MIN_UNCOVERED_SECONDS = 0.12
+TAIL_ASR_MAX_UNCOVERED_SECONDS = 2.4
+TAIL_ASR_PADDING_SECONDS = 0.25
+PREVIEW_FINAL_ACCELERATION_ENABLED = False
+HOTKEY_RELEASE_GUARD_GRACE_SECONDS = 0.55
+HOTKEY_RELEASE_GUARD_INTERVAL_SECONDS = 0.18
+HOTKEY_RELEASE_GUARD_MISSES = 2
 
 # The menubar shows a single stable icon. All state feedback
 # (recording / transcribing / polishing / done) lives in the unified
@@ -63,6 +72,51 @@ ICON_IDLE = "\U0001f399"      # 🎙 (studio microphone)
 ICON_RECORDING = ICON_IDLE
 ICON_PROCESSING = ICON_IDLE
 ICON_ERROR = ICON_IDLE
+
+
+def _merge_transcript_text(prefix: str, suffix: str) -> str:
+    """Merge a preview transcript with a short tail transcript."""
+    prefix = (prefix or "").strip()
+    suffix = (suffix or "").strip()
+    if not prefix:
+        return suffix
+    if not suffix:
+        return prefix
+
+    prefix_fold = prefix.casefold()
+    suffix_fold = suffix.casefold()
+    max_overlap = min(len(prefix), len(suffix), 120)
+    for overlap in range(max_overlap, 0, -1):
+        if prefix_fold[-overlap:] == suffix_fold[:overlap]:
+            return (prefix + suffix[overlap:]).strip()
+
+    return _join_transcript_parts(prefix, suffix)
+
+
+def _join_transcript_parts(prefix: str, suffix: str) -> str:
+    if not prefix or not suffix:
+        return f"{prefix}{suffix}".strip()
+    left = prefix[-1]
+    right = suffix[0]
+    if left.isspace() or right.isspace():
+        return f"{prefix}{suffix}".strip()
+    if _is_cjk_char(left) or _is_cjk_char(right):
+        return f"{prefix}{suffix}".strip()
+    if left in "([{/" or right in ".,!?;:)]}%":
+        return f"{prefix}{suffix}".strip()
+    return f"{prefix} {suffix}".strip()
+
+
+def _is_cjk_char(ch: str) -> bool:
+    if not ch:
+        return False
+    code = ord(ch)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0x3040 <= code <= 0x30FF
+        or 0xAC00 <= code <= 0xD7AF
+    )
 
 
 class _MainThreadBridge(NSObject):
@@ -137,6 +191,7 @@ class SpeakTypeApp(rumps.App):
         self._settings_controller = None
         self._stats_controller = None
         self._dict_controller = None
+        self._diagnostics_controller = None
 
         # Unified status overlay (recording dot + streaming preview + state phases)
         self._status_overlay = StatusOverlay()
@@ -157,6 +212,8 @@ class SpeakTypeApp(rumps.App):
         self._permission_watch_stop = threading.Event()
         self._last_permission_status = None
         self._permission_restart_prompt_shown = False
+        self._release_guard_thread = None
+        self._release_guard_stop = threading.Event()
 
         # Plugin system
         self._plugin_manager = PluginManager(
@@ -234,6 +291,7 @@ class SpeakTypeApp(rumps.App):
         self._prefs_item = rumps.MenuItem(t("menu_preferences"), callback=self._open_settings, key=",")
         self._dict_item = rumps.MenuItem(t("menu_dict_snippets"), callback=self._open_dict)
         self._stats_item = rumps.MenuItem(t("menu_history_stats"), callback=self._show_stats)
+        self._diagnostics_item = rumps.MenuItem(t("menu_diagnostics"), callback=self._show_diagnostics)
         self._mic_item = rumps.MenuItem(t("menu_test_mic"), callback=self._test_mic)
         self._config_item = rumps.MenuItem(t("menu_open_config"), callback=self._open_config)
         self._updates_item = rumps.MenuItem(t("menu_check_updates"), callback=self._check_updates)
@@ -259,6 +317,7 @@ class SpeakTypeApp(rumps.App):
             self._prefs_item,
             self._dict_item,
             self._stats_item,
+            self._diagnostics_item,
             self._mic_item,
             None,
             self._config_item,
@@ -289,6 +348,7 @@ class SpeakTypeApp(rumps.App):
         self._prefs_item.title = t("menu_preferences")
         self._dict_item.title = t("menu_dict_snippets")
         self._stats_item.title = t("menu_history_stats")
+        self._diagnostics_item.title = t("menu_diagnostics")
         self._mic_item.title = t("menu_test_mic")
         self._config_item.title = t("menu_open_config")
         self._updates_item.title = t("menu_check_updates")
@@ -462,8 +522,26 @@ class SpeakTypeApp(rumps.App):
             threading.Thread(target=self._late_start_streaming_preview, daemon=True).start()
 
         if self.config.get("polish_enabled") or self.config.get("translate_enabled", False):
-            if hasattr(self.polish_engine, "prewarm_async"):
+            if hasattr(self.polish_engine, "chat_prewarm_async"):
+                self.polish_engine.chat_prewarm_async()
+            elif hasattr(self.polish_engine, "prewarm_async"):
                 self.polish_engine.prewarm_async()
+
+    def _setup_llm_engine(self):
+        if not (self.config.get("polish_enabled") or self.config.get("translate_enabled", False)):
+            return
+
+        try:
+            if self.polish_engine.check_available():
+                logger.info("LLM polish engine available")
+                self._llm_unavailable_notified = False
+                self.polish_engine.prewarm_async()
+                return
+        except Exception as e:
+            logger.warning("LLM availability check failed: %s", e)
+
+        logger.warning("LLM not available")
+        self._notify_llm_unavailable_once()
 
     def _log_pipeline_latency(self, marks: dict[str, float]):
         start = marks.get("start")
@@ -642,26 +720,22 @@ class SpeakTypeApp(rumps.App):
         unverified = bool(diagnostic and diagnostic.success and not diagnostic.verified)
         if unverified and llm_fallback_used:
             logger.warning(
-                "Text sent to %s but insertion could not be verified; LLM polish/translation was also skipped (method=%s reason=%s)",
+                "Text sent to %s without AX verification; LLM polish/translation was also skipped (method=%s reason=%s)",
                 app_name,
                 diagnostic.method,
                 diagnostic.reason,
             )
             self._show_overlay_notice(
-                t("overlay_insert_unverified_llm_skipped", app=app_name),
-                auto_hide_after=2.4,
+                self._llm_fallback_overlay_text(),
+                auto_hide_after=2.2,
             )
             return
         if unverified:
             logger.warning(
-                "Text sent to %s but insertion could not be verified (method=%s reason=%s)",
+                "Text sent to %s without AX verification (method=%s reason=%s); keeping final text visible and relying on diagnostics/logs for details",
                 app_name,
                 diagnostic.method,
                 diagnostic.reason,
-            )
-            self._show_overlay_notice(
-                t("overlay_insert_unverified", app=app_name),
-                auto_hide_after=2.2,
             )
             return
         if llm_fallback_used:
@@ -672,6 +746,13 @@ class SpeakTypeApp(rumps.App):
 
     def _do_setup(self):
         def init_engines():
+            if self.config["polish_enabled"] or self.config.get("translate_enabled", False):
+                threading.Thread(
+                    target=self._setup_llm_engine,
+                    daemon=True,
+                    name="SpeakTypeLLMSetup",
+                ).start()
+
             logger.info("Loading ASR engine...")
             self._set_status(t("status_loading_asr"))
 
@@ -687,15 +768,6 @@ class SpeakTypeApp(rumps.App):
                 self._set_title(ICON_ERROR)
                 rumps.notification("SpeakType", t("notif_asr_failed"), str(e))
                 return
-
-            if self.config["polish_enabled"] or self.config.get("translate_enabled", False):
-                if self.polish_engine.check_available():
-                    logger.info("LLM polish engine available")
-                    self._llm_unavailable_notified = False
-                    self.polish_engine.prewarm_async()
-                else:
-                    logger.warning("LLM not available")
-                    self._notify_llm_unavailable_once()
 
             # Load plugins
             if self.config.get("plugins_enabled", False):
@@ -936,6 +1008,8 @@ class SpeakTypeApp(rumps.App):
         else:
             self._streaming_transcriber = None
 
+        self._start_hotkey_release_guard()
+
     def _on_whisper_state_change(self, new_state: str):
         """Forward whisper detector state into the overlay (any thread)."""
         try:
@@ -963,6 +1037,8 @@ class SpeakTypeApp(rumps.App):
             logger.debug(f"max_duration auto-stop failed: {e}")
 
     def _stop_recording(self):
+        stop_started = time.perf_counter()
+        self._release_guard_stop.set()
         with self._recording_stop_lock:
             if self._recording_stop_requested or not self.recorder.is_recording:
                 return
@@ -982,7 +1058,11 @@ class SpeakTypeApp(rumps.App):
         # Stop the level monitor and any streaming transcription
         self._stop_level_monitor()
         preview_text = ""
+        preview_snapshot = None
         if self._streaming_transcriber:
+            snapshot = getattr(self._streaming_transcriber, "snapshot", None)
+            if callable(snapshot):
+                preview_snapshot = snapshot()
             preview_text = self._streaming_transcriber.stop(wait=False) or ""
             self._streaming_transcriber = None
         self.recorder.set_stream_callback(None)
@@ -1002,6 +1082,7 @@ class SpeakTypeApp(rumps.App):
             and hasattr(self.recorder, "stop_audio")
         )
         audio_input = self.recorder.stop_audio() if can_use_in_memory_audio else self.recorder.stop()
+        audio_ready_at = time.perf_counter()
         if audio_input is None:
             reason = getattr(self.recorder, "last_stop_reason", "") or "unknown"
             message = getattr(self.recorder, "last_stop_message", "") or ""
@@ -1018,10 +1099,62 @@ class SpeakTypeApp(rumps.App):
 
         self._processing_thread = threading.Thread(
             target=self._process_audio,
-            args=(audio_input, duration),
+            args=(audio_input, duration, preview_snapshot),
             daemon=True,
         )
         self._processing_thread.start()
+        dispatched_at = time.perf_counter()
+        logger.info(
+            "Stop latency: finalize_audio=%.3fs dispatch_processing=%.3fs",
+            audio_ready_at - stop_started,
+            dispatched_at - audio_ready_at,
+        )
+
+    def _start_hotkey_release_guard(self):
+        if self.config.get("dictation_mode", "push_to_talk") != "push_to_talk":
+            return
+        listener = self.hotkey_listener
+        if listener is None or not hasattr(listener, "is_physically_pressed"):
+            return
+        self._release_guard_stop.set()
+        self._release_guard_stop = threading.Event()
+        self._release_guard_thread = threading.Thread(
+            target=self._hotkey_release_guard_loop,
+            args=(self._release_guard_stop,),
+            daemon=True,
+            name="SpeakTypeHotkeyReleaseGuard",
+        )
+        self._release_guard_thread.start()
+
+    def _hotkey_release_guard_loop(self, stop_event: threading.Event):
+        if stop_event.wait(HOTKEY_RELEASE_GUARD_GRACE_SECONDS):
+            return
+        missed_release_count = 0
+        while not stop_event.wait(HOTKEY_RELEASE_GUARD_INTERVAL_SECONDS):
+            if not getattr(self.recorder, "is_recording", False):
+                return
+            listener = self.hotkey_listener
+            if listener is None or not hasattr(listener, "is_physically_pressed"):
+                return
+            physical_pressed = listener.is_physically_pressed()
+            if physical_pressed is None:
+                return
+            if physical_pressed:
+                missed_release_count = 0
+                continue
+
+            missed_release_count += 1
+            if missed_release_count < HOTKEY_RELEASE_GUARD_MISSES:
+                continue
+
+            logger.warning("Hotkey release appears to have been missed; auto-stopping recording")
+            try:
+                if hasattr(listener, "clear_pressed_state"):
+                    listener.clear_pressed_state()
+            except Exception as e:
+                logger.debug(f"Failed to clear stale hotkey state: {e}")
+            self._stop_recording()
+            return
 
     def _start_level_monitor(self):
         try:
@@ -1081,7 +1214,116 @@ class SpeakTypeApp(rumps.App):
             level = 0.0
         self._status_overlay.update_audio_level(level)
 
-    def _process_audio(self, audio_input, duration: float):
+    def _preview_reuse_candidate(self, audio_input, preview_snapshot) -> str:
+        if not PREVIEW_FINAL_ACCELERATION_ENABLED:
+            return ""
+        if preview_snapshot is None:
+            return ""
+        text = (getattr(preview_snapshot, "text", "") or "").strip()
+        if not text:
+            return ""
+        if not self.config.get("streaming_preview", True) or self.config.get("plugins_enabled"):
+            return ""
+        if getattr(self.asr, "backend", "qwen") != "qwen":
+            return ""
+
+        sample_rate = int(self.config.get("sample_rate", 16000) or 16000)
+        original_samples = int(getattr(self.recorder, "last_audio_original_samples", 0) or 0)
+        if original_samples <= 0:
+            try:
+                original_samples = len(audio_input)
+            except Exception:
+                original_samples = 0
+        covered_samples = int(getattr(preview_snapshot, "covered_samples", 0) or 0)
+        if original_samples <= 0 or covered_samples <= 0:
+            return ""
+
+        uncovered = original_samples - covered_samples
+        max_uncovered = int(sample_rate * PREVIEW_REUSE_MAX_UNCOVERED_SECONDS)
+        if uncovered > max_uncovered:
+            logger.info(
+                "Skipping preview transcript reuse: uncovered_tail=%.3fs > %.3fs",
+                uncovered / sample_rate,
+                PREVIEW_REUSE_MAX_UNCOVERED_SECONDS,
+            )
+            return ""
+
+        if not bool(getattr(self.recorder, "last_audio_tail_quiet", False)):
+            logger.info(
+                "Skipping preview transcript reuse: tail audio is not quiet (rms=%.5f)",
+                float(getattr(self.recorder, "last_audio_tail_rms", 0.0) or 0.0),
+            )
+            return ""
+
+        emitted_at = float(getattr(preview_snapshot, "emitted_at", 0.0) or 0.0)
+        if emitted_at and time.monotonic() - emitted_at > PREVIEW_REUSE_MAX_AGE_SECONDS:
+            logger.info("Skipping preview transcript reuse: preview snapshot is stale")
+            return ""
+
+        logger.info(
+            "Using streaming preview as final transcript (covered=%.3fs original=%.3fs tail_rms=%.5f)",
+            covered_samples / sample_rate,
+            original_samples / sample_rate,
+            float(getattr(self.recorder, "last_audio_tail_rms", 0.0) or 0.0),
+        )
+        return text
+
+    def _tail_asr_candidate(self, audio_input, preview_snapshot) -> str:
+        if not PREVIEW_FINAL_ACCELERATION_ENABLED:
+            return ""
+        if preview_snapshot is None:
+            return ""
+        preview_text = (getattr(preview_snapshot, "text", "") or "").strip()
+        if not preview_text:
+            return ""
+        if not self.config.get("streaming_preview", True) or self.config.get("plugins_enabled"):
+            return ""
+        if getattr(self.asr, "backend", "qwen") != "qwen":
+            return ""
+
+        try:
+            import numpy as np
+
+            audio_data = np.asarray(audio_input, dtype="float32").flatten()
+        except Exception:
+            return ""
+        if len(audio_data) <= 0:
+            return ""
+
+        sample_rate = int(self.config.get("sample_rate", 16000) or 16000)
+        original_samples = int(getattr(self.recorder, "last_audio_original_samples", 0) or 0)
+        if original_samples <= 0:
+            original_samples = len(audio_data)
+        covered_samples = int(getattr(preview_snapshot, "covered_samples", 0) or 0)
+        if original_samples <= 0 or covered_samples <= 0:
+            return ""
+
+        uncovered = original_samples - covered_samples
+        min_uncovered = int(sample_rate * TAIL_ASR_MIN_UNCOVERED_SECONDS)
+        max_uncovered = int(sample_rate * TAIL_ASR_MAX_UNCOVERED_SECONDS)
+        if uncovered < min_uncovered or uncovered > max_uncovered:
+            return ""
+
+        pad_samples = int(sample_rate * TAIL_ASR_PADDING_SECONDS)
+        tail_samples = min(len(audio_data), max(min_uncovered, uncovered + pad_samples))
+        if tail_samples <= 0:
+            return ""
+
+        tail_audio = audio_data[-tail_samples:].copy()
+        logger.info(
+            "Running tail ASR merge (covered=%.3fs original=%.3fs tail=%.3fs)",
+            covered_samples / sample_rate,
+            original_samples / sample_rate,
+            tail_samples / sample_rate,
+        )
+        tail_text = self.asr.transcribe(tail_audio, language=self.config["language"])
+        tail_text = (tail_text or "").strip()
+        if not tail_text:
+            logger.info("Tail ASR merge returned no text; falling back to full transcription")
+            return ""
+        return _merge_transcript_text(preview_text, tail_text)
+
+    def _process_audio(self, audio_input, duration: float, preview_snapshot=None):
         marks = {"start": time.perf_counter()}
         llm_fallback_used = False
         try:
@@ -1095,7 +1337,15 @@ class SpeakTypeApp(rumps.App):
             logger.info("Transcribing...")
             if hasattr(self.asr, "_loaded") and not getattr(self.asr, "_loaded", False):
                 self._show_overlay_transcribing(t("overlay_asr_loading"))
-            raw_text = self.asr.transcribe(audio_input, language=self.config["language"])
+            raw_text = self._preview_reuse_candidate(audio_input, preview_snapshot)
+            if raw_text:
+                logger.info("Transcribing skipped: reused streaming preview transcript")
+            else:
+                raw_text = self._tail_asr_candidate(audio_input, preview_snapshot)
+                if raw_text:
+                    logger.info("Transcribing accelerated: merged streaming preview with tail ASR")
+                else:
+                    raw_text = self.asr.transcribe(audio_input, language=self.config["language"])
             marks["transcribed"] = time.perf_counter()
 
             if not raw_text.strip():
@@ -1472,6 +1722,14 @@ class SpeakTypeApp(rumps.App):
         from .stats_window import StatsWindowController
         self._stats_controller = StatsWindowController(self.history)
         self._stats_controller.show()
+
+    def _show_diagnostics(self, _):
+        from .diagnostics_window import DiagnosticsWindowController
+        self._diagnostics_controller = DiagnosticsWindowController(
+            config=self.config,
+            asr_engine=self.asr,
+        )
+        self._diagnostics_controller.show()
 
     def _test_mic(self, _):
         def _do_test():

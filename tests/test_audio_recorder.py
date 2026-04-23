@@ -148,6 +148,7 @@ def test_stop_audio_returns_buffer_without_writing_temp_file(monkeypatch):
     assert len(audio_data) == 6400
     assert recorder.is_recording is False
     assert recorder.last_stop_reason is None
+    assert recorder.last_audio_original_samples == 6400
 
 
 def test_stop_audio_records_too_short_reason():
@@ -167,3 +168,20 @@ def test_stop_audio_records_too_quiet_reason():
 
     assert recorder.stop_audio() is None
     assert recorder.last_stop_reason == "too_quiet"
+
+
+def test_stop_audio_preserves_quiet_edges_for_final_asr_quality():
+    recorder = AudioRecorder(sample_rate=16000)
+    recorder.is_recording = True
+    quiet = _quiet_chunk(samples=8000, level=0.00005)
+    loud = _loud_chunk(samples=6400, level=0.1)
+    recorder._frames = [quiet, loud, quiet]
+
+    audio_data = recorder.stop_audio()
+
+    assert audio_data is not None
+    assert len(audio_data) == 22400
+    assert recorder.last_audio_original_samples == 22400
+    assert recorder.last_audio_trim_start == 0
+    assert recorder.last_audio_trim_end == 22400
+    assert recorder.last_audio_tail_quiet is True

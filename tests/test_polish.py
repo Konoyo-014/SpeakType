@@ -9,8 +9,11 @@ from speaktype.polish import (
     OLLAMA_RECHECK_INTERVAL,
     PolishEngine,
     _detect_prompt_language,
+    _edit_token_budget,
+    _polish_token_budget,
     _reject_accidental_translation,
     _strip_leading_fillers,
+    _translation_token_budget,
 )
 
 
@@ -70,6 +73,20 @@ class TestPolishPromptConstruction:
         self.engine.polish("test", language="zh")
         system_msg = self.captured_messages[0]["content"]
         assert "输出必须是中文" in system_msg
+
+    def test_polish_short_text_uses_tight_generation_budget(self):
+        token_budgets = []
+
+        def fake_chat(messages, max_tokens=1024):
+            token_budgets.append(max_tokens)
+            return "Hello."
+
+        self.engine._chat = fake_chat
+
+        self.engine.polish("hello")
+
+        assert token_budgets == [_polish_token_budget("hello")]
+        assert token_budgets[0] < 256
 
     def test_polish_auto_language_forbids_translation(self):
         self.engine.polish("你好", language="auto")
@@ -152,6 +169,14 @@ class TestPolishPromptConstruction:
     def test_translate_empty_returns_input(self):
         result = self.engine.translate("  ")
         assert result == "  "
+
+    def test_generation_budget_helpers_are_bounded(self):
+        assert _polish_token_budget("hello") == 96
+        assert _translation_token_budget("hello") == 192
+        assert _edit_token_budget("hello") == 192
+        assert _polish_token_budget("x" * 1000) == 512
+        assert _translation_token_budget("x" * 1000) == 1024
+        assert _edit_token_budget("x" * 1000) == 768
 
     def test_polish_and_translate_wraps_in_transcription_tags(self):
         self.engine.polish_and_translate("hello world", target_lang="zh")
@@ -301,3 +326,28 @@ class TestPolishEngineWarmPath:
         payload = post.call_args.kwargs["json"]
         assert payload["model"] == "fake-model"
         assert payload["keep_alive"] == "15m"
+
+    def test_chat_prewarm_uses_chat_endpoint_with_one_token(self):
+        engine = PolishEngine(model="fake-model", ollama_url="http://localhost:11434")
+        engine._available = True
+        response = MagicMock(status_code=200)
+
+        with patch("speaktype.polish.requests.post", return_value=response) as post:
+            assert engine.chat_prewarm() is True
+
+        assert post.call_args.args[0] == "http://localhost:11434/api/chat"
+        assert post.call_args.kwargs["proxies"] == NO_PROXY_FOR_LOCAL_OLLAMA
+        payload = post.call_args.kwargs["json"]
+        assert payload["model"] == "fake-model"
+        assert payload["stream"] is False
+        assert payload["think"] is False
+        assert payload["keep_alive"] == "15m"
+        assert payload["options"]["num_predict"] == 1
+
+    def test_chat_prewarm_async_reuses_existing_worker(self):
+        engine = PolishEngine()
+        existing = MagicMock()
+        existing.is_alive.return_value = True
+        engine._chat_prewarm_thread = existing
+
+        assert engine.chat_prewarm_async() is existing

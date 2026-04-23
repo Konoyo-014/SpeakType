@@ -126,6 +126,24 @@ def _detect_prompt_language(text: str, language: str = "auto") -> str:
     return "en"
 
 
+def _bounded_generation_budget(text: str, multiplier: float, minimum: int, maximum: int, reserve: int = 48) -> int:
+    text_len = len(text or "")
+    budget = int(text_len * multiplier) + reserve
+    return max(minimum, min(maximum, budget))
+
+
+def _polish_token_budget(text: str) -> int:
+    return _bounded_generation_budget(text, multiplier=1.6, minimum=96, maximum=512)
+
+
+def _translation_token_budget(text: str) -> int:
+    return _bounded_generation_budget(text, multiplier=3.0, minimum=192, maximum=1024, reserve=96)
+
+
+def _edit_token_budget(text: str) -> int:
+    return _bounded_generation_budget(text, multiplier=2.0, minimum=192, maximum=768, reserve=96)
+
+
 def _build_polish_messages(
     model_input_text: str,
     tone: str,
@@ -300,6 +318,9 @@ class PolishEngine:
         self._prewarm_lock = threading.Lock()
         self._prewarm_thread = None
         self._prewarm_inflight = False
+        self._chat_prewarm_thread = None
+        self._chat_prewarm_inflight = False
+        self._last_chat_prewarm_at = 0.0
         self._last_prewarm_at = 0.0
         self._last_availability_check_at = time.monotonic()
         self.last_error = ""
@@ -460,6 +481,70 @@ class PolishEngine:
             self._prewarm_thread.start()
             return self._prewarm_thread
 
+    def chat_prewarm(self, keep_alive=OLLAMA_KEEP_ALIVE) -> bool:
+        """Warm the same Ollama chat path used by real polish requests."""
+        if not self._ensure_available():
+            return False
+
+        now = time.monotonic()
+        with self._prewarm_lock:
+            if self._chat_prewarm_inflight:
+                return True
+            if now - self._last_chat_prewarm_at < OLLAMA_PREWARM_MIN_INTERVAL:
+                return True
+            self._chat_prewarm_inflight = True
+
+        success = False
+        try:
+            resp = requests.post(
+                f"{self.ollama_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": "Reply with OK."},
+                        {"role": "user", "content": "OK"},
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": keep_alive,
+                    "options": {
+                        "temperature": 0,
+                        "num_predict": 1,
+                    },
+                },
+                timeout=8,
+                proxies=NO_PROXY_FOR_LOCAL_OLLAMA,
+            )
+            success = resp.status_code == 200
+            if not success:
+                logger.debug("Ollama chat prewarm returned status %s", resp.status_code)
+            return success
+        except requests.Timeout:
+            logger.debug("Ollama chat prewarm timed out")
+            return False
+        except Exception as e:
+            logger.debug(f"Ollama chat prewarm failed: {e}")
+            return False
+        finally:
+            with self._prewarm_lock:
+                if success:
+                    self._last_chat_prewarm_at = time.monotonic()
+                self._chat_prewarm_inflight = False
+
+    def chat_prewarm_async(self, keep_alive=OLLAMA_KEEP_ALIVE):
+        with self._prewarm_lock:
+            if self._chat_prewarm_thread is not None and self._chat_prewarm_thread.is_alive():
+                return self._chat_prewarm_thread
+
+            self._chat_prewarm_thread = threading.Thread(
+                target=self.chat_prewarm,
+                kwargs={"keep_alive": keep_alive},
+                daemon=True,
+                name="SpeakTypeLLMChatPrewarm",
+            )
+            self._chat_prewarm_thread.start()
+            return self._chat_prewarm_thread
+
     def polish(
         self,
         raw_text: str,
@@ -505,7 +590,7 @@ class PolishEngine:
             prompt_language=prompt_language,
         )
 
-        result = self._chat(messages, max_tokens=max(len(raw_text) * 2, 256))
+        result = self._chat(messages, max_tokens=_polish_token_budget(raw_text))
         if result and _reject_accidental_translation(model_input_text, result, language):
             logger.warning(
                 "Rejected likely accidental translation while polish-only mode is active: source=%r result=%r",
@@ -524,7 +609,7 @@ class PolishEngine:
                     prompt_language="zh",
                     retry_after_translation_drift=True,
                 )
-                retry = self._chat(retry_messages, max_tokens=max(len(raw_text) * 2, 256))
+                retry = self._chat(retry_messages, max_tokens=_polish_token_budget(raw_text))
                 if retry and not _reject_accidental_translation(model_input_text, retry, "zh"):
                     return retry
             return model_input_text
@@ -614,7 +699,7 @@ class PolishEngine:
             },
         ]
 
-        result = self._chat(messages, max_tokens=max(len(raw_text) * 4, 1024))
+        result = self._chat(messages, max_tokens=_translation_token_budget(raw_text))
         return result if result else raw_text
 
     def edit_text(self, command: str, selected_text: str, tone: str = "neutral") -> str:
@@ -637,7 +722,7 @@ class PolishEngine:
             },
         ]
 
-        result = self._chat(messages, max_tokens=max(len(selected_text) * 3, 512))
+        result = self._chat(messages, max_tokens=_edit_token_budget(selected_text))
         return result if result else selected_text
 
     def translate(self, text: str, target_lang: str = "en") -> str:
@@ -674,5 +759,5 @@ class PolishEngine:
             },
         ]
 
-        result = self._chat(messages, max_tokens=max(len(text) * 4, 1024))
+        result = self._chat(messages, max_tokens=_translation_token_budget(text))
         return result if result else text

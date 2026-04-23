@@ -2,6 +2,34 @@
 
 All notable changes to SpeakType will be documented in this file.
 
+## [2.1.3] - 2026-04-15
+
+### Added
+- Added a local diagnostics window from the menubar. It checks macOS input permissions, microphone discovery, Qwen3-ASR cache/load state, Ollama installation, Ollama service reachability, configured Ollama model availability, and the current focused input target without reading dictated content or uploading anything.
+- Added user-facing repair guidance for local readiness failures, including exact Ollama startup choices, `ollama pull` instructions for missing polish models, permission restart guidance, and current-input-field hints.
+- Added a v2.1.3 readiness and acceleration design note documenting the local-only constraints, non-goals, and validation expectations.
+- Added ASR warmup after Qwen model load, safe streaming-preview transcript reuse, and local Ollama chat-path warmup while recording.
+
+### Changed
+- Startup now begins local LLM availability checking and Ollama prewarm in parallel with Qwen3-ASR loading instead of waiting for ASR setup to finish first.
+- Paste insertion trims the pasteboard settle delay and checks Accessibility verification immediately before polling, reducing avoidable fast-path insertion latency.
+- Accessibility insertion verification now returns immediately when `AXSelectedText` only echoes the attempted text while `AXValue` remains unchanged, avoiding extra waiting on a known false-success path.
+- Codex, Claude, Chrome, ChatGPT, Gemini, and similar Electron/browser input targets now use paste-first insertion instead of first attempting Accessibility direct insertion, avoiding a repeated false-success round trip on these editors.
+- Routine unverified-but-sent insertions no longer replace the final text preview with a prominent "could not verify" notice. They are still logged and exposed through local diagnostics, while real insertion failures and permission failures remain user-visible.
+- Repeated insertions into the same target process now reuse the `AXManualAccessibility` preparation state instead of setting it again before every dictation.
+- Streaming preview remains display-only for final insertion quality. The app no longer inserts preview-derived or preview-tail-merged text as the final transcript after testing showed that path could degrade Qwen output quality.
+- Streaming preview now adapts its cadence for UI feedback: quiet tails get an earlier preview pass, while longer ongoing recordings back off from fixed full-buffer preview retries.
+- Cached Qwen3-ASR models now load through the local HuggingFace snapshot path first, with automatic fallback to the previous model-id load path if the local path is rejected.
+- The final ASR input now preserves the full captured audio buffer by default. Testing showed that trimming quiet edges on short Mandarin phrases could remove useful acoustic context and push Qwen toward near-homophones such as "颜色" or "绿色" when the user said "润色".
+- Recording-time LLM warmup now uses the same `/api/chat` path as real polish requests and avoids launching a simultaneous generate prewarm.
+- Local Ollama polish, translation, and edit requests now use bounded generation budgets for short dictations so the model has less unnecessary token headroom to fill.
+- Recording-stop latency logs now separate audio finalization time from processing-thread dispatch time, making release-to-insert delays easier to diagnose.
+- Push-to-talk recordings now have a missed-keyup recovery guard. If macOS drops the release event while the physical hotkey is no longer held, SpeakType auto-stops recording and clears the stale hotkey state so the preview overlay cannot stay pinned in a fake recording state. Modifier hotkeys use AppKit's current modifier flags for this guard so holding Right Command is not mistaken for a release.
+- README now documents the Local Diagnostics entry and what it can diagnose.
+
+### Tests
+- Test count grew to 452. New coverage includes local diagnostics, Ollama install/service/model readiness states, current input target diagnostics, startup LLM/ASR warmup overlap, ASR kernel warmup, local Qwen snapshot loading including symlinked HuggingFace cache files, final-ASR preservation of the full captured buffer, adaptive streaming-preview cadence, final-ASR preference over preview-derived transcripts, missed push-to-talk keyup recovery, modifier-aware release-guard state checks, bounded Ollama generation budgets, Ollama chat prewarm, immediate paste verification, immediate Accessibility verification, paste-first app routing, quieter unverified insertion UX, one-time target process preparation, and focused input inspection.
+
 ## [2.1.2] - 2026-04-14
 
 ### Fixed

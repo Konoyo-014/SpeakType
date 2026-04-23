@@ -1,5 +1,8 @@
 """Tests for hotkey state handling."""
 
+from types import SimpleNamespace
+
+from speaktype import hotkey as hotkey_mod
 from speaktype.hotkey import HotkeyListener
 
 
@@ -94,3 +97,52 @@ class TestHotkeyListener:
         assert events == ["press", "release"]
         assert not listener.is_active
         listener.stop()
+
+    def test_clear_pressed_state_recovers_after_missed_release(self):
+        events = []
+        listener, backend = self._make_listener(
+            hotkey_name="right_cmd",
+            on_press=lambda: events.append("press"),
+            on_release=lambda: events.append("release"),
+        )
+
+        backend.emit("down", "cmd_r")
+        listener.clear_pressed_state()
+        backend.emit("down", "cmd_r")
+        backend.emit("up", "cmd_r")
+
+        assert events == ["press", "press", "release"]
+        assert not listener.is_active
+
+    def test_physical_key_state_uses_native_keycode_for_non_modifier(self, monkeypatch):
+        calls = []
+        fake_quartz = SimpleNamespace(
+            kCGEventSourceStateHIDSystemState=1,
+            CGEventSourceKeyState=lambda source, keycode: calls.append((source, keycode)) or keycode == 96,
+        )
+        monkeypatch.setattr(hotkey_mod, "Quartz", fake_quartz)
+        monkeypatch.setattr(hotkey_mod.sys, "platform", "darwin")
+
+        listener = HotkeyListener(hotkey_name="f5")
+
+        assert listener.is_physically_pressed() is True
+        assert calls == [(1, 96)]
+
+    def test_modifier_physical_key_state_uses_appkit_flags(self, monkeypatch):
+        calls = []
+        fake_quartz = SimpleNamespace(
+            kCGEventSourceStateHIDSystemState=1,
+            CGEventSourceKeyState=lambda source, keycode: calls.append((source, keycode)) or False,
+        )
+        fake_appkit = SimpleNamespace(
+            NSEvent=SimpleNamespace(modifierFlags=lambda: 2),
+        )
+        monkeypatch.setattr(hotkey_mod, "Quartz", fake_quartz)
+        monkeypatch.setattr(hotkey_mod, "AppKit", fake_appkit)
+        monkeypatch.setattr(hotkey_mod, "KEY_NAME_TO_NATIVE_MODIFIER_FLAG", {"cmd_r": 2})
+        monkeypatch.setattr(hotkey_mod.sys, "platform", "darwin")
+
+        listener = HotkeyListener(hotkey_name="right_cmd")
+
+        assert listener.is_physically_pressed() is True
+        assert calls == []

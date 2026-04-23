@@ -48,6 +48,9 @@ class ASREngine:
         self._load_lock = threading.Lock()
         self._load_thread = None
         self._load_thread_lock = threading.Lock()
+        self._warmup_thread = None
+        self._warmup_thread_lock = threading.Lock()
+        self._warmed = False
         # MLX/Metal model evaluation is not safe to run concurrently on the
         # same model object. Streaming preview uses non-blocking acquisition;
         # final transcription blocks until any in-flight preview pass exits.
@@ -92,7 +95,11 @@ class ASREngine:
 
     def _load_qwen(self, progress_callback=None):
         """Load Qwen3-ASR via mlx-audio, with optional download progress."""
-        from .model_download import is_model_cached, download_model_with_progress
+        from .model_download import (
+            download_model_with_progress,
+            get_cached_model_path,
+            is_model_cached,
+        )
 
         models_to_try = [self.model_name] + [m for m in ASR_MODELS if m != self.model_name]
 
@@ -103,13 +110,29 @@ class ASREngine:
                     logger.info(f"Downloading ASR model: {model_name}")
                     download_model_with_progress(model_name, callback=progress_callback)
 
-                logger.info(f"Loading ASR model: {model_name}")
                 from mlx_audio.stt.utils import load_model
-                self.model = load_model(model_name)
+
+                cached_path = get_cached_model_path(model_name) if is_model_cached(model_name) else None
+                if cached_path is not None:
+                    try:
+                        logger.info("Loading ASR model from local cache: %s", cached_path)
+                        self.model = load_model(str(cached_path))
+                    except Exception as e:
+                        logger.info(
+                            "Local ASR cache load failed for %s; falling back to model id: %s",
+                            model_name,
+                            e,
+                        )
+                        self.model = None
+
+                if self.model is None:
+                    logger.info(f"Loading ASR model: {model_name}")
+                    self.model = load_model(model_name)
                 self.model_name = model_name
                 self._loaded = True
                 self.backend = "qwen"
                 logger.info(f"ASR model loaded: {model_name}")
+                self.warmup_async()
                 return
             except Exception as e:
                 logger.warning(f"Failed to load {model_name}: {e}")
@@ -176,6 +199,39 @@ class ASREngine:
                     os.unlink(audio_input)
                 except OSError:
                     pass
+
+    def warmup_async(self):
+        """Run a tiny background inference to warm MLX/Metal kernels."""
+        if self._warmed or not self._loaded or self.backend != "qwen":
+            return None
+
+        with self._warmup_thread_lock:
+            if self._warmup_thread is not None and self._warmup_thread.is_alive():
+                return self._warmup_thread
+
+            self._warmup_thread = threading.Thread(
+                target=self._warmup_qwen,
+                daemon=True,
+                name="SpeakTypeASRWarmup",
+            )
+            self._warmup_thread.start()
+            return self._warmup_thread
+
+    def _warmup_qwen(self):
+        if self._warmed or not self.acquire_inference(blocking=False):
+            return
+        try:
+            try:
+                import numpy as np
+
+                warmup_audio = np.zeros(3200, dtype="float32")
+                self._transcribe_qwen(warmup_audio, "auto")
+                self._warmed = True
+                logger.info("ASR warmup completed")
+            except Exception as e:
+                logger.debug("ASR warmup skipped: %s", e)
+        finally:
+            self.release_inference()
 
     def _transcribe_qwen(self, audio_input, language: str) -> str:
         """Transcribe using Qwen3-ASR via mlx-audio."""

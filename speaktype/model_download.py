@@ -1,6 +1,5 @@
 """Model download with progress tracking for SpeakType."""
 
-import os
 import logging
 from pathlib import Path
 
@@ -9,13 +8,21 @@ logger = logging.getLogger("speaktype.model_download")
 
 def is_model_cached(model_name: str) -> bool:
     """Check if a HuggingFace model is already in the local cache."""
+    return get_cached_model_path(model_name) is not None
+
+
+def get_cached_model_path(model_name: str) -> Path | None:
+    """Return the local HuggingFace snapshot path when the model is cached."""
     try:
-        from huggingface_hub import try_to_load_from_cache, model_info
-        # Check if config.json (always present) is cached
+        from huggingface_hub import try_to_load_from_cache
+
         result = try_to_load_from_cache(model_name, "config.json")
-        return result is not None and isinstance(result, str)
+        if not isinstance(result, str):
+            return None
+        path = Path(result).parent
+        return path if path.exists() else None
     except Exception:
-        return False
+        return None
 
 
 def download_model_with_progress(model_name: str, callback=None):

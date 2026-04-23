@@ -7,9 +7,9 @@
 
 class Speaktype < Formula
   desc "AI-powered voice input method for macOS with push-to-talk dictation"
-  homepage "https://github.com/speaktype/speaktype"
-  url "https://github.com/speaktype/speaktype/archive/refs/tags/v2.0.0.tar.gz"
-  sha256 "PLACEHOLDER_SHA256"
+  homepage "https://github.com/Konoyo-014/SpeakType"
+  url "https://github.com/Konoyo-014/SpeakType.git", tag: "v2.1.3"
+  version "2.1.3"
   license "MIT"
 
   depends_on "python@3.10"
@@ -48,12 +48,13 @@ class Speaktype < Formula
       SpeakType requires the following macOS permissions:
         - Microphone access (for voice recording)
         - Accessibility access (for text insertion via keyboard simulation)
+        - Input Monitoring (for the global hotkey)
 
       Grant these in: System Settings > Privacy & Security
 
       For AI text polishing, install and run Ollama:
         brew install ollama
-        ollama serve &
+        brew services start ollama
         ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 
       Start SpeakType:

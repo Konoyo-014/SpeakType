@@ -116,3 +116,87 @@ class TestLoadIsSingleShot:
 
         assert calls and calls[0]["output_path"] == output_stem
         assert not (tmp_path / "mlx-output.txt").exists()
+
+    def test_qwen_load_starts_background_warmup(self, monkeypatch):
+        engine = ASREngine()
+        calls = []
+
+        monkeypatch.setattr("speaktype.model_download.is_model_cached", lambda model_name: True)
+        monkeypatch.setattr("speaktype.model_download.get_cached_model_path", lambda model_name: None)
+        monkeypatch.setattr("mlx_audio.stt.utils.load_model", lambda model_name: object())
+        monkeypatch.setattr(engine, "warmup_async", lambda: calls.append("warmup"))
+
+        engine._load_qwen()
+
+        assert engine._loaded is True
+        assert calls == ["warmup"]
+
+    def test_qwen_load_prefers_cached_snapshot_path(self, monkeypatch, tmp_path):
+        engine = ASREngine(model_name="model-a")
+        calls = []
+        cached_path = tmp_path / "snapshot"
+        cached_path.mkdir()
+
+        monkeypatch.setattr("speaktype.model_download.is_model_cached", lambda model_name: True)
+        monkeypatch.setattr("speaktype.model_download.get_cached_model_path", lambda model_name: cached_path)
+        monkeypatch.setattr("mlx_audio.stt.utils.load_model", lambda model_name: calls.append(model_name) or object())
+        monkeypatch.setattr(engine, "warmup_async", lambda: None)
+
+        engine._load_qwen()
+
+        assert calls == [str(cached_path)]
+        assert engine.model_name == "model-a"
+
+    def test_qwen_load_falls_back_when_cached_snapshot_path_fails(self, monkeypatch, tmp_path):
+        engine = ASREngine(model_name="model-a")
+        calls = []
+        cached_path = tmp_path / "snapshot"
+        cached_path.mkdir()
+
+        def fake_load_model(model_name):
+            calls.append(model_name)
+            if model_name == str(cached_path):
+                raise RuntimeError("bad local cache")
+            return object()
+
+        monkeypatch.setattr("speaktype.model_download.is_model_cached", lambda model_name: True)
+        monkeypatch.setattr("speaktype.model_download.get_cached_model_path", lambda model_name: cached_path)
+        monkeypatch.setattr("mlx_audio.stt.utils.load_model", fake_load_model)
+        monkeypatch.setattr(engine, "warmup_async", lambda: None)
+
+        engine._load_qwen()
+
+        assert calls == [str(cached_path), "model-a"]
+        assert engine._loaded is True
+
+    def test_warmup_qwen_uses_nonblocking_inference_slot(self, monkeypatch):
+        engine = ASREngine()
+        engine._loaded = True
+        engine.backend = "qwen"
+        calls = []
+
+        monkeypatch.setattr(engine, "_transcribe_qwen", lambda audio, language: calls.append((len(audio), language)) or "")
+
+        engine._warmup_qwen()
+
+        assert calls == [(3200, "auto")]
+        assert engine._warmed is True
+
+    def test_warmup_qwen_skips_when_inference_busy(self, monkeypatch):
+        engine = ASREngine()
+        engine._loaded = True
+        engine.backend = "qwen"
+        engine.acquire_inference(blocking=True)
+
+        monkeypatch.setattr(
+            engine,
+            "_transcribe_qwen",
+            lambda audio, language: (_ for _ in ()).throw(AssertionError("warmup should not run")),
+        )
+
+        try:
+            engine._warmup_qwen()
+        finally:
+            engine.release_inference()
+
+        assert engine._warmed is False

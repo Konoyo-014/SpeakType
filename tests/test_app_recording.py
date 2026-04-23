@@ -4,7 +4,10 @@ import threading
 import time
 from types import SimpleNamespace
 
+import numpy as np
+
 from speaktype import app as app_mod
+from speaktype.streaming import StreamingTranscriptSnapshot
 
 
 def _make_app():
@@ -35,6 +38,8 @@ def _make_app():
     app._permission_watch_stop = threading.Event()
     app._last_permission_status = None
     app._permission_restart_prompt_shown = False
+    app._release_guard_thread = None
+    app._release_guard_stop = threading.Event()
     app.hotkey_listener = None
     app._plugin_manager = SimpleNamespace(run_hook=lambda *args, **kwargs: None)
     app._status_overlay = SimpleNamespace(
@@ -329,6 +334,40 @@ def test_stop_recording_stops_streaming_transcriber_without_waiting(monkeypatch)
     assert streaming_stop_calls == [False]
 
 
+def test_stop_recording_passes_streaming_snapshot_to_processing(monkeypatch):
+    app = _make_app()
+    thread_calls = []
+    audio_input = object()
+    snapshot = StreamingTranscriptSnapshot("preview", 32000, time.monotonic())
+    app.asr = SimpleNamespace(backend="qwen", _loaded=True)
+    app.recorder = SimpleNamespace(
+        is_recording=True,
+        stop_audio=lambda: audio_input,
+        stop=lambda: (_ for _ in ()).throw(AssertionError("stop() should not be called")),
+        set_stream_callback=lambda callback: None,
+    )
+    app._streaming_transcriber = SimpleNamespace(
+        snapshot=lambda: snapshot,
+        stop=lambda wait=True: "preview",
+    )
+    app._stop_level_monitor = lambda: None
+    app._status_overlay = SimpleNamespace(show_transcribing=lambda text="": None, hide=lambda delay=0.0: None)
+    app._processing_thread = None
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            thread_calls.append((target, args, daemon))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(app_mod.threading, "Thread", FakeThread)
+
+    app_mod.SpeakTypeApp._stop_recording(app)
+
+    assert thread_calls[0][1][2] is snapshot
+
+
 def test_stop_recording_uses_in_memory_audio_for_qwen_without_plugins(monkeypatch):
     app = _make_app()
     thread_calls = []
@@ -360,6 +399,46 @@ def test_stop_recording_uses_in_memory_audio_for_qwen_without_plugins(monkeypatc
     assert thread_calls[0][1][0] is audio_input
     assert isinstance(thread_calls[0][1][1], float)
     assert thread_calls[0][2] is True
+
+
+def test_hotkey_release_guard_auto_stops_after_missed_release(monkeypatch):
+    app = _make_app()
+    calls = []
+
+    class FakeListener:
+        def __init__(self):
+            self.cleared = False
+
+        def is_physically_pressed(self):
+            return False
+
+        def clear_pressed_state(self):
+            self.cleared = True
+
+    listener = FakeListener()
+    app.hotkey_listener = listener
+    app.recorder = SimpleNamespace(is_recording=True)
+    app._stop_recording = lambda: calls.append("stop")
+
+    monkeypatch.setattr(app_mod, "HOTKEY_RELEASE_GUARD_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(app_mod, "HOTKEY_RELEASE_GUARD_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(app_mod, "HOTKEY_RELEASE_GUARD_MISSES", 1)
+
+    app_mod.SpeakTypeApp._hotkey_release_guard_loop(app, threading.Event())
+
+    assert listener.cleared is True
+    assert calls == ["stop"]
+
+
+def test_start_hotkey_release_guard_ignores_toggle_mode():
+    app = _make_app()
+    app.config["dictation_mode"] = "toggle"
+    app.hotkey_listener = SimpleNamespace(is_physically_pressed=lambda: False)
+    app._release_guard_stop = threading.Event()
+
+    app_mod.SpeakTypeApp._start_hotkey_release_guard(app)
+
+    assert app._release_guard_thread is None
 
 
 def test_stop_recording_shows_asr_cold_start_status(monkeypatch):
@@ -460,7 +539,10 @@ def test_prime_pipeline_for_recording_starts_warm_paths(monkeypatch):
     app.config["streaming_preview"] = True
     calls = []
     app.asr = SimpleNamespace(_loaded=False, load_async=lambda: calls.append("asr"))
-    app.polish_engine = SimpleNamespace(prewarm_async=lambda: calls.append("llm"))
+    app.polish_engine = SimpleNamespace(
+        prewarm_async=lambda: calls.append("llm"),
+        chat_prewarm_async=lambda: calls.append("chat"),
+    )
 
     started_threads = []
 
@@ -478,8 +560,229 @@ def test_prime_pipeline_for_recording_starts_warm_paths(monkeypatch):
 
     app_mod.SpeakTypeApp._prime_pipeline_for_recording(app)
 
-    assert calls == ["asr", "llm"]
+    assert calls == ["asr", "chat"]
     assert started_threads
+
+
+def test_process_audio_uses_final_asr_even_when_preview_is_recent(monkeypatch):
+    app = _make_app()
+    app.config.update(
+        {
+            "streaming_preview": True,
+            "polish_enabled": False,
+            "translate_enabled": False,
+            "voice_commands_enabled": False,
+            "history_enabled": False,
+            "context_aware_tone": False,
+        }
+    )
+    inserted = []
+    app.recorder = SimpleNamespace(
+        last_audio_original_samples=32000,
+        last_audio_tail_quiet=True,
+        last_audio_tail_rms=0.0001,
+    )
+    app.asr = SimpleNamespace(
+        _loaded=True,
+        backend="qwen",
+        transcribe=lambda audio_input, language="auto": "final text",
+    )
+    app.snippets = SimpleNamespace(match=lambda text: None)
+    app.corrections = SimpleNamespace(apply=lambda text: text)
+    app.history = SimpleNamespace(add_async=lambda **kwargs: None)
+    app._status_overlay = SimpleNamespace(
+        show_polishing=lambda text: None,
+        show_done=lambda text, auto_hide_after=0.0: None,
+        hide=lambda delay=0.0: None,
+    )
+    app._remember_last_insertion = lambda text, app_info: None
+    app._log_pipeline_latency = lambda marks: None
+
+    monkeypatch.setattr(app_mod, "get_active_app", lambda: {"name": "Codex", "bundle_id": "com.openai.codex"})
+    monkeypatch.setattr(app_mod, "process_punctuation_commands", lambda text: text)
+    monkeypatch.setattr(app_mod, "insert_text", lambda text, method, app_name="", bundle_id="": inserted.append(text) or True)
+
+    snapshot = StreamingTranscriptSnapshot("preview text", 31800, time.monotonic())
+    app_mod.SpeakTypeApp._process_audio(app, object(), 2.0, snapshot)
+
+    assert inserted == ["final text"]
+
+
+def test_process_audio_does_not_reuse_preview_when_tail_is_not_quiet(monkeypatch):
+    app = _make_app()
+    app.config.update(
+        {
+            "streaming_preview": True,
+            "polish_enabled": False,
+            "translate_enabled": False,
+            "voice_commands_enabled": False,
+            "history_enabled": False,
+            "context_aware_tone": False,
+        }
+    )
+    inserted = []
+    app.recorder = SimpleNamespace(
+        last_audio_original_samples=32000,
+        last_audio_tail_quiet=False,
+        last_audio_tail_rms=0.02,
+    )
+    app.asr = SimpleNamespace(_loaded=True, backend="qwen", transcribe=lambda audio_input, language="auto": "final text")
+    app.snippets = SimpleNamespace(match=lambda text: None)
+    app.corrections = SimpleNamespace(apply=lambda text: text)
+    app.history = SimpleNamespace(add_async=lambda **kwargs: None)
+    app._status_overlay = SimpleNamespace(
+        show_polishing=lambda text: None,
+        show_done=lambda text, auto_hide_after=0.0: None,
+        hide=lambda delay=0.0: None,
+    )
+    app._remember_last_insertion = lambda text, app_info: None
+    app._log_pipeline_latency = lambda marks: None
+
+    monkeypatch.setattr(app_mod, "get_active_app", lambda: {"name": "Codex", "bundle_id": "com.openai.codex"})
+    monkeypatch.setattr(app_mod, "process_punctuation_commands", lambda text: text)
+    monkeypatch.setattr(app_mod, "insert_text", lambda text, method, app_name="", bundle_id="": inserted.append(text) or True)
+
+    snapshot = StreamingTranscriptSnapshot("preview text", 31800, time.monotonic())
+    app_mod.SpeakTypeApp._process_audio(app, object(), 2.0, snapshot)
+
+    assert inserted == ["final text"]
+
+
+def test_process_audio_does_not_merge_tail_asr_when_preview_misses_short_tail(monkeypatch):
+    app = _make_app()
+    app.config.update(
+        {
+            "streaming_preview": True,
+            "polish_enabled": False,
+            "translate_enabled": False,
+            "voice_commands_enabled": False,
+            "history_enabled": False,
+            "context_aware_tone": False,
+        }
+    )
+    audio = np.ones(48000, dtype="float32") * 0.1
+    inserted = []
+    transcribe_lengths = []
+    app.recorder = SimpleNamespace(
+        last_audio_original_samples=48000,
+        last_audio_tail_quiet=False,
+        last_audio_tail_rms=0.02,
+    )
+
+    def fake_transcribe(audio_input, language="auto"):
+        transcribe_lengths.append(len(audio_input))
+        return "full final"
+
+    app.asr = SimpleNamespace(_loaded=True, backend="qwen", transcribe=fake_transcribe)
+    app.snippets = SimpleNamespace(match=lambda text: None)
+    app.corrections = SimpleNamespace(apply=lambda text: text)
+    app.history = SimpleNamespace(add_async=lambda **kwargs: None)
+    app._status_overlay = SimpleNamespace(
+        show_polishing=lambda text: None,
+        show_done=lambda text, auto_hide_after=0.0: None,
+        hide=lambda delay=0.0: None,
+    )
+    app._remember_last_insertion = lambda text, app_info: None
+    app._log_pipeline_latency = lambda marks: None
+
+    monkeypatch.setattr(app_mod, "get_active_app", lambda: {"name": "Codex", "bundle_id": "com.openai.codex"})
+    monkeypatch.setattr(app_mod, "process_punctuation_commands", lambda text: text)
+    monkeypatch.setattr(app_mod, "insert_text", lambda text, method, app_name="", bundle_id="": inserted.append(text) or True)
+
+    snapshot = StreamingTranscriptSnapshot("hello wor", 44000, time.monotonic())
+    app_mod.SpeakTypeApp._process_audio(app, audio, 3.0, snapshot)
+
+    assert inserted == ["full final"]
+    assert transcribe_lengths == [48000]
+
+
+def test_preview_final_acceleration_candidates_are_disabled_by_default():
+    app = _make_app()
+    app.config.update(
+        {
+            "streaming_preview": True,
+        }
+    )
+    audio = np.ones(48000, dtype="float32") * 0.1
+    app.recorder = SimpleNamespace(
+        last_audio_original_samples=48000,
+        last_audio_tail_quiet=True,
+        last_audio_tail_rms=0.0001,
+    )
+    app.asr = SimpleNamespace(_loaded=True, backend="qwen", transcribe=lambda audio_input, language="auto": "tail")
+
+    snapshot = StreamingTranscriptSnapshot("hello wor", 44000, time.monotonic())
+
+    assert app_mod.SpeakTypeApp._preview_reuse_candidate(app, audio, snapshot) == ""
+    assert app_mod.SpeakTypeApp._tail_asr_candidate(app, audio, snapshot) == ""
+
+
+def test_merge_transcript_text_handles_overlap_and_cjk_boundaries():
+    assert app_mod._merge_transcript_text("hello wor", "world") == "hello world"
+    assert app_mod._merge_transcript_text("今天天气", "很好") == "今天天气很好"
+
+
+def test_setup_llm_engine_prewarms_when_available():
+    app = _make_app()
+    calls = []
+    app.polish_engine = SimpleNamespace(
+        check_available=lambda: calls.append("check") or True,
+        prewarm_async=lambda: calls.append("prewarm"),
+    )
+    app._notify_llm_unavailable_once = lambda error=None: calls.append("notify")
+    app._llm_unavailable_notified = True
+
+    app_mod.SpeakTypeApp._setup_llm_engine(app)
+
+    assert calls == ["check", "prewarm"]
+    assert app._llm_unavailable_notified is False
+
+
+def test_setup_llm_engine_notifies_when_unavailable():
+    app = _make_app()
+    calls = []
+    app.polish_engine = SimpleNamespace(
+        check_available=lambda: calls.append("check") or False,
+        prewarm_async=lambda: calls.append("prewarm"),
+    )
+    app._notify_llm_unavailable_once = lambda error=None: calls.append("notify")
+
+    app_mod.SpeakTypeApp._setup_llm_engine(app)
+
+    assert calls == ["check", "notify"]
+
+
+def test_do_setup_starts_llm_readiness_before_asr_load(monkeypatch):
+    app = _make_app()
+    events = []
+    app.asr = SimpleNamespace(
+        load=lambda progress_callback=None: events.append("asr_load"),
+        get_backend_info=lambda: "fake-asr",
+    )
+    app._set_status = lambda status: events.append(("status", status))
+    app._set_title = lambda title: None
+    app._restart_hotkey_listener = lambda: None
+    app._start_permission_restart_watcher = lambda: None
+    app._setup_llm_engine = lambda: events.append("llm_setup")
+    app._hotkey_display = lambda: "fn"
+    app.hotkey_listener = None
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            self._target = target
+            self._name = name or getattr(target, "__name__", "")
+
+        def start(self):
+            events.append(("thread_start", self._name))
+            if self._name == "init_engines":
+                self._target()
+
+    monkeypatch.setattr(app_mod.threading, "Thread", FakeThread)
+    monkeypatch.setattr(app_mod.rumps, "notification", lambda title, subtitle, body: None)
+
+    app_mod.SpeakTypeApp._do_setup(app)
+
+    assert events.index(("thread_start", "SpeakTypeLLMSetup")) < events.index("asr_load")
 
 
 def test_process_audio_combines_polish_and_translate_when_plugins_disabled(monkeypatch):
@@ -676,7 +979,7 @@ def test_llm_fallback_notice_distinguishes_timeout():
     )
 
 
-def test_process_audio_surfaces_unverified_insert(monkeypatch):
+def test_process_audio_keeps_final_text_visible_for_unverified_insert(monkeypatch):
     app = _make_app()
     app.config.update(
         {
@@ -688,6 +991,7 @@ def test_process_audio_surfaces_unverified_insert(monkeypatch):
         }
     )
     notices = []
+    done = []
 
     app.asr = SimpleNamespace(transcribe=lambda audio_path, language="auto": "hello")
     app.snippets = SimpleNamespace(match=lambda text: None)
@@ -695,7 +999,7 @@ def test_process_audio_surfaces_unverified_insert(monkeypatch):
     app.history = SimpleNamespace(add_async=lambda **kwargs: None)
     app._status_overlay = SimpleNamespace(
         show_polishing=lambda text: None,
-        show_done=lambda text, auto_hide_after=0.0: None,
+        show_done=lambda text, auto_hide_after=0.0: done.append(text),
         show_notice=lambda text, auto_hide_after=0.0: notices.append((text, auto_hide_after)),
         hide=lambda delay=0.0: None,
     )
@@ -710,10 +1014,29 @@ def test_process_audio_surfaces_unverified_insert(monkeypatch):
 
     app_mod.SpeakTypeApp._process_audio(app, "/tmp/fake.wav", 1.0)
 
-    assert (
-        app_mod.t("overlay_insert_unverified", app="Chrome"),
-        2.2,
-    ) in notices
+    assert done == ["hello"]
+    assert notices == []
+
+
+def test_unverified_insert_with_llm_fallback_shows_only_llm_notice(monkeypatch):
+    app = _make_app()
+    notices = []
+    app.polish_engine = SimpleNamespace(last_error="Ollama is not running")
+    app._status_overlay = SimpleNamespace(
+        show_notice=lambda text, auto_hide_after=0.0: notices.append((text, auto_hide_after)),
+    )
+
+    diagnostic = SimpleNamespace(success=True, verified=False, method="paste", reason="unverifiable_target")
+    monkeypatch.setattr(app_mod, "get_last_insert_diagnostic", lambda: diagnostic)
+
+    app_mod.SpeakTypeApp._show_successful_insert_feedback(
+        app,
+        {"name": "Chrome", "bundle_id": "com.google.Chrome"},
+        "hello",
+        llm_fallback_used=True,
+    )
+
+    assert notices == [(app_mod.t("overlay_llm_ollama_not_running_raw"), 2.2)]
 
 
 def test_process_audio_with_translate_disabled_never_calls_translate(monkeypatch):

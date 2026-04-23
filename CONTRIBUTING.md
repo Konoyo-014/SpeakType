@@ -14,8 +14,8 @@ Thank you for your interest in contributing to SpeakType! This guide will help y
 
 ```bash
 # Clone the repo
-git clone https://github.com/speaktype/speaktype.git
-cd speaktype
+git clone https://github.com/Konoyo-014/SpeakType.git
+cd SpeakType
 
 # Run the setup script (creates venv, installs deps, downloads models)
 ./setup.sh
@@ -51,13 +51,14 @@ SPEAKTYPE_BUILD_VERSION=2.0.1d1 ./build_dmg.sh --app
 ```
 speaktype/
   app.py              # Main menubar application (rumps)
-  asr.py              # ASR engine (Qwen3-ASR + Whisper)
+  asr.py              # ASR engine (Qwen3-ASR)
   audio.py            # Microphone recording (sounddevice)
   polish.py           # LLM text polishing (Ollama)
   inserter.py         # Text insertion (CGEvent + NSPasteboard)
   hotkey.py           # Global hotkey listener (pynput)
   streaming.py        # Streaming transcription preview
-  overlay.py          # Recording indicator overlay
+  status_overlay.py   # Recording, preview, and status overlay
+  diagnostics.py      # Local readiness diagnostics
   settings_window.py  # Native settings UI (PyObjC)
   dict_window.py      # Dictionary & snippets editor
   stats_window.py     # Statistics panel
