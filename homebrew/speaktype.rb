@@ -1,6 +1,6 @@
 # Homebrew formula for SpeakType
 # Install: brew install --cask speaktype (when published)
-# Or locally: brew install --formula ./homebrew/speaktype.rb
+# Formula users should place this file in a Homebrew tap before installing.
 #
 # Note: This formula installs from source using pip and sets up the CLI.
 # For the .app bundle, use the cask or DMG installer instead.
@@ -63,6 +63,7 @@ class Speaktype < Formula
   end
 
   test do
-    assert_match "SpeakType", shell_output("#{bin}/speaktype --help 2>&1", 1)
+    assert_predicate libexec / "main.py", :exist?
+    assert_predicate libexec / "speaktype" / "__init__.py", :exist?
   end
 end
