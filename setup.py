@@ -95,6 +95,8 @@ def _copy_runtime_support():
     for module_name in (
         "sounddevice",
         "_sounddevice_data",
+        "soundfile",
+        "_soundfile_data",
         *dynload_packages,
     ):
         spec = importlib.util.find_spec(module_name)
