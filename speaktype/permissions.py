@@ -13,6 +13,7 @@ from ApplicationServices import (
 
 logger = logging.getLogger("speaktype")
 RESETTABLE_PERMISSION_SERVICES = ("Accessibility", "ListenEvent", "PostEvent")
+TCCUTIL_RESET_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -50,11 +51,21 @@ def request_missing_permissions(status: PermissionStatus | None = None):
 def reset_permissions(bundle_id: str, services: tuple[str, ...] = RESETTABLE_PERMISSION_SERVICES):
     """Clear TCC grants for the bundled app so the next request re-prompts the user."""
     for service in services:
-        result = subprocess.run(
-            ["tccutil", "reset", service, bundle_id],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["tccutil", "reset", service, bundle_id],
+                capture_output=True,
+                text=True,
+                timeout=TCCUTIL_RESET_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Timed out resetting %s permission for %s after %ss",
+                service,
+                bundle_id,
+                TCCUTIL_RESET_TIMEOUT_SECONDS,
+            )
+            continue
         if result.returncode != 0:
             logger.warning(
                 "Failed to reset %s permission for %s: %s",
