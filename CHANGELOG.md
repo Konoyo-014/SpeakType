@@ -2,7 +2,21 @@
 
 All notable changes to SpeakType will be documented in this file.
 
-## [2.2.22] - 2026-05-08
+## [2.2.0] - 2026-05-08
+
+### Official public release
+- Published V2.2 as the official `v2.2.0` release instead of exposing the internal v2.2.x development iteration numbers.
+- Consolidated the adaptive-hotword system, native hotword window, preferences controls, local diagnostics, setup-wizard hardening, dictionary/statistics/HUD polish, Chinese localization work, and packaged-app release validation into the public release notes.
+- 正式公开版本号统一为 `v2.2.0`，不再把内部 v2.2.x 渐进开发编号作为公开 release 口径。
+- 公开说明已合并自适应热词、原生热词窗口、偏好设置控制、本地自检、首次启动向导加固、词典/统计/HUD 打磨、中文本地化和打包验证结果。
+
+### Validation
+- `venv/bin/python -m pytest -q $(git ls-files 'tests/test_*.py')`: 517 passed.
+- `venv/bin/python -m compileall $(git ls-files 'speaktype/*.py' 'tests/test_*.py')`: passed.
+- `git diff --check` and `git diff --check --cached`: passed.
+- Packaged macOS DMG verification, mounted-app version checks, and strict codesign verification are required for the final public `SpeakType-2.2.0.dmg`.
+
+## [2.2.22-dev] - 2026-05-08
 
 ### Changed
 - Reused already-visible utility windows from the menubar instead of creating duplicate Settings, Dictionary & Snippets, Statistics, Local Diagnostics, or Adaptive Hotwords windows on repeated menu clicks.
@@ -11,7 +25,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added app-level window-controller lifecycle coverage for visible-controller reuse and hidden-controller replacement. Computer Use verified the packaged native controller-reuse path.
 
-## [2.2.21] - 2026-05-08
+## [2.2.21-dev] - 2026-05-08
 
 ### Changed
 - Tightened the Local Diagnostics window's fallback layout. When the diagnostic list switches from a populated report back to a running or empty state, the scroll document height is now reset instead of preserving stale blank scroll space.
@@ -20,7 +34,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added diagnostics-window coverage for empty-row document sizing after stale rows are removed. Computer Use verified the packaged native diagnostics window after a tall report collapsed back to the running fallback state.
 
-## [2.2.20] - 2026-05-08
+## [2.2.20-dev] - 2026-05-08
 
 ### Changed
 - Added visible feedback to the Adaptive Hotwords window's Reveal File action. The footer now confirms whether SpeakType revealed the hotword file or opened the configuration folder because no hotword file exists yet.
@@ -29,7 +43,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added adaptive-hotword window coverage for reveal feedback and missing-file fallback behavior. Computer Use verified the packaged native hotword window with an empty learned-hotword store and Reveal File action.
 
-## [2.2.19] - 2026-05-08
+## [2.2.19-dev] - 2026-05-08
 
 ### Changed
 - Tightened the Adaptive Hotwords refresh behavior. Refresh now clears stale Copy Context feedback so old copy or empty-state messages are not shown after the hotword store is reloaded.
@@ -38,7 +52,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added adaptive-hotword window coverage for refresh feedback clearing and empty-list document sizing. Computer Use verified the packaged native hotword window after copy-empty followed by refresh.
 
-## [2.2.18] - 2026-05-08
+## [2.2.18-dev] - 2026-05-08
 
 ### Changed
 - Improved the Adaptive Hotwords window's Copy Context action. When there are no active learned hotwords, SpeakType now shows a clear empty-state message instead of reporting that zero hotwords were copied.
@@ -47,7 +61,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added adaptive-hotword window coverage for empty and non-empty copy-context states. Computer Use verified the packaged native hotword window with an empty learned-hotword store.
 
-## [2.2.17] - 2026-05-08
+## [2.2.17-dev] - 2026-05-08
 
 ### Changed
 - Added a dirty-close guard to the Dictionary & Snippets window. When users have unsaved dictionary, snippet, or correction edits, the first Close action now keeps the window open and shows a clear warning; closing again intentionally discards the changes.
@@ -56,7 +70,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added dictionary-window coverage for the two-step discard confirmation and for resetting that confirmation after another edit. Computer Use verified the packaged native dictionary window with a real unsaved edit.
 
-## [2.2.16] - 2026-05-08
+## [2.2.16-dev] - 2026-05-08
 
 ### Changed
 - Rebuilt the setup wizard ASR error transition so a failed model download now re-renders the full Speech Recognition Model step in its error state. This restores the explanatory hint below the error instead of leaving the user with only a red status line and retry buttons.
@@ -65,7 +79,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added setup-wizard coverage for the full ASR error-state rebuild after a failed download. Computer Use verified the packaged macOS wizard with a real missing-model failure.
 
-## [2.2.15] - 2026-05-08
+## [2.2.15-dev] - 2026-05-08
 
 ### Changed
 - Expanded the setup wizard's ASR download failure state into a wrapped, variable-height label. Long network, Hugging Face, or model-resolution errors now remain readable instead of being clipped inside a one-line status row.
@@ -75,7 +89,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added setup-wizard layout coverage for short, medium, and long ASR download status text, plus stale-progress removal after errors. Computer Use verified the packaged macOS wizard with a real failed model-download path.
 
-## [2.2.14] - 2026-05-08
+## [2.2.14-dev] - 2026-05-08
 
 ### Fixed
 - Hardened setup-wizard ASR model downloading against the `huggingface_hub.snapshot_download` progress-bar `name` argument used by newer Hugging Face Hub releases. The packaged app now absorbs that argument instead of surfacing a raw `Unknown argument(s)` failure when a user clicks `下载模型`.
@@ -84,7 +98,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added model-download coverage for Hugging Face progress-bar compatibility and localized setup-wizard download errors. Computer Use and packaged-Python verification were run against the final macOS bundle.
 
-## [2.2.13] - 2026-05-08
+## [2.2.13-dev] - 2026-05-08
 
 ### Changed
 - Localized compact hotkey display names used in the menubar, ready notification, and setup completion step. Chinese UI now shows `快捷键：右 ⌘` and `⌃⇧空格` instead of mixing in `Right ⌘` or `Space`.
@@ -95,7 +109,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added coverage for localized hotkey display names, About body text, ASR download status localization, and the setup-wizard download action state. Computer Use verified the packaged macOS setup wizard no longer starts ASR download before the explicit download action.
 
-## [2.2.12] - 2026-05-08
+## [2.2.12-dev] - 2026-05-08
 
 ### Changed
 - Localized the setup wizard's Ollama readiness labels. The Text Polishing step now shows `Ollama 安装`, `Ollama 本地服务`, and `润色模型` in the Chinese UI instead of mixing in English labels.
@@ -105,7 +119,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added setup-wizard coverage for localized LLM-step labels and copy confirmation text. Computer Use verified the real macOS setup wizard LLM step with Ollama installed, service missing, model missing, both copy buttons, and visible copied confirmation.
 
-## [2.2.11] - 2026-05-08
+## [2.2.11-dev] - 2026-05-08
 
 ### Changed
 - Localized the Statistics window duration formatting. Chinese UI now shows minutes and seconds as `分钟` and `秒` in the summary, metric tiles, and recent-dictation metadata instead of mixing in `min` and `s`.
@@ -114,7 +128,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added statistics-window coverage for localized duration units and Chinese weekday labels. Computer Use verified the real macOS Statistics window with populated history, localized summary/metric/activity labels, long recent-dictation rows, scrolling, and fixed footer controls.
 
-## [2.2.10] - 2026-05-08
+## [2.2.10-dev] - 2026-05-08
 
 ### Changed
 - Local Diagnostics now uses localized readiness summaries instead of English-only `OK / WARN / FAIL` counters in the Chinese UI.
@@ -127,7 +141,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added diagnostics-window coverage for localized summary counts. Computer Use verified the real macOS diagnostics window across localized summary rendering, copy confirmation, disabled running state, and recovery after refresh completion. Full-suite testing also verified the diagnostics/hotwords Objective-C class-name collision is resolved.
 
-## [2.2.9] - 2026-05-08
+## [2.2.9-dev] - 2026-05-08
 
 ### Changed
 - Rebuilt Dictionary & Snippets as a native sectioned editor with a left navigation rail for Custom Dictionary, Snippets, and Corrections. Users no longer have to scan one long scrolling form to manage V2.2 hotword-adjacent vocabulary, shortcuts, and correction rules.
@@ -137,7 +151,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added dictionary-window coverage for section ordering, full-content row formatting, collection counts, and dirty-status reset across section switches. Computer Use verified the real macOS dictionary editor across section switching, long-word entry, visible unsaved state, and save/close behavior.
 
-## [2.2.8] - 2026-05-07
+## [2.2.8-dev] - 2026-05-07
 
 ### Changed
 - Rebuilt Preferences as a native sectioned window with a left navigation rail and a single visible settings group at a time. General, AI Models, Features, Adaptive Hotwords, and System no longer live in one long scroll form.
@@ -147,7 +161,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added settings-window coverage for section ownership, numeric clamping, invalid-number fallback, and checkbox state reads. Computer Use verified every Preferences section, hotword numeric clamp behavior, and the save callback path in a real macOS window.
 
-## [2.2.7] - 2026-05-07
+## [2.2.7-dev] - 2026-05-07
 
 ### Changed
 - Reworked the adaptive-hotword status window rows to use variable heights. Long learned terms, aliases, and application contexts now remain readable instead of being clipped inside a fixed 88pt row.
@@ -157,7 +171,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added deterministic hotword-row sizing coverage and active-context copy coverage. Computer Use verified the real native hotword window with long terms, long aliases, active/candidate rows, and long application identifiers.
 
-## [2.2.6] - 2026-05-07
+## [2.2.6-dev] - 2026-05-07
 
 ### Changed
 - Reworked the recording HUD body text renderer so dictated previews and final inserted text use a native read-only multiline text view instead of a single-line text field. Long CJK and mixed technical terms now wrap visibly instead of being clipped on the right edge.
@@ -166,7 +180,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added responsive HUD geometry coverage. Computer Use verified the real macOS HUD across final-result, recording with active hotwords and whisper indicator, long streaming preview, polishing, and error states.
 
-## [2.2.5] - 2026-05-07
+## [2.2.5-dev] - 2026-05-07
 
 ### Changed
 - Added a step counter and progress bar to the first-launch setup wizard so users can see where they are in the setup flow.
@@ -178,7 +192,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Added setup-wizard command selection coverage. Computer Use reproduced the incorrect copy behavior, then verified that the Ollama service button copies `ollama serve`, the model button copies the matching `ollama pull ...` command, and the new progress indicator renders through the completion step.
 
-## [2.2.4] - 2026-05-07
+## [2.2.4-dev] - 2026-05-07
 
 ### Changed
 - Rebuilt the statistics window as a scrollable native dashboard with a fixed header, fixed bottom action bar, metric tiles, real activity bars, app-frequency bars, and wrapped recent-dictation rows. Long history no longer pushes recent entries below the window.
@@ -188,7 +202,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Full targeted UI regression checks pass for statistics, dictionary, diagnostics, and hotword windows. Computer Use verified the statistics window before and after the fix, including scrolling to recent dictations, and rechecked Settings, Dictionary, Diagnostics copy-report behavior, and fixed footer controls.
 
-## [2.2.3] - 2026-05-07
+## [2.2.3-dev] - 2026-05-07
 
 ### Added
 - Added a native adaptive-hotword status window from the menubar. The window shows learned terms, active/candidate state, confidence, observation count, last update date, aliases, and app context without requiring the user to open or understand `hotwords.json`.
@@ -202,7 +216,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Full hotword, diagnostics, dictionary, and app-recording targeted tests pass with 48 tests. Computer Use verified the real native hotword window, Copy Context clipboard output, Reveal File behavior, and the corrected non-truncating row layout.
 
-## [2.2.2] - 2026-05-07
+## [2.2.2-dev] - 2026-05-07
 
 ### Changed
 - Improved the local diagnostics window so long detail text and repair actions use variable-height wrapped rows instead of single-line truncation. Chinese action text now breaks naturally before temporary test commands such as `ollama serve`.
@@ -212,7 +226,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Full test suite passes with 443 tests. Computer Use verified Diagnostics, Setup Wizard, Preferences, Dictionary, Statistics, and the recording HUD after the UI changes.
 
-## [2.2.1] - 2026-05-07
+## [2.2.1-dev] - 2026-05-07
 
 ### Changed
 - Added a menubar hotword status item showing active and learned adaptive hotwords, with a direct reveal action for the local hotword store.
@@ -226,7 +240,7 @@ All notable changes to SpeakType will be documented in this file.
 ### Tests
 - Full test suite passes with 443 tests. New coverage includes selected-row deletion in the dictionary window and the hotword/status UI integration paths added in v2.2.1.
 
-## [2.2.0] - 2026-05-07
+## [2.2.0-dev] - 2026-05-07
 
 ### Added
 - Added an adaptive hotword learning system that starts a short local observation window after successful SpeakType insertions and learns only from edits made to the just-inserted text span.
