@@ -15,6 +15,7 @@ from .model_download import is_model_cached
 from .polish import NO_PROXY_FOR_LOCAL_OLLAMA
 from .inserter import inspect_focused_input
 from .context import get_active_app
+from .hotwords import HotwordStore
 
 
 OLLAMA_PATHS = (
@@ -100,6 +101,7 @@ def run_readiness_checks(config: dict, asr_engine=None) -> list[DiagnosticItem]:
     items.append(check_microphone())
     items.append(check_asr(config, asr_engine=asr_engine))
     items.extend(check_ollama(config))
+    items.append(check_hotwords(config))
     items.append(check_target_input())
     return items
 
@@ -333,6 +335,53 @@ def check_ollama(config: dict) -> list[DiagnosticItem]:
             )
         )
     return items
+
+
+def check_hotwords(config: dict) -> DiagnosticItem:
+    learning = bool(config.get("hotword_learning_enabled", True))
+    context_enabled = bool(config.get("hotword_context_enabled", True))
+    try:
+        entries = HotwordStore().get_all()
+    except Exception as e:
+        return _item(
+            "hotwords",
+            "warn",
+            "diag_hotwords_title",
+            "diag_hotwords_error",
+            "diag_hotwords_action",
+            error=str(e),
+        )
+
+    total = len(entries)
+    active = sum(1 for entry in entries if entry.get("active"))
+    if learning and context_enabled:
+        return _item(
+            "hotwords",
+            "ok",
+            "diag_hotwords_title",
+            "diag_hotwords_ok",
+            learned=total,
+            active=active,
+        )
+    if learning:
+        return _item(
+            "hotwords",
+            "warn",
+            "diag_hotwords_title",
+            "diag_hotwords_context_off",
+            "diag_hotwords_action",
+            learned=total,
+            active=active,
+        )
+    return _item(
+        "hotwords",
+        "warn",
+        "diag_hotwords_title",
+        "diag_hotwords_learning_off",
+        "diag_hotwords_action",
+        learned=total,
+        active=active,
+    )
 
 
 def check_target_input() -> DiagnosticItem:

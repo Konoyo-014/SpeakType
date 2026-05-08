@@ -46,10 +46,12 @@ logger = logging.getLogger("speaktype.status_overlay")
 # -------------------------------------------------------------------- #
 
 WINDOW_WIDTH = 460
+WINDOW_WIDTH_MIN = 320
 WINDOW_HEIGHT_MIN = 48
 WINDOW_HEIGHT_MAX = 280
 CORNER_RADIUS = 24
 TOP_OFFSET = 64  # distance from top of visible screen
+SCREEN_EDGE_PADDING = 16
 
 # Internal padding
 TEXT_V_PADDING = 14  # from top AND from bottom
@@ -131,6 +133,19 @@ def _safe_cgcolor(color):
         return color.CGColor()
     except Exception:
         return None
+
+
+def _overlay_width_for_screen(screen_frame) -> float:
+    """Return a HUD width that stays inside the visible screen frame."""
+    try:
+        available = float(screen_frame.size.width)
+    except Exception:
+        return float(WINDOW_WIDTH)
+    if available <= 0:
+        return float(WINDOW_WIDTH)
+    usable = available - SCREEN_EDGE_PADDING * 2
+    width = min(float(WINDOW_WIDTH), max(float(WINDOW_WIDTH_MIN), usable))
+    return max(0.0, min(width, available))
 
 
 def _create_sf_symbol_view(name, point_size, tint_color, frame):
@@ -512,13 +527,13 @@ class StatusOverlay:
     # Public API — safe to call from any thread                          #
     # ------------------------------------------------------------------ #
 
-    def show_recording(self):
+    def show_recording(self, note: str = ""):
         """Switch to recording state and reveal the overlay."""
         import time as _time
 
         with self._lock:
             self._state = "recording"
-            self._note = ""
+            self._note = _sanitize_display_text(note)
             self._text = ""
             self._level = 0.0
             self._whisper_mode = False
@@ -632,6 +647,7 @@ class StatusOverlay:
         initial_frame = self._compute_base_frame(
             screen.visibleFrame(), WINDOW_HEIGHT_MIN
         )
+        window_width = initial_frame.size.width
 
         self._window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             initial_frame,
@@ -665,7 +681,7 @@ class StatusOverlay:
 
         # Frosted-glass background — the popover material adapts to dark/light.
         self._effect_view = AppKit.NSVisualEffectView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT_MIN)
+            NSMakeRect(0, 0, window_width, WINDOW_HEIGHT_MIN)
         )
         try:
             self._effect_view.setMaterial_(AppKit.NSVisualEffectMaterialPopover)
@@ -697,7 +713,7 @@ class StatusOverlay:
 
         # System note — smaller and secondary so internal status cannot be
         # mistaken for dictated user text.
-        note_width = WINDOW_WIDTH - TEXT_LEFT - RIGHT_PADDING
+        note_width = window_width - TEXT_LEFT - RIGHT_PADDING
         note_y = WINDOW_HEIGHT_MIN - TEXT_V_PADDING - NOTE_LINE_HEIGHT
         self._note_field = AppKit.NSTextField.alloc().initWithFrame_(
             NSMakeRect(TEXT_LEFT, note_y, note_width, NOTE_LINE_HEIGHT)
@@ -717,21 +733,12 @@ class StatusOverlay:
         )
         self._note_field.setAlignment_(AppKit.NSTextAlignmentLeft)
         self._note_field.setStringValue_("")
-        note_cell = self._note_field.cell()
-        if note_cell is not None:
-            try:
-                note_cell.setUsesSingleLineMode_(False)
-                note_cell.setWraps_(True)
-                note_cell.setTruncatesLastVisibleLine_(False)
-                note_cell.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
-                note_cell.setScrollable_(False)
-            except Exception:
-                pass
+        self._configure_multiline_field(self._note_field, note_width)
         content.addSubview_(self._note_field)
 
         # Text field — character-wrapped so CJK, paths, and long tokens do not overflow.
-        text_width = WINDOW_WIDTH - TEXT_LEFT - RIGHT_PADDING
-        self._text_field = AppKit.NSTextField.alloc().initWithFrame_(
+        text_width = window_width - TEXT_LEFT - RIGHT_PADDING
+        self._text_field = AppKit.NSTextView.alloc().initWithFrame_(
             NSMakeRect(
                 TEXT_LEFT,
                 TEXT_V_PADDING,
@@ -739,10 +746,13 @@ class StatusOverlay:
                 WINDOW_HEIGHT_MIN - TEXT_V_PADDING * 2,
             )
         )
-        self._text_field.setBezeled_(False)
         self._text_field.setDrawsBackground_(False)
         self._text_field.setEditable_(False)
         self._text_field.setSelectable_(False)
+        try:
+            self._text_field.setRichText_(False)
+        except Exception:
+            pass
         try:
             self._text_field.setTextColor_(AppKit.NSColor.labelColor())
         except Exception:
@@ -753,17 +763,8 @@ class StatusOverlay:
             )
         )
         self._text_field.setAlignment_(AppKit.NSTextAlignmentLeft)
-        self._text_field.setStringValue_("")
-        cell = self._text_field.cell()
-        if cell is not None:
-            try:
-                cell.setUsesSingleLineMode_(False)
-                cell.setWraps_(True)
-                cell.setTruncatesLastVisibleLine_(False)
-                cell.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
-                cell.setScrollable_(False)
-            except Exception:
-                pass
+        self._set_label_text(self._text_field, "")
+        self._configure_multiline_field(self._text_field, text_width)
         content.addSubview_(self._text_field)
 
         # Whisper indicator — right side, aligned with first text line
@@ -777,7 +778,7 @@ class StatusOverlay:
             13,
             AppKit.NSColor.secondaryLabelColor(),
             NSMakeRect(
-                WINDOW_WIDTH - RIGHT_PADDING - WHISPER_SIZE,
+                window_width - RIGHT_PADDING - WHISPER_SIZE,
                 whisper_y,
                 WHISPER_SIZE,
                 WHISPER_SIZE,
@@ -790,14 +791,15 @@ class StatusOverlay:
         self._setup_done = True
 
     def _compute_base_frame(self, screen_frame, height):
-        x = screen_frame.origin.x + (screen_frame.size.width - WINDOW_WIDTH) / 2
+        width = _overlay_width_for_screen(screen_frame)
+        x = screen_frame.origin.x + max(0.0, (screen_frame.size.width - width) / 2)
         y = (
             screen_frame.origin.y
             + screen_frame.size.height
             - height
             - TOP_OFFSET
         )
-        return NSMakeRect(x, y, WINDOW_WIDTH, height)
+        return NSMakeRect(x, y, width, height)
 
     def _show_main(self):
         if not self._setup_done:
@@ -873,7 +875,7 @@ class StatusOverlay:
             self._note_field.setStringValue_("")
             self._note_field.setHidden_(True)
         if self._text_field is not None:
-            self._text_field.setStringValue_("")
+            self._set_label_text(self._text_field, "")
             self._text_field.setHidden_(True)
         if self._whisper_view is not None:
             self._whisper_view.setHidden_(True)
@@ -894,22 +896,24 @@ class StatusOverlay:
         display_note = note or STATE_LABELS.get(state, "")
 
         if self._note_field is not None:
-            self._note_field.setStringValue_(display_note)
+            self._set_label_text(self._note_field, display_note)
             self._note_field.setHidden_(not bool(display_note))
 
         if self._text_field is not None:
-            self._text_field.setStringValue_(display_text)
+            self._set_label_text(self._text_field, display_text)
             self._text_field.setHidden_(not bool(display_text))
 
         has_whisper = state == "recording" and whisper
         if self._whisper_view is not None:
             self._whisper_view.setHidden_(not has_whisper)
 
+        window_width = self._current_window_width()
+
         # Recompute text area width (whisper eats into the right side).
         text_right_pad = RIGHT_PADDING + (
             WHISPER_SIZE + WHISPER_TEXT_GAP if has_whisper else 0
         )
-        text_width = WINDOW_WIDTH - TEXT_LEFT - text_right_pad
+        text_width = max(120.0, window_width - TEXT_LEFT - text_right_pad)
 
         # Measure how tall each visual layer needs to be at this width.
         note_height = min(
@@ -945,6 +949,7 @@ class StatusOverlay:
         self._resize_window_main(new_height, animate_resize and self._is_visible)
         self._relayout_main(
             new_height,
+            window_width,
             text_width,
             has_whisper,
             note_height if display_note else 0,
@@ -990,6 +995,91 @@ class StatusOverlay:
             logger.debug(f"Text measure failed: {e}")
             return line_height if empty_height is None else empty_height
 
+    def _current_window_width(self) -> float:
+        try:
+            if self._window is not None:
+                width = float(self._window.frame().size.width)
+                if width > 0:
+                    return width
+        except Exception:
+            pass
+        return float(WINDOW_WIDTH)
+
+    def _set_label_text(self, field, text: str):
+        if field is None:
+            return
+        try:
+            field.setStringValue_(text)
+            return
+        except Exception:
+            pass
+        try:
+            field.setString_(text)
+        except Exception:
+            pass
+
+    def _configure_multiline_field(self, field, width: float):
+        if field is None:
+            return
+        try:
+            field.setUsesSingleLineMode_(False)
+        except Exception:
+            pass
+        try:
+            field.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
+        except Exception:
+            pass
+        try:
+            field.setMaximumNumberOfLines_(0)
+        except Exception:
+            pass
+        try:
+            field.setPreferredMaxLayoutWidth_(width)
+        except Exception:
+            pass
+        try:
+            field.setAllowsDefaultTighteningForTruncation_(False)
+        except Exception:
+            pass
+        try:
+            field.setTextContainerInset_(NSMakeSize(0.0, 0.0))
+        except Exception:
+            pass
+        try:
+            field.setHorizontallyResizable_(False)
+            field.setVerticallyResizable_(False)
+            field.setMinSize_(NSMakeSize(0.0, 0.0))
+            field.setMaxSize_(NSMakeSize(width, 10000.0))
+        except Exception:
+            pass
+        try:
+            container = field.textContainer()
+            if container is not None:
+                container.setWidthTracksTextView_(True)
+                container.setHeightTracksTextView_(False)
+                container.setContainerSize_(NSMakeSize(width, 10000.0))
+                container.setLineFragmentPadding_(0.0)
+                try:
+                    container.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            cell = field.cell()
+        except Exception:
+            cell = None
+        if cell is not None:
+            try:
+                cell.setUsesSingleLineMode_(False)
+                cell.setWraps_(True)
+                cell.setTruncatesLastVisibleLine_(False)
+                cell.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
+                cell.setScrollable_(False)
+                cell.setAllowsDefaultTighteningForTruncation_(False)
+            except Exception:
+                pass
+
     def _resize_window_main(self, new_height: float, animated: bool):
         if self._window is None:
             return
@@ -1022,6 +1112,7 @@ class StatusOverlay:
     def _relayout_main(
         self,
         window_height: float,
+        window_width: float,
         text_width: float,
         has_whisper: bool,
         note_height: float = 0,
@@ -1036,6 +1127,7 @@ class StatusOverlay:
                 self._note_field.setFrame_(
                     NSMakeRect(TEXT_LEFT, note_y, text_width, note_height)
                 )
+                self._configure_multiline_field(self._note_field, text_width)
                 text_top = note_y - (NOTE_TEXT_GAP if has_text else 0)
             else:
                 self._note_field.setFrame_(
@@ -1046,6 +1138,7 @@ class StatusOverlay:
                         NOTE_LINE_HEIGHT,
                     )
                 )
+                self._configure_multiline_field(self._note_field, text_width)
 
         text_field_h = max(0, text_top - TEXT_V_PADDING)
         if self._text_field is not None:
@@ -1057,6 +1150,7 @@ class StatusOverlay:
                     text_field_h,
                 )
             )
+            self._configure_multiline_field(self._text_field, text_width)
 
         # State indicator — pinned at the top so it aligns with the first line.
         indicator_y = content_top - INDICATOR_SIZE
@@ -1076,7 +1170,7 @@ class StatusOverlay:
             whisper_y = content_top - (first_line_h + WHISPER_SIZE) / 2
             self._whisper_view.setFrame_(
                 NSMakeRect(
-                    WINDOW_WIDTH - RIGHT_PADDING - WHISPER_SIZE,
+                    window_width - RIGHT_PADDING - WHISPER_SIZE,
                     whisper_y,
                     WHISPER_SIZE,
                     WHISPER_SIZE,

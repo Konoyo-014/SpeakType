@@ -4,12 +4,12 @@ import logging
 from pathlib import Path
 import AppKit
 import objc
-from Foundation import NSObject, NSMakeRect, NSMakePoint
+from Foundation import NSObject, NSMakeRect
 from .i18n import t
 from .runtime import get_launch_program_args
 
 
-class _FlippedView(AppKit.NSView):
+class _SettingsFlippedView(AppKit.NSView):
     """NSView subclass with top-down Y coordinates for natural layout flow."""
 
     def isFlipped(self):
@@ -97,11 +97,12 @@ TRANSLATE_LANG_OPTIONS = [
 class _ButtonDelegate(NSObject):
     """ObjC delegate to handle button clicks."""
 
-    def initWithCallbacks_cancel_(self, save_cb, cancel_cb):
+    def initWithCallbacks_cancel_section_(self, save_cb, cancel_cb, section_cb):
         self = objc.super(_ButtonDelegate, self).init()
         if self is not None:
             self._save_cb = save_cb
             self._cancel_cb = cancel_cb
+            self._section_cb = section_cb
         return self
 
     def onSave_(self, sender):
@@ -111,6 +112,62 @@ class _ButtonDelegate(NSObject):
     def onCancel_(self, sender):
         if self._cancel_cb:
             self._cancel_cb()
+
+    def onSection_(self, sender):
+        if self._section_cb:
+            try:
+                self._section_cb(int(sender.tag()))
+            except Exception:
+                self._section_cb(0)
+
+
+SETTINGS_SECTIONS = (
+    ("general", "settings_section_general"),
+    ("models", "settings_section_ai"),
+    ("features", "settings_section_features"),
+    ("hotwords", "settings_section_hotwords"),
+    ("system", "settings_section_system"),
+)
+
+
+SETTING_KEYS_BY_SECTION = {
+    "general": (
+        "hotkey",
+        "dictation_mode",
+        "language",
+        "insert_method",
+        "audio_device",
+        "ui_language",
+    ),
+    "models": ("asr_model", "llm_model", "ollama_url"),
+    "features": (
+        "polish_enabled",
+        "voice_commands_enabled",
+        "context_aware_tone",
+        "sound_feedback",
+        "history_enabled",
+        "streaming_preview",
+        "translate_enabled",
+        "translate_target",
+    ),
+    "hotwords": (
+        "hotword_learning_enabled",
+        "hotword_context_enabled",
+        "hotword_auto_corrections_enabled",
+        "hotword_observation_seconds",
+        "hotword_observation_stable_seconds",
+        "hotword_max_context_terms",
+    ),
+    "system": ("plugins_enabled", "auto_start"),
+}
+
+
+def settings_section_ids() -> tuple[str, ...]:
+    return tuple(section_id for section_id, _ in SETTINGS_SECTIONS)
+
+
+def settings_section_keys(section_id: str) -> tuple[str, ...]:
+    return SETTING_KEYS_BY_SECTION.get(section_id, ())
 
 
 class SettingsWindowController:
@@ -122,6 +179,9 @@ class SettingsWindowController:
         self.window = None
         self._controls = {}
         self._delegate = None
+        self._section_view = None
+        self._section_buttons = []
+        self._current_section = "general"
 
     def show(self):
         if self.window and self.window.isVisible():
@@ -133,10 +193,14 @@ class SettingsWindowController:
         self.window.makeKeyAndOrderFront_(None)
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
-    WINDOW_WIDTH = 520
-    WINDOW_HEIGHT = 560
+    WINDOW_WIDTH = 680
+    WINDOW_HEIGHT = 520
     BUTTON_BAR_HEIGHT = 56
-    DOC_HEIGHT = 760
+    SIDEBAR_WIDTH = 160
+    CONTENT_INSET = 24
+    FIELD_LABEL_WIDTH = 176
+    FIELD_WIDTH = 324
+    NUMBER_FIELD_WIDTH = 120
 
     def _build_window(self):
         frame = NSMakeRect(0, 0, self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
@@ -155,92 +219,27 @@ class SettingsWindowController:
 
         content = self.window.contentView()
 
-        # --- Scrollable content area (top of the window) ---
-        scroll_frame = NSMakeRect(
-            0,
-            self.BUTTON_BAR_HEIGHT,
-            self.WINDOW_WIDTH,
-            self.WINDOW_HEIGHT - self.BUTTON_BAR_HEIGHT,
+        # --- Fixed button bar and section delegate ---
+        self._delegate = _ButtonDelegate.alloc().initWithCallbacks_cancel_section_(
+            self._do_save, self._do_cancel, self._show_section_index
         )
-        scroll_view = AppKit.NSScrollView.alloc().initWithFrame_(scroll_frame)
-        scroll_view.setHasVerticalScroller_(True)
-        scroll_view.setHasHorizontalScroller_(False)
-        scroll_view.setBorderType_(AppKit.NSNoBorder)
-        scroll_view.setDrawsBackground_(False)
-        scroll_view.setAutohidesScrollers_(True)
-        scroll_view.setAutoresizingMask_(
+
+        self._build_sidebar(content)
+        self._section_view = _SettingsFlippedView.alloc().initWithFrame_(
+            NSMakeRect(
+                self.SIDEBAR_WIDTH,
+                self.BUTTON_BAR_HEIGHT,
+                self.WINDOW_WIDTH - self.SIDEBAR_WIDTH,
+                self.WINDOW_HEIGHT - self.BUTTON_BAR_HEIGHT,
+            )
+        )
+        self._section_view.setAutoresizingMask_(
             AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
         )
-        content.addSubview_(scroll_view)
+        content.addSubview_(self._section_view)
+        self._render_section("general", sync_current=False)
 
-        # Flipped document view so coordinates grow downward.
-        doc_view = _FlippedView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, self.WINDOW_WIDTH, self.DOC_HEIGHT)
-        )
-        scroll_view.setDocumentView_(doc_view)
-
-        # Populate the document view top-down.
-        y = 14
-
-        # --- General Section ---
-        y = self._add_section_header(doc_view, t("settings_section_general"), y)
-        y = self._add_popup(doc_view, t("settings_hotkey"), "hotkey", _hotkey_options(), y)
-        y = self._add_popup(doc_view, t("settings_dictation_mode"), "dictation_mode", _dictation_mode_options(), y)
-        y = self._add_popup(doc_view, t("settings_language"), "language", _language_options(), y)
-        y = self._add_popup(doc_view, t("settings_insert_method"), "insert_method", _insert_method_options(), y)
-
-        from .devices import list_input_devices
-        device_options = [("", t("device_default"))]
-        for dev in list_input_devices():
-            device_options.append((dev["name"], dev["name"]))
-        y = self._add_popup(doc_view, t("settings_audio_device"), "audio_device", device_options, y)
-        y = self._add_popup(doc_view, t("settings_ui_language"), "ui_language", _ui_language_options(), y)
-
-        y += 6
-
-        # --- AI Models Section ---
-        # Intentionally omits the Whisper backend + Whisper model dropdowns —
-        # SpeakType is Qwen3-ASR only from v2.1 onwards.
-        y = self._add_section_header(doc_view, t("settings_section_ai"), y)
-        y = self._add_popup(doc_view, t("settings_qwen_model"), "asr_model", ASR_MODEL_OPTIONS, y)
-        y = self._add_popup(doc_view, t("settings_llm_model"), "llm_model", LLM_MODEL_OPTIONS, y)
-        y = self._add_text_field(doc_view, t("settings_ollama_url"), "ollama_url", y)
-
-        y += 6
-
-        # --- Features Section ---
-        y = self._add_section_header(doc_view, t("settings_section_features"), y)
-        y = self._add_checkbox(doc_view, t("settings_cb_polish"), "polish_enabled", y)
-        y = self._add_checkbox(doc_view, t("settings_cb_voice_cmd"), "voice_commands_enabled", y)
-        y = self._add_checkbox(doc_view, t("settings_cb_tone"), "context_aware_tone", y)
-        y = self._add_checkbox(doc_view, t("settings_cb_sound"), "sound_feedback", y)
-        y = self._add_checkbox(doc_view, t("settings_cb_history"), "history_enabled", y)
-        y = self._add_checkbox(doc_view, t("settings_cb_streaming"), "streaming_preview", y)
-        y = self._add_checkbox(doc_view, t("settings_cb_translate"), "translate_enabled", y)
-        y = self._add_popup(doc_view, t("settings_translate_to"), "translate_target", TRANSLATE_LANG_OPTIONS, y)
-
-        y += 6
-
-        # --- Plugins Section ---
-        y = self._add_section_header(doc_view, t("settings_section_plugins"), y)
-        y = self._add_checkbox(doc_view, t("settings_cb_plugins"), "plugins_enabled", y)
-
-        y += 6
-
-        # --- System Section ---
-        y = self._add_section_header(doc_view, t("settings_section_system"), y)
-        y = self._add_checkbox(doc_view, t("settings_cb_auto_start"), "auto_start", y)
-
-        # Scroll back to the top now that the document view is populated.
-        scroll_view.contentView().scrollToPoint_(NSMakePoint(0, 0))
-        scroll_view.reflectScrolledClipView_(scroll_view.contentView())
-
-        # --- Fixed button bar (bottom of the window, outside the scroll view) ---
-        self._delegate = _ButtonDelegate.alloc().initWithCallbacks_cancel_(
-            self._do_save, self._do_cancel
-        )
-
-        # Thin separator above the buttons to visually separate them from the scroll.
+        # Thin separator above the fixed action bar.
         sep = AppKit.NSBox.alloc().initWithFrame_(
             NSMakeRect(0, self.BUTTON_BAR_HEIGHT - 1, self.WINDOW_WIDTH, 1)
         )
@@ -248,7 +247,7 @@ class SettingsWindowController:
         sep.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewMaxYMargin)
         content.addSubview_(sep)
 
-        save_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(310, 12, 90, 32))
+        save_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(470, 12, 90, 32))
         save_btn.setTitle_(t("settings_btn_save"))
         save_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         save_btn.setKeyEquivalent_("\r")
@@ -257,7 +256,7 @@ class SettingsWindowController:
         save_btn.setAutoresizingMask_(AppKit.NSViewMinXMargin | AppKit.NSViewMaxYMargin)
         content.addSubview_(save_btn)
 
-        cancel_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(410, 12, 90, 32))
+        cancel_btn = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(570, 12, 90, 32))
         cancel_btn.setTitle_(t("settings_btn_cancel"))
         cancel_btn.setBezelStyle_(AppKit.NSBezelStyleRounded)
         cancel_btn.setKeyEquivalent_("\x1b")
@@ -275,9 +274,103 @@ class SettingsWindowController:
     ROW_HEIGHT = 30
     CHECKBOX_HEIGHT = 24
 
+    def _build_sidebar(self, content):
+        sidebar = _SettingsFlippedView.alloc().initWithFrame_(
+            NSMakeRect(
+                0,
+                self.BUTTON_BAR_HEIGHT,
+                self.SIDEBAR_WIDTH,
+                self.WINDOW_HEIGHT - self.BUTTON_BAR_HEIGHT,
+            )
+        )
+        sidebar.setWantsLayer_(True)
+        layer = sidebar.layer()
+        if layer is not None:
+            try:
+                layer.setBackgroundColor_(
+                    AppKit.NSColor.controlBackgroundColor().colorWithAlphaComponent_(0.62).CGColor()
+                )
+            except Exception:
+                pass
+        content.addSubview_(sidebar)
+
+        y = 18
+        self._section_buttons = []
+        for idx, (_, title_key) in enumerate(SETTINGS_SECTIONS):
+            button = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(16, y, 128, 30))
+            button.setTitle_(t(title_key))
+            button.setBezelStyle_(AppKit.NSBezelStyleRounded)
+            button.setButtonType_(AppKit.NSToggleButton)
+            button.setTag_(idx)
+            button.setTarget_(self._delegate)
+            button.setAction_(b"onSection:")
+            sidebar.addSubview_(button)
+            self._section_buttons.append(button)
+            y += 38
+
+    def _show_section_index(self, index: int):
+        section_ids = settings_section_ids()
+        if index < 0 or index >= len(section_ids):
+            index = 0
+        self._render_section(section_ids[index])
+
+    def _render_section(self, section_id: str, *, sync_current: bool = True):
+        if sync_current:
+            self._sync_visible_controls()
+        self._current_section = section_id
+        self._controls = {}
+        if self._section_view is None:
+            return
+        for subview in list(self._section_view.subviews()):
+            subview.removeFromSuperview()
+
+        section_titles = dict(SETTINGS_SECTIONS)
+        y = 24
+        y = self._add_section_header(self._section_view, t(section_titles[section_id]), y)
+        y += 4
+
+        if section_id == "general":
+            y = self._add_popup(self._section_view, t("settings_hotkey"), "hotkey", _hotkey_options(), y)
+            y = self._add_popup(self._section_view, t("settings_dictation_mode"), "dictation_mode", _dictation_mode_options(), y)
+            y = self._add_popup(self._section_view, t("settings_language"), "language", _language_options(), y)
+            y = self._add_popup(self._section_view, t("settings_insert_method"), "insert_method", _insert_method_options(), y)
+            from .devices import list_input_devices
+            device_options = [("", t("device_default"))]
+            for dev in list_input_devices():
+                device_options.append((dev["name"], dev["name"]))
+            y = self._add_popup(self._section_view, t("settings_audio_device"), "audio_device", device_options, y)
+            y = self._add_popup(self._section_view, t("settings_ui_language"), "ui_language", _ui_language_options(), y)
+        elif section_id == "models":
+            y = self._add_popup(self._section_view, t("settings_qwen_model"), "asr_model", ASR_MODEL_OPTIONS, y)
+            y = self._add_popup(self._section_view, t("settings_llm_model"), "llm_model", LLM_MODEL_OPTIONS, y)
+            y = self._add_text_field(self._section_view, t("settings_ollama_url"), "ollama_url", y)
+        elif section_id == "features":
+            y = self._add_checkbox(self._section_view, t("settings_cb_polish"), "polish_enabled", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_voice_cmd"), "voice_commands_enabled", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_tone"), "context_aware_tone", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_sound"), "sound_feedback", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_history"), "history_enabled", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_streaming"), "streaming_preview", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_translate"), "translate_enabled", y)
+            y = self._add_popup(self._section_view, t("settings_translate_to"), "translate_target", TRANSLATE_LANG_OPTIONS, y)
+        elif section_id == "hotwords":
+            y = self._add_checkbox(self._section_view, t("settings_cb_hotword_learning"), "hotword_learning_enabled", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_hotword_context"), "hotword_context_enabled", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_hotword_corrections"), "hotword_auto_corrections_enabled", y)
+            y = self._add_number_field(self._section_view, t("settings_hotword_observation_seconds"), "hotword_observation_seconds", y, value_type="int", minimum=1, maximum=120)
+            y = self._add_number_field(self._section_view, t("settings_hotword_stable_seconds"), "hotword_observation_stable_seconds", y, value_type="float", minimum=0.2, maximum=10.0)
+            y = self._add_number_field(self._section_view, t("settings_hotword_max_context_terms"), "hotword_max_context_terms", y, value_type="int", minimum=1, maximum=80)
+        elif section_id == "system":
+            y = self._add_checkbox(self._section_view, t("settings_cb_plugins"), "plugins_enabled", y)
+            y = self._add_checkbox(self._section_view, t("settings_cb_auto_start"), "auto_start", y)
+
+        for idx, (candidate_id, _) in enumerate(SETTINGS_SECTIONS):
+            if idx < len(self._section_buttons):
+                self._section_buttons[idx].setState_(1 if candidate_id == section_id else 0)
+
     def _add_section_header(self, view, title, y):
         y += 6  # top breathing room
-        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(20, y, 480, 18))
+        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(24, y, 456, 18))
         label.setStringValue_(title)
         label.setBezeled_(False)
         label.setDrawsBackground_(False)
@@ -286,14 +379,14 @@ class SettingsWindowController:
         label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(13))
         view.addSubview_(label)
 
-        separator = AppKit.NSBox.alloc().initWithFrame_(NSMakeRect(20, y + 20, 480, 1))
+        separator = AppKit.NSBox.alloc().initWithFrame_(NSMakeRect(24, y + 20, 456, 1))
         separator.setBoxType_(AppKit.NSBoxSeparator)
         view.addSubview_(separator)
 
         return y + self.SECTION_HEADER_HEIGHT
 
     def _add_popup(self, view, label_text, key, options, y):
-        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(30, y + 4, 140, 20))
+        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(34, y + 4, self.FIELD_LABEL_WIDTH, 20))
         label.setStringValue_(label_text)
         label.setBezeled_(False)
         label.setDrawsBackground_(False)
@@ -301,7 +394,7 @@ class SettingsWindowController:
         label.setSelectable_(False)
         view.addSubview_(label)
 
-        popup = AppKit.NSPopUpButton.alloc().initWithFrame_(NSMakeRect(175, y + 2, 310, 26))
+        popup = AppKit.NSPopUpButton.alloc().initWithFrame_(NSMakeRect(224, y + 2, self.FIELD_WIDTH, 26))
         current_val = self.config.get(key, "")
         if current_val is None:
             current_val = ""
@@ -317,7 +410,7 @@ class SettingsWindowController:
         return y + self.ROW_HEIGHT
 
     def _add_checkbox(self, view, label_text, key, y):
-        checkbox = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(30, y + 2, 440, 20))
+        checkbox = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(34, y + 2, 458, 20))
         checkbox.setButtonType_(AppKit.NSSwitchButton)
         checkbox.setTitle_(label_text)
         checkbox.setState_(1 if self.config.get(key, False) else 0)
@@ -327,7 +420,7 @@ class SettingsWindowController:
         return y + self.CHECKBOX_HEIGHT
 
     def _add_text_field(self, view, label_text, key, y):
-        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(30, y + 4, 140, 20))
+        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(34, y + 4, self.FIELD_LABEL_WIDTH, 20))
         label.setStringValue_(label_text)
         label.setBezeled_(False)
         label.setDrawsBackground_(False)
@@ -335,15 +428,37 @@ class SettingsWindowController:
         label.setSelectable_(False)
         view.addSubview_(label)
 
-        field = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(175, y + 2, 310, 24))
+        field = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(224, y + 2, self.FIELD_WIDTH, 24))
         field.setStringValue_(str(self.config.get(key, "")))
         view.addSubview_(field)
 
         self._controls[key] = ("text", field, None)
         return y + self.ROW_HEIGHT
 
+    def _add_number_field(self, view, label_text, key, y, *, value_type="int", minimum=None, maximum=None):
+        label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(34, y + 4, self.FIELD_LABEL_WIDTH, 20))
+        label.setStringValue_(label_text)
+        label.setBezeled_(False)
+        label.setDrawsBackground_(False)
+        label.setEditable_(False)
+        label.setSelectable_(False)
+        view.addSubview_(label)
+
+        field = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(224, y + 2, self.NUMBER_FIELD_WIDTH, 24))
+        field.setStringValue_(str(self.config.get(key, "")))
+        view.addSubview_(field)
+
+        self._controls[key] = ("number", field, {
+            "type": value_type,
+            "min": minimum,
+            "max": maximum,
+        })
+        return y + self.ROW_HEIGHT
+
     def _read_controls(self) -> dict:
-        result = dict(self.config)
+        return self._read_visible_controls(dict(self.config))
+
+    def _read_visible_controls(self, result: dict) -> dict:
         for key, (ctrl_type, ctrl, extra) in self._controls.items():
             if ctrl_type == "popup":
                 options = extra
@@ -355,10 +470,28 @@ class SettingsWindowController:
                 result[key] = bool(ctrl.state())
             elif ctrl_type == "text":
                 result[key] = ctrl.stringValue()
+            elif ctrl_type == "number":
+                spec = extra or {}
+                raw = ctrl.stringValue().strip()
+                fallback = self.config.get(key)
+                try:
+                    val = float(raw) if spec.get("type") == "float" else int(float(raw))
+                except (TypeError, ValueError):
+                    val = fallback
+                if val is not None:
+                    if spec.get("min") is not None:
+                        val = max(spec["min"], val)
+                    if spec.get("max") is not None:
+                        val = min(spec["max"], val)
+                result[key] = val
         return result
 
+    def _sync_visible_controls(self):
+        self.config = self._read_visible_controls(dict(self.config))
+
     def _do_save(self):
-        new_config = self._read_controls()
+        self._sync_visible_controls()
+        new_config = dict(self.config)
         auto_start = new_config.pop("auto_start", False)
         _set_auto_start(auto_start)
         if self.on_save:

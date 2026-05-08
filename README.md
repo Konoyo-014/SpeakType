@@ -14,6 +14,7 @@
 - **Adaptive Whisper Mode** -- automatically detects very low-volume speech and boosts it locally during recording, without exposing a manual toggle
 - **Context-aware tone** -- automatically adjusts formality based on the active app (email vs Slack vs code editor)
 - **Post-transcription translation** -- translate output to English, Chinese, Japanese, Korean, Spanish, French, or German
+- **Adaptive hotwords** -- learns terminology from your immediate edits to SpeakType's own inserted text, then biases future local ASR and polishing
 - **Voice commands** -- say "new line", "period", "make it shorter", "fix grammar", "translate to Chinese", etc.
 - **Audio device selection** -- choose your preferred microphone from the menubar
 - **Custom dictionary and snippets** -- define words to always recognize correctly; trigger phrases for text expansion
@@ -187,7 +188,7 @@ Key options:
 |---|---|---|
 | `hotkey` | `"right_cmd"` | Push-to-talk key. Options: `right_cmd`, `left_cmd`, `fn`, `right_alt`, `right_ctrl`, `ctrl+shift+space`, `f5`, `f6` |
 | `dictation_mode` | `"push_to_talk"` | `"push_to_talk"` or `"toggle"` |
-| `asr_backend` | `"qwen"` | Legacy compatibility key. v2.1 always runs Qwen3-ASR and normalizes old Whisper configs back to `qwen` |
+| `asr_backend` | `"qwen"` | Legacy compatibility key. SpeakType always runs Qwen3-ASR and normalizes old Whisper configs back to `qwen` |
 | `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | HuggingFace model ID for Qwen ASR |
 | `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | Ollama model for text polishing |
 | `ollama_url` | `"http://localhost:11434"` | Ollama API endpoint |
@@ -197,11 +198,22 @@ Key options:
 | `translate_target` | `"en"` | Translation target language |
 | `streaming_preview` | `true` | Show real-time transcription overlay |
 | `voice_commands_enabled` | `true` | Enable voice command processing |
+| `hotword_learning_enabled` | `true` | Learn reusable terms from immediate edits to SpeakType insertions |
+| `hotword_context_enabled` | `true` | Feed active learned hotwords into ASR and polish context |
+| `hotword_auto_corrections_enabled` | `true` | Add high-confidence learned wrong-to-right correction pairs |
+| `hotword_observation_seconds` | `18` | Maximum post-insert edit observation window |
+| `hotword_max_context_terms` | `30` | Maximum learned hotwords passed into one recognition turn |
 | `context_aware_tone` | `true` | Adjust polishing tone per-app |
 | `insert_method` | `"paste"` | `"paste"` (clipboard + Cmd+V) or `"type"` (key-by-key) |
 | `plugins_enabled` | `false` | Enable the plugin system |
 | `max_recording_seconds` | `360` | Maximum recording duration (6 min) |
 | `sound_feedback` | `true` | Play sounds on record start/stop |
+
+### Adaptive hotwords
+
+SpeakType learns hotwords locally from the edits you make immediately after a SpeakType insertion. It only watches the short-lived span it just inserted in the current focused input field; it does not observe unrelated typing, password fields, unreadable inputs, or other applications after focus changes. The local Ollama model classifies the edit and stores only reusable terminology facts in `~/.speaktype/hotwords.json`.
+
+Learned hotwords are context hints, not unconditional replacements. On later dictations, SpeakType selects a compact active set by app, scene, language, recency, and confidence, then passes those terms into local Qwen3-ASR when the installed mlx-audio path supports context. The same active terms are also passed to the local polish/translation prompt so exact spelling, capitalization, and hyphenation are preserved when the term is actually present.
 
 ### Custom dictionary
 

@@ -2,6 +2,251 @@
 
 All notable changes to SpeakType will be documented in this file.
 
+## [2.2.22] - 2026-05-08
+
+### Changed
+- Reused already-visible utility windows from the menubar instead of creating duplicate Settings, Dictionary & Snippets, Statistics, Local Diagnostics, or Adaptive Hotwords windows on repeated menu clicks.
+- Preserved in-progress edits and current window focus by raising the existing visible window rather than replacing its controller.
+
+### Tests
+- Added app-level window-controller lifecycle coverage for visible-controller reuse and hidden-controller replacement. Computer Use verified the packaged native controller-reuse path.
+
+## [2.2.21] - 2026-05-08
+
+### Changed
+- Tightened the Local Diagnostics window's fallback layout. When the diagnostic list switches from a populated report back to a running or empty state, the scroll document height is now reset instead of preserving stale blank scroll space.
+- Kept populated diagnostic reports sized from their actual row content while making the no-item state a stable, compact document.
+
+### Tests
+- Added diagnostics-window coverage for empty-row document sizing after stale rows are removed. Computer Use verified the packaged native diagnostics window after a tall report collapsed back to the running fallback state.
+
+## [2.2.20] - 2026-05-08
+
+### Changed
+- Added visible feedback to the Adaptive Hotwords window's Reveal File action. The footer now confirms whether SpeakType revealed the hotword file or opened the configuration folder because no hotword file exists yet.
+- Reused the hotword window footer feedback line for copy, refresh, and reveal actions so action results are visible in one predictable place.
+
+### Tests
+- Added adaptive-hotword window coverage for reveal feedback and missing-file fallback behavior. Computer Use verified the packaged native hotword window with an empty learned-hotword store and Reveal File action.
+
+## [2.2.19] - 2026-05-08
+
+### Changed
+- Tightened the Adaptive Hotwords refresh behavior. Refresh now clears stale Copy Context feedback so old copy or empty-state messages are not shown after the hotword store is reloaded.
+- Reset the hotword list document height when the refreshed list is empty, avoiding blank scroll space left over from a previously populated list.
+
+### Tests
+- Added adaptive-hotword window coverage for refresh feedback clearing and empty-list document sizing. Computer Use verified the packaged native hotword window after copy-empty followed by refresh.
+
+## [2.2.18] - 2026-05-08
+
+### Changed
+- Improved the Adaptive Hotwords window's Copy Context action. When there are no active learned hotwords, SpeakType now shows a clear empty-state message instead of reporting that zero hotwords were copied.
+- Preserved the user's clipboard when no active hotword context exists. The clipboard is only written when there is real hotword context to copy.
+
+### Tests
+- Added adaptive-hotword window coverage for empty and non-empty copy-context states. Computer Use verified the packaged native hotword window with an empty learned-hotword store.
+
+## [2.2.17] - 2026-05-08
+
+### Changed
+- Added a dirty-close guard to the Dictionary & Snippets window. When users have unsaved dictionary, snippet, or correction edits, the first Close action now keeps the window open and shows a clear warning; closing again intentionally discards the changes.
+- Applied the same guard to the native window close control, so the titlebar close button no longer silently drops unsaved dictionary edits.
+
+### Tests
+- Added dictionary-window coverage for the two-step discard confirmation and for resetting that confirmation after another edit. Computer Use verified the packaged native dictionary window with a real unsaved edit.
+
+## [2.2.16] - 2026-05-08
+
+### Changed
+- Rebuilt the setup wizard ASR error transition so a failed model download now re-renders the full Speech Recognition Model step in its error state. This restores the explanatory hint below the error instead of leaving the user with only a red status line and retry buttons.
+- Kept the stale progress-bar removal behavior by clearing and rebuilding the step after a failed download.
+
+### Tests
+- Added setup-wizard coverage for the full ASR error-state rebuild after a failed download. Computer Use verified the packaged macOS wizard with a real missing-model failure.
+
+## [2.2.15] - 2026-05-08
+
+### Changed
+- Expanded the setup wizard's ASR download failure state into a wrapped, variable-height label. Long network, Hugging Face, or model-resolution errors now remain readable instead of being clipped inside a one-line status row.
+- Kept the ASR download hint and action buttons anchored below the expanded error text, preserving the step layout after a retryable failure.
+- Removed the stale progress bar when ASR model download fails, so the error state no longer looks like a download is still running.
+
+### Tests
+- Added setup-wizard layout coverage for short, medium, and long ASR download status text, plus stale-progress removal after errors. Computer Use verified the packaged macOS wizard with a real failed model-download path.
+
+## [2.2.14] - 2026-05-08
+
+### Fixed
+- Hardened setup-wizard ASR model downloading against the `huggingface_hub.snapshot_download` progress-bar `name` argument used by newer Hugging Face Hub releases. The packaged app now absorbs that argument instead of surfacing a raw `Unknown argument(s)` failure when a user clicks `下载模型`.
+- Replaced raw Python download exceptions in the setup wizard with localized, user-readable failure states for downloader incompatibility, missing models, network/Hugging Face service failures, and unknown errors.
+
+### Tests
+- Added model-download coverage for Hugging Face progress-bar compatibility and localized setup-wizard download errors. Computer Use and packaged-Python verification were run against the final macOS bundle.
+
+## [2.2.13] - 2026-05-08
+
+### Changed
+- Localized compact hotkey display names used in the menubar, ready notification, and setup completion step. Chinese UI now shows `快捷键：右 ⌘` and `⌃⇧空格` instead of mixing in `Right ⌘` or `Space`.
+- Localized the About notification body so Chinese UI shows `识别后端` instead of the hardcoded English `Backend:`.
+- The setup wizard no longer auto-starts the ASR model download as soon as the Speech Recognition Model step appears. It now shows an explicit `下载模型` action and a `稍后下载` path before any network download starts.
+- Localized the ASR download preparation status so Chinese UI shows `正在准备` instead of `Starting...`.
+
+### Tests
+- Added coverage for localized hotkey display names, About body text, ASR download status localization, and the setup-wizard download action state. Computer Use verified the packaged macOS setup wizard no longer starts ASR download before the explicit download action.
+
+## [2.2.12] - 2026-05-08
+
+### Changed
+- Localized the setup wizard's Ollama readiness labels. The Text Polishing step now shows `Ollama 安装`, `Ollama 本地服务`, and `润色模型` in the Chinese UI instead of mixing in English labels.
+- Tightened the Chinese LLM model status copy so it consistently refers to the polishing model as `润色模型`.
+- Copy Command buttons in the setup wizard now confirm the action by changing to `已复制` after the command is written to the pasteboard.
+
+### Tests
+- Added setup-wizard coverage for localized LLM-step labels and copy confirmation text. Computer Use verified the real macOS setup wizard LLM step with Ollama installed, service missing, model missing, both copy buttons, and visible copied confirmation.
+
+## [2.2.11] - 2026-05-08
+
+### Changed
+- Localized the Statistics window duration formatting. Chinese UI now shows minutes and seconds as `分钟` and `秒` in the summary, metric tiles, and recent-dictation metadata instead of mixing in `min` and `s`.
+- Localized the recent 7-day activity labels in the Statistics window. Chinese UI now uses `周一` through `周日` instead of English weekday abbreviations.
+
+### Tests
+- Added statistics-window coverage for localized duration units and Chinese weekday labels. Computer Use verified the real macOS Statistics window with populated history, localized summary/metric/activity labels, long recent-dictation rows, scrolling, and fixed footer controls.
+
+## [2.2.10] - 2026-05-08
+
+### Changed
+- Local Diagnostics now uses localized readiness summaries instead of English-only `OK / WARN / FAIL` counters in the Chinese UI.
+- Refresh now has visible in-place progress feedback: the Refresh button changes to a disabled checking state while the diagnostics worker is running, and Copy Report is disabled until a report is available.
+- Copy Report now gives direct confirmation by changing the button title to Copied after the pasteboard write succeeds. Starting a new refresh resets the button to its normal label.
+
+### Fixed
+- Namespaced the native flipped-view classes used by Local Diagnostics and Adaptive Hotwords so PyObjC does not see duplicate Objective-C class names when both modules are loaded in one process.
+
+### Tests
+- Added diagnostics-window coverage for localized summary counts. Computer Use verified the real macOS diagnostics window across localized summary rendering, copy confirmation, disabled running state, and recovery after refresh completion. Full-suite testing also verified the diagnostics/hotwords Objective-C class-name collision is resolved.
+
+## [2.2.9] - 2026-05-08
+
+### Changed
+- Rebuilt Dictionary & Snippets as a native sectioned editor with a left navigation rail for Custom Dictionary, Snippets, and Corrections. Users no longer have to scan one long scrolling form to manage V2.2 hotword-adjacent vocabulary, shortcuts, and correction rules.
+- Added live collection counts and a fixed footer status line. Add, duplicate, empty-input, remove, unsaved, and save states now produce visible feedback instead of silently changing the underlying lists.
+- Preserved full snippet and correction text in the list formatters and widened long-text input rows after real Computer Use testing showed the first rebuild still clipped long snippet bodies.
+
+### Tests
+- Added dictionary-window coverage for section ordering, full-content row formatting, collection counts, and dirty-status reset across section switches. Computer Use verified the real macOS dictionary editor across section switching, long-word entry, visible unsaved state, and save/close behavior.
+
+## [2.2.8] - 2026-05-07
+
+### Changed
+- Rebuilt Preferences as a native sectioned window with a left navigation rail and a single visible settings group at a time. General, AI Models, Features, Adaptive Hotwords, and System no longer live in one long scroll form.
+- Made Adaptive Hotword settings directly reachable without scrolling, with all learning/context/correction toggles and numeric bounds visible in one view.
+- Preserved edits while switching preference sections and clamped numeric hotword settings immediately when a section is left and re-entered.
+
+### Tests
+- Added settings-window coverage for section ownership, numeric clamping, invalid-number fallback, and checkbox state reads. Computer Use verified every Preferences section, hotword numeric clamp behavior, and the save callback path in a real macOS window.
+
+## [2.2.7] - 2026-05-07
+
+### Changed
+- Reworked the adaptive-hotword status window rows to use variable heights. Long learned terms, aliases, and application contexts now remain readable instead of being clipped inside a fixed 88pt row.
+- Widened the adaptive-hotword status window slightly and moved row status metadata under the term, preserving the full term as the primary visual object.
+- Added copy feedback below the hotword list so Copy Context visibly confirms how many active hotwords were copied.
+
+### Tests
+- Added deterministic hotword-row sizing coverage and active-context copy coverage. Computer Use verified the real native hotword window with long terms, long aliases, active/candidate rows, and long application identifiers.
+
+## [2.2.6] - 2026-05-07
+
+### Changed
+- Reworked the recording HUD body text renderer so dictated previews and final inserted text use a native read-only multiline text view instead of a single-line text field. Long CJK and mixed technical terms now wrap visibly instead of being clipped on the right edge.
+- Made the HUD width responsive to the current visible screen frame so the overlay remains inside narrow displays, split-screen windows, and constrained desktop spaces.
+
+### Tests
+- Added responsive HUD geometry coverage. Computer Use verified the real macOS HUD across final-result, recording with active hotwords and whisper indicator, long streaming preview, polishing, and error states.
+
+## [2.2.5] - 2026-05-07
+
+### Changed
+- Added a step counter and progress bar to the first-launch setup wizard so users can see where they are in the setup flow.
+- Increased the setup wizard window height to preserve spacing after adding progress context.
+
+### Fixed
+- Fixed the setup wizard command-copy behavior when multiple commands are visible on the Ollama step. Each Copy Command button now copies the command next to it instead of reusing the last command rendered on the page.
+
+### Tests
+- Added setup-wizard command selection coverage. Computer Use reproduced the incorrect copy behavior, then verified that the Ollama service button copies `ollama serve`, the model button copies the matching `ollama pull ...` command, and the new progress indicator renders through the completion step.
+
+## [2.2.4] - 2026-05-07
+
+### Changed
+- Rebuilt the statistics window as a scrollable native dashboard with a fixed header, fixed bottom action bar, metric tiles, real activity bars, app-frequency bars, and wrapped recent-dictation rows. Long history no longer pushes recent entries below the window.
+- Added a close action to the statistics window footer so it matches the other utility windows instead of relying only on the window chrome.
+- Adjusted dictionary-window spacing so selected-row delete buttons sit below their lists instead of overlapping list borders, and increased the scrollable document height so the correction section is not cramped against the footer.
+
+### Tests
+- Full targeted UI regression checks pass for statistics, dictionary, diagnostics, and hotword windows. Computer Use verified the statistics window before and after the fix, including scrolling to recent dictations, and rechecked Settings, Dictionary, Diagnostics copy-report behavior, and fixed footer controls.
+
+## [2.2.3] - 2026-05-07
+
+### Added
+- Added a native adaptive-hotword status window from the menubar. The window shows learned terms, active/candidate state, confidence, observation count, last update date, aliases, and app context without requiring the user to open or understand `hotwords.json`.
+- Added a Copy Context action that copies only active learned hotwords, making the current ASR adaptation context inspectable without exposing candidates as if they were already trusted.
+- Added a Reveal File action that opens the local SpeakType configuration folder or hotword store for power users while keeping the primary experience read-only and automatic.
+
+### Changed
+- Replaced the menubar hotword reveal shortcut with the new native status window so adaptive learning remains observable but not manually maintained.
+- Tightened the hotword row layout after real macOS testing showed right-side metadata truncation. Status, confidence, observations, date, aliases, and app context now fit as stable multi-line rows.
+
+### Tests
+- Full hotword, diagnostics, dictionary, and app-recording targeted tests pass with 48 tests. Computer Use verified the real native hotword window, Copy Context clipboard output, Reveal File behavior, and the corrected non-truncating row layout.
+
+## [2.2.2] - 2026-05-07
+
+### Changed
+- Improved the local diagnostics window so long detail text and repair actions use variable-height wrapped rows instead of single-line truncation. Chinese action text now breaks naturally before temporary test commands such as `ollama serve`.
+- Expanded and tightened the first-launch setup wizard layout. The wizard now uses wider content columns, right-aligned primary actions, wider status labels, and full-width command boxes so Ollama commands and long model names remain readable.
+- Improved setup command copy controls by placing Copy Command below full-width command fields. Long commands such as `ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude` are now visible and still copy the complete command.
+
+### Tests
+- Full test suite passes with 443 tests. Computer Use verified Diagnostics, Setup Wizard, Preferences, Dictionary, Statistics, and the recording HUD after the UI changes.
+
+## [2.2.1] - 2026-05-07
+
+### Changed
+- Added a menubar hotword status item showing active and learned adaptive hotwords, with a direct reveal action for the local hotword store.
+- Added adaptive-hotword controls to Preferences so learning, recognition context, correction promotion, observation time, edit-stability delay, and per-dictation context size can be changed without hand-editing config JSON.
+- Redesigned the local diagnostics window from a plain text report into a scannable native checklist with severity color, summary counts, details, and repair actions while preserving copyable plain-text export.
+- Added hotword readiness diagnostics covering learning/context state and learned/active counts.
+- Improved the recording overlay so it can show when learned hotword context is active for the current dictation.
+- Tightened dictionary-window section labels and changed snippet/correction removal to use the selected row instead of deleting the last row.
+- Added empty-state rows to the statistics window for no app history and no recent dictations.
+
+### Tests
+- Full test suite passes with 443 tests. New coverage includes selected-row deletion in the dictionary window and the hotword/status UI integration paths added in v2.2.1.
+
+## [2.2.0] - 2026-05-07
+
+### Added
+- Added an adaptive hotword learning system that starts a short local observation window after successful SpeakType insertions and learns only from edits made to the just-inserted text span.
+- Added `HotwordStore` persistence at `~/.speaktype/hotwords.json`, with candidate reinforcement, confidence-based activation, app/scene/language counters, and compact active-context selection.
+- Added local Ollama edit analysis for post-insert learning. The model classifies whether a user edit is a reusable ASR term, spelling/capitalization/hyphenation preference, or a non-reusable content/style edit, then returns strict JSON for the app to validate before saving.
+- Added conservative fallback learning for obvious technical terms when the local LLM is unavailable.
+- Added ASR hotword context wiring for Qwen3-ASR. SpeakType passes active learned hotwords to `mlx_audio.stt.generate.generate_transcription` only when the installed API supports a `context` keyword or accepts arbitrary keyword arguments.
+- Added hotword preservation guidance to local polish, translation, and combined polish+translation prompts so learned terms keep exact spelling when they are actually present.
+
+### Changed
+- Successful insertions now remain eligible for short-term learning while ordinary typing, pure append-only edits, app switches, unreadable focused inputs, and unchanged inserted spans are ignored.
+- High-confidence learned wrong-to-right pairs can be promoted into the existing correction store, while hotwords themselves remain contextual ASR/polish hints rather than unconditional replacements.
+- Streaming preview can now receive the same active hotword context as final transcription without changing the rule that preview remains display-only.
+- Unverified-but-sent insertions once again show a small status notice while preserving the final inserted text preview.
+- Focused input capture now falls back from the system-wide Accessibility focused element to the frontmost application's own `AXFocusedUIElement`, improving insertion verification and post-insert edit observation in apps such as TextEdit.
+- README and README_CN now document adaptive hotwords, local-only learning boundaries, and the new configuration keys.
+
+### Tests
+- Full test suite passes with 438 tests. New coverage includes hotword persistence and prioritization, edit-span extraction, short-lived edit observation, local model JSON learning analysis, ASR context forwarding, polish hotword preservation prompts, focused Accessibility fallback, and app-level learning/correction promotion.
+
 ## [2.1.3] - 2026-04-15
 
 ### Added

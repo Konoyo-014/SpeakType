@@ -401,6 +401,34 @@ def test_press_cmd_v_posts_annotated_session_events(monkeypatch):
     ]
 
 
+def test_get_focused_element_falls_back_to_frontmost_application(monkeypatch):
+    system = object()
+    ax_app = object()
+    focused = object()
+    frontmost = SimpleNamespace(processIdentifier=lambda: 4242)
+    calls = []
+
+    monkeypatch.setattr(inserter, "AXUIElementCreateSystemWide", lambda: system)
+    monkeypatch.setattr(inserter, "AXUIElementCreateApplication", lambda pid: ax_app)
+    monkeypatch.setattr(inserter, "_frontmost_application", lambda: frontmost)
+
+    def fake_copy(owner, attr, out):
+        calls.append((owner, attr))
+        if owner is system:
+            return -25204, None
+        if owner is ax_app:
+            return 0, focused
+        return -1, None
+
+    monkeypatch.setattr(inserter, "AXUIElementCopyAttributeValue", fake_copy)
+
+    assert inserter._get_focused_element() is focused
+    assert calls == [
+        (system, inserter.kAXFocusedUIElementAttribute),
+        (ax_app, inserter.kAXFocusedUIElementAttribute),
+    ]
+
+
 def test_prepare_target_app_activates_and_enables_accessibility(monkeypatch):
     app = SimpleNamespace()
     activations = []

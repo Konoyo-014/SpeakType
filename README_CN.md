@@ -14,6 +14,7 @@
 - **自适应低音量模式** -- 自动检测很轻的说话声并在本地录音链路里增益放大，不暴露手动开关
 - **上下文感知语气** -- 根据当前活跃应用自动调整正式程度（邮件 vs Slack vs 代码编辑器）
 - **转写后翻译** -- 支持翻译为英语、中文、日语、韩语、西班牙语、法语或德语
+- **自适应热词** -- 从你对 SpeakType 刚插入文本的即时修改中学习术语，并用于后续本地 ASR 与润色上下文
 - **语音指令** -- 说"换行"、"句号"、"缩短"、"修正语法"、"翻译成英文"等
 - **音频设备选择** -- 从菜单栏选择麦克风
 - **自定义词典与文本片段** -- 定义始终正确识别的词语；设置触发短语快速插入文本
@@ -193,7 +194,7 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 |---|---|---|
 | `hotkey` | `"right_cmd"` | 按住说话快捷键。选项：`right_cmd`、`left_cmd`、`fn`、`right_alt`、`right_ctrl`、`ctrl+shift+space`、`f5`、`f6` |
 | `dictation_mode` | `"push_to_talk"` | `"push_to_talk"`（按住说话）或 `"toggle"`（按下切换） |
-| `asr_backend` | `"qwen"` | 向后兼容字段。v2.1 固定使用 Qwen3-ASR，旧的 Whisper 配置会在读取/保存时归一化回 `qwen` |
+| `asr_backend` | `"qwen"` | 向后兼容字段。SpeakType 固定使用 Qwen3-ASR，旧的 Whisper 配置会在读取/保存时归一化回 `qwen` |
 | `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | Qwen ASR 的 HuggingFace 模型 ID |
 | `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | 用于文本润色的 Ollama 模型 |
 | `ollama_url` | `"http://localhost:11434"` | Ollama API 地址 |
@@ -203,11 +204,22 @@ ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
 | `translate_target` | `"en"` | 翻译目标语言 |
 | `streaming_preview` | `true` | 显示实时转写浮动窗口 |
 | `voice_commands_enabled` | `true` | 启用语音指令处理 |
+| `hotword_learning_enabled` | `true` | 从 SpeakType 插入后的即时修改中学习可复用术语 |
+| `hotword_context_enabled` | `true` | 把已激活热词传入 ASR 和润色上下文 |
+| `hotword_auto_corrections_enabled` | `true` | 自动加入高置信度的“错法 -> 正确写法”纠错对 |
+| `hotword_observation_seconds` | `18` | 插入后的最长短期观察窗口 |
+| `hotword_max_context_terms` | `30` | 单次识别最多传入的已学习热词数量 |
 | `context_aware_tone` | `true` | 根据应用调整润色语气 |
 | `insert_method` | `"paste"` | `"paste"`（剪贴板 + Cmd+V）或 `"type"`（逐字输入） |
 | `plugins_enabled` | `false` | 启用插件系统 |
 | `max_recording_seconds` | `360` | 最长录音时间（6 分钟） |
 | `sound_feedback` | `true` | 录音开始/停止时播放提示音 |
+
+### 自适应热词
+
+SpeakType 会从你对刚插入文本的即时修改中本地学习热词。它只观察自己刚插入的那一小段文本，不观察无关输入、密码框、不可读取输入框，也不会在应用切换后继续观察。Ollama 本地模型负责判断这次修改是否代表可复用的术语、专名、缩写、代码标识符或大小写/连字符偏好；最终只把结构化学习结果写入 `~/.speaktype/hotwords.json`。
+
+已学习热词不是无条件替换。后续听写开始时，SpeakType 会根据当前应用、场景、语言、近期使用和置信度选出一小组 active hotwords，在当前 mlx-audio 路径支持 `context` 时传给本地 Qwen3-ASR；同一组热词也会传给本地润色/翻译提示，要求模型在确实提到这些术语时保留精确拼写、大小写和连字符。
 
 ### 自定义词典
 

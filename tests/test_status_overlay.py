@@ -8,9 +8,17 @@ its state-machine logic in isolation.
 import time
 
 import pytest
+from Foundation import NSMakeRect
 
 from speaktype import status_overlay
-from speaktype.status_overlay import StatusOverlay, _format_duration, _sanitize_display_text
+from speaktype.status_overlay import (
+    SCREEN_EDGE_PADDING,
+    WINDOW_WIDTH,
+    StatusOverlay,
+    _format_duration,
+    _overlay_width_for_screen,
+    _sanitize_display_text,
+)
 
 
 @pytest.fixture
@@ -84,6 +92,11 @@ class TestStateTransitions:
         assert overlay._text == ""
         assert overlay._level == 0.0
         assert overlay._start_time > 0
+
+    def test_show_recording_accepts_context_note(self, overlay):
+        overlay.show_recording("using 3 hotwords")
+        assert overlay.state == "recording"
+        assert overlay._note == "using 3 hotwords"
 
     def test_show_transcribing_keeps_existing_text(self, overlay):
         overlay.show_recording()
@@ -176,6 +189,23 @@ class TestPartialTextUpdates:
 class TestDisplaySanitization:
     def test_sanitize_display_text_removes_special_tokens_and_controls(self):
         assert _sanitize_display_text("<|startoftranscript|>hi\x00\r\nthere") == "hi\nthere"
+
+
+class TestResponsiveGeometry:
+    def test_overlay_width_uses_default_on_wide_screen(self):
+        screen = NSMakeRect(0, 0, 1440, 900)
+        assert _overlay_width_for_screen(screen) == WINDOW_WIDTH
+
+    def test_overlay_width_keeps_edge_padding_on_narrow_screen(self):
+        screen = NSMakeRect(0, 0, 360, 700)
+        assert _overlay_width_for_screen(screen) == 360 - SCREEN_EDGE_PADDING * 2
+
+    def test_base_frame_stays_inside_tiny_screen(self):
+        overlay = StatusOverlay()
+        screen = NSMakeRect(40, 20, 300, 600)
+        frame = overlay._compute_base_frame(screen, 80)
+        assert frame.origin.x >= screen.origin.x
+        assert frame.origin.x + frame.size.width <= screen.origin.x + screen.size.width
 
 
 class TestAudioLevel:

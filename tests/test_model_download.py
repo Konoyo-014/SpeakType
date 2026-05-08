@@ -1,6 +1,13 @@
-"""Tests for local HuggingFace model cache helpers."""
+"""Tests for local HuggingFace model cache and download progress helpers."""
 
-from speaktype.model_download import get_cached_model_path, is_model_cached
+from io import StringIO
+
+from speaktype.model_download import (
+    format_progress_status,
+    get_cached_model_path,
+    is_model_cached,
+    make_progress_tqdm,
+)
 
 
 def test_cached_model_path_keeps_snapshot_parent_for_symlinked_files(monkeypatch, tmp_path):
@@ -20,3 +27,26 @@ def test_cached_model_path_keeps_snapshot_parent_for_symlinked_files(monkeypatch
 
     assert get_cached_model_path("org/repo") == snapshot_dir
     assert is_model_cached("org/repo") is True
+
+
+def test_format_progress_status_uses_mb_and_gb():
+    assert format_progress_status(5 * 1024 * 1024, 10 * 1024 * 1024) == "5/10 MB"
+    assert format_progress_status(1536 * 1024 * 1024, 3 * 1024 * 1024 * 1024) == "1.5/3.0 GB"
+
+
+def test_progress_tqdm_accepts_huggingface_name_kwarg():
+    calls = []
+    progress = make_progress_tqdm(lambda pct, status: calls.append((round(pct), status)))
+
+    bar = progress(
+        total=10,
+        disable=False,
+        file=StringIO(),
+        unit="B",
+        unit_scale=True,
+        name="huggingface_hub.snapshot_download",
+    )
+    bar.update(5)
+    bar.close()
+
+    assert calls == [(50, "0/0 MB")]

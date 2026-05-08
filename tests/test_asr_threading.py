@@ -57,7 +57,7 @@ class TestLoadIsSingleShot:
         with patch.object(engine, "_transcribe_qwen", return_value="ok") as transcribe_qwen, patch("speaktype.asr.os.unlink") as unlink:
             assert engine.transcribe(fake_audio) == "ok"
 
-        transcribe_qwen.assert_called_once_with(fake_audio, "auto")
+        transcribe_qwen.assert_called_once_with(fake_audio, "auto", "")
         unlink.assert_not_called()
 
     def test_transcribe_file_path_unlinks_after_success(self):
@@ -68,7 +68,7 @@ class TestLoadIsSingleShot:
         with patch.object(engine, "_transcribe_qwen", return_value="ok") as transcribe_qwen, patch("speaktype.asr.os.unlink") as unlink:
             assert engine.transcribe("/tmp/fake.wav") == "ok"
 
-        transcribe_qwen.assert_called_once_with("/tmp/fake.wav", "auto")
+        transcribe_qwen.assert_called_once_with("/tmp/fake.wav", "auto", "")
         unlink.assert_called_once_with("/tmp/fake.wav")
 
     def test_transcribe_serializes_inference_calls(self):
@@ -79,7 +79,7 @@ class TestLoadIsSingleShot:
         max_active = 0
         active_lock = threading.Lock()
 
-        def fake_transcribe(_audio, _language):
+        def fake_transcribe(_audio, _language, _hotword_context=""):
             nonlocal active, max_active
             with active_lock:
                 active += 1
@@ -175,7 +175,7 @@ class TestLoadIsSingleShot:
         engine.backend = "qwen"
         calls = []
 
-        monkeypatch.setattr(engine, "_transcribe_qwen", lambda audio, language: calls.append((len(audio), language)) or "")
+        monkeypatch.setattr(engine, "_transcribe_qwen", lambda audio, language, hotword_context="": calls.append((len(audio), language)) or "")
 
         engine._warmup_qwen()
 
@@ -191,7 +191,7 @@ class TestLoadIsSingleShot:
         monkeypatch.setattr(
             engine,
             "_transcribe_qwen",
-            lambda audio, language: (_ for _ in ()).throw(AssertionError("warmup should not run")),
+            lambda audio, language, hotword_context="": (_ for _ in ()).throw(AssertionError("warmup should not run")),
         )
 
         try:
@@ -200,3 +200,20 @@ class TestLoadIsSingleShot:
             engine.release_inference()
 
         assert engine._warmed is False
+
+    def test_qwen_transcribe_passes_hotword_context_when_supported(self, tmp_path, monkeypatch):
+        engine = ASREngine()
+        engine.model = object()
+        output_stem = str(tmp_path / "mlx-output")
+        calls = []
+
+        def fake_generate_transcription(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(text="ok")
+
+        monkeypatch.setattr("speaktype.asr._make_temp_transcript_output_path", lambda: output_stem)
+        monkeypatch.setattr("mlx_audio.stt.generate.generate_transcription", fake_generate_transcription)
+
+        assert engine._transcribe_qwen(object(), "auto", "Qwen3-ASR PyObjC") == "ok"
+
+        assert calls[0]["context"] == "Qwen3-ASR PyObjC"

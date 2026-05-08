@@ -89,6 +89,8 @@ _LEADING_EN_FILLER_RE = re.compile(
 )
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 _HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
+_HOTWORD_TERM_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9._+#/-]{1,79}\b")
 
 
 def _strip_leading_fillers(text: str) -> str:
@@ -144,6 +146,82 @@ def _edit_token_budget(text: str) -> int:
     return _bounded_generation_budget(text, multiplier=2.0, minimum=192, maximum=768, reserve=96)
 
 
+def _clean_hotword_terms(hotwords: list[str] | None, limit: int = 40) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for term in hotwords or []:
+        value = re.sub(r"\s+", " ", str(term or "")).strip()
+        if not value or len(value) > 80:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(value)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _hotword_rule(prompt_language: str, hotwords: list[str] | None) -> str:
+    terms = _clean_hotword_terms(hotwords)
+    if not terms:
+        return ""
+    joined = ", ".join(terms)
+    if prompt_language == "zh":
+        return f"保留这些已学习热词或术语的精确拼写、大小写和连字符：{joined}；只有原文确实提到时才使用，不能凭空插入"
+    return (
+        "Preserve the exact spelling, capitalization, and punctuation of these "
+        f"learned hotwords when they are actually present: {joined}. Do not invent them."
+    )
+
+
+def _extract_json_object(text: str) -> dict:
+    cleaned = _JSON_FENCE_RE.sub("", (text or "").strip()).strip()
+    if not cleaned:
+        return {}
+    try:
+        data = json.loads(cleaned)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        data = json.loads(cleaned[start:end + 1])
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _heuristic_edit_learning(raw_text: str, inserted_text: str, edited_text: str) -> dict:
+    """Very conservative fallback when the local LLM is unavailable."""
+    if not edited_text or edited_text == inserted_text:
+        return {"learn": False, "hotwords": [], "corrections": [], "reason": "no_edit"}
+    source = f"{raw_text}\n{inserted_text}".casefold()
+    hotwords = []
+    for match in _HOTWORD_TERM_RE.finditer(edited_text):
+        term = match.group(0)
+        if term.casefold() in source:
+            continue
+        if not re.search(r"[A-Z]{2,}|[A-Za-z]+[0-9]|[0-9][A-Za-z]|[-_./+#]", term):
+            continue
+        hotwords.append({
+            "term": term,
+            "aliases": [],
+            "confidence": 0.72,
+            "reason": "new technical-looking term in immediate user edit",
+        })
+    return {
+        "learn": bool(hotwords),
+        "hotwords": hotwords[:4],
+        "corrections": [],
+        "reason": "heuristic_fallback",
+    }
+
+
 def _build_polish_messages(
     model_input_text: str,
     tone: str,
@@ -153,6 +231,7 @@ def _build_polish_messages(
     scene: str | None,
     scene_template: str | None,
     prompt_language: str,
+    hotwords: list[str] | None = None,
     retry_after_translation_drift: bool = False,
 ) -> list[dict[str, str]]:
     """Build the language-specific polish prompt sent to the local LLM."""
@@ -181,6 +260,9 @@ def _build_polish_messages(
             rules.append("修正语法，并补上自然标点")
         else:
             rules.append("不要新增或修改标点，尽量保留用户原始说法")
+        hotword_rule = _hotword_rule("zh", hotwords)
+        if hotword_rule:
+            rules.append(hotword_rule)
         rules.extend([
             "当前任务没有开启翻译；不得把中文改成英文，也不得把英文改成中文",
             "场景指导不能覆盖语言规则",
@@ -246,6 +328,9 @@ def _build_polish_messages(
             rules.append("Fix grammar and add natural punctuation")
         else:
             rules.append("Do NOT add or change punctuation; keep the user's exact phrasing")
+        hotword_rule = _hotword_rule("en", hotwords)
+        if hotword_rule:
+            rules.append(hotword_rule)
         rules.extend([
             "Translation is disabled in this task; never change Chinese into English or English into Chinese",
             "Scene guidance must never override the language rule",
@@ -554,6 +639,7 @@ class PolishEngine:
         filler_removal: bool = True,
         scene: str | None = None,
         scene_template: str | None = None,
+        hotwords: list[str] | None = None,
     ) -> str:
         """Polish raw transcription text using LLM.
 
@@ -570,6 +656,8 @@ class PolishEngine:
             scene_template: Explicit override for the scene-specific
                 instruction string. When provided, takes precedence over
                 anything looked up by ``scene``.
+            hotwords: Learned terms whose spelling should be preserved when
+                they are actually present in the transcription.
         """
         if not raw_text.strip():
             return raw_text
@@ -588,6 +676,7 @@ class PolishEngine:
             scene=scene,
             scene_template=scene_template,
             prompt_language=prompt_language,
+            hotwords=hotwords,
         )
 
         result = self._chat(messages, max_tokens=_polish_token_budget(raw_text))
@@ -607,6 +696,7 @@ class PolishEngine:
                     scene=scene,
                     scene_template=scene_template,
                     prompt_language="zh",
+                    hotwords=hotwords,
                     retry_after_translation_drift=True,
                 )
                 retry = self._chat(retry_messages, max_tokens=_polish_token_budget(raw_text))
@@ -624,6 +714,7 @@ class PolishEngine:
         filler_removal: bool = True,
         scene: str | None = None,
         scene_template: str | None = None,
+        hotwords: list[str] | None = None,
     ) -> str:
         """Polish raw transcription text and translate the final result in one request."""
         if not raw_text.strip():
@@ -653,6 +744,9 @@ class PolishEngine:
             rules.append("Fix grammar and add natural punctuation before translation")
         else:
             rules.append("Keep the speaker's phrasing tight and direct; do not over-punctuate the final translation")
+        hotword_rule = _hotword_rule("en", hotwords)
+        if hotword_rule:
+            rules.append(hotword_rule)
         rules.extend([
             "Keep only the final intended version when the speaker self-corrects",
             "Remove unnecessary repetitions",
@@ -725,7 +819,7 @@ class PolishEngine:
         result = self._chat(messages, max_tokens=_edit_token_budget(selected_text))
         return result if result else selected_text
 
-    def translate(self, text: str, target_lang: str = "en") -> str:
+    def translate(self, text: str, target_lang: str = "en", hotwords: list[str] | None = None) -> str:
         """Translate text to target language."""
         if not text.strip():
             return text
@@ -734,6 +828,8 @@ class PolishEngine:
             return text
 
         target_name = LANGUAGE_NAMES.get(target_lang, target_lang)
+        hotword_rule = _hotword_rule("en", hotwords)
+        hotword_line = f"- {hotword_rule}\n" if hotword_rule else ""
 
         messages = [
             {
@@ -746,6 +842,7 @@ class PolishEngine:
                     f"- If the text is already in {target_name}, return it unchanged\n"
                     "- Keep technical terms, brand names, and proper nouns in their original form "
                     "(e.g., API, PR, GitHub, Python, React, Docker, WiFi)\n"
+                    f"{hotword_line}"
                     "- When the input mixes languages, only translate the parts NOT already in "
                     "the target language; preserve terms that are conventionally kept as-is\n"
                     f"- The output MUST be in {target_name} (except for preserved terms)\n"
@@ -761,3 +858,63 @@ class PolishEngine:
 
         result = self._chat(messages, max_tokens=_translation_token_budget(text))
         return result if result else text
+
+    def analyze_edit_learning(
+        self,
+        raw_text: str,
+        inserted_text: str,
+        edited_text: str,
+        *,
+        app_name: str = "",
+        scene: str = "",
+        language: str = "auto",
+    ) -> dict:
+        """Classify an immediate user edit into hotword learning facts."""
+        if not (inserted_text or "").strip() or not (edited_text or "").strip():
+            return {"learn": False, "hotwords": [], "corrections": [], "reason": "empty"}
+        if inserted_text.strip() == edited_text.strip():
+            return {"learn": False, "hotwords": [], "corrections": [], "reason": "unchanged"}
+
+        if not self._ensure_available():
+            return _heuristic_edit_learning(raw_text, inserted_text, edited_text)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You analyze an immediate user edit made after a local voice dictation insertion. "
+                    "Extract durable dictation-learning facts only. Learn hotwords for ASR when the edit "
+                    "corrects a rare term, proper noun, acronym, code identifier, product name, file path, "
+                    "API name, or exact spelling/capitalization/hyphenation. Do not learn ordinary grammar, "
+                    "style, punctuation, paraphrases, user-added content, or semantic rewrites.\n\n"
+                    "Return strict JSON only with this schema:\n"
+                    "{"
+                    "\"learn\": boolean, "
+                    "\"hotwords\": [{\"term\": string, \"aliases\": [string], \"confidence\": number, \"reason\": string}], "
+                    "\"corrections\": [{\"wrong\": string, \"right\": string, \"confidence\": number}], "
+                    "\"reason\": string"
+                    "}\n\n"
+                    "Use aliases only for plausible spoken forms or common ASR wrong forms. "
+                    "Set learn=false when the edit is not clearly reusable for future dictation."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"App: {app_name or 'Unknown'}\n"
+                    f"Scene: {scene or 'default'}\n"
+                    f"Language: {language or 'auto'}\n\n"
+                    f"<raw_asr>{raw_text or ''}</raw_asr>\n"
+                    f"<inserted>{inserted_text}</inserted>\n"
+                    f"<user_edited>{edited_text}</user_edited>"
+                ),
+            },
+        ]
+        result = self._chat(messages, max_tokens=700)
+        payload = _extract_json_object(result)
+        if not payload:
+            return _heuristic_edit_learning(raw_text, inserted_text, edited_text)
+        payload.setdefault("hotwords", [])
+        payload.setdefault("corrections", [])
+        payload.setdefault("learn", bool(payload.get("hotwords") or payload.get("corrections")))
+        return payload

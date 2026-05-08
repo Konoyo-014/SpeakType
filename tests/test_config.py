@@ -19,6 +19,8 @@ class TestDefaultConfig:
             "audio_device", "streaming_preview", "plugins_enabled",
             "last_seen_version", "last_seen_bundle_fingerprint",
             "permission_restart_pending_after_refresh",
+            "hotword_learning_enabled", "hotword_context_enabled",
+            "hotword_auto_corrections_enabled",
         ]
         for key in required:
             assert key in DEFAULT_CONFIG, f"Missing config key: {key}"
@@ -34,6 +36,8 @@ class TestDefaultConfig:
         assert DEFAULT_CONFIG["last_seen_version"] == ""
         assert DEFAULT_CONFIG["last_seen_bundle_fingerprint"] == ""
         assert DEFAULT_CONFIG["permission_restart_pending_after_refresh"] is False
+        assert DEFAULT_CONFIG["hotword_learning_enabled"] is True
+        assert DEFAULT_CONFIG["hotword_context_enabled"] is True
 
 
 class TestLoadSaveConfig:

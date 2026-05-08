@@ -72,7 +72,7 @@ class StreamingTranscriber:
     # Lifecycle                                                          #
     # ------------------------------------------------------------------ #
 
-    def start(self, language: str = "auto"):
+    def start(self, language: str = "auto", hotword_context: str = ""):
         """Start the background streaming loop."""
         with self._lock:
             self._audio_buffer = []
@@ -82,7 +82,7 @@ class StreamingTranscriber:
             self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._stream_loop,
-            args=(language,),
+            args=(language, hotword_context or ""),
             daemon=True,
         )
         self._thread.start()
@@ -116,7 +116,7 @@ class StreamingTranscriber:
     # Internal loop                                                       #
     # ------------------------------------------------------------------ #
 
-    def _stream_loop(self, language: str):
+    def _stream_loop(self, language: str, hotword_context: str = ""):
         """Background loop that runs partial transcriptions periodically."""
         try:
             import numpy as np  # local import; avoids module-load cost on cold paths
@@ -170,13 +170,20 @@ class StreamingTranscriber:
 
             try:
                 if has_native_stream:
-                    self._run_native_stream(model, audio_data, language, reason=reason)
+                    self._run_native_stream(model, audio_data, language, hotword_context, reason=reason)
                 else:
-                    self._run_chunked(audio_data, language, reason=reason)
+                    self._run_chunked(audio_data, language, hotword_context, reason=reason)
             except Exception as e:
                 logger.debug(f"Partial transcription failed: {e}")
 
-    def _run_native_stream(self, model, audio_data, language: str, reason: str = "preview"):
+    def _run_native_stream(
+        self,
+        model,
+        audio_data,
+        language: str,
+        hotword_context: str = "",
+        reason: str = "preview",
+    ):
         """Use the model's own streaming API when available.
 
         mlx-audio's ``stream_transcribe`` yields one decoded token at a
@@ -187,6 +194,13 @@ class StreamingTranscriber:
         kwargs = {"audio": audio_data, "max_tokens": 8192}
         if language and language != "auto":
             kwargs["language"] = language
+        if hotword_context:
+            try:
+                from .asr import _call_accepts_keyword
+                if _call_accepts_keyword(model.stream_transcribe, "context"):
+                    kwargs["context"] = hotword_context
+            except Exception:
+                pass
 
         if not self._acquire_preview_slot():
             return
@@ -205,7 +219,13 @@ class StreamingTranscriber:
         finally:
             self._release_preview_slot()
 
-    def _run_chunked(self, audio_data, language: str, reason: str = "preview"):
+    def _run_chunked(
+        self,
+        audio_data,
+        language: str,
+        hotword_context: str = "",
+        reason: str = "preview",
+    ):
         """Fallback path: re-run full transcription on the buffer so far."""
         if getattr(self._asr, "backend", "qwen") != "qwen":
             logger.debug(
@@ -216,7 +236,7 @@ class StreamingTranscriber:
 
         try:
             from mlx_audio.stt.generate import generate_transcription
-            from .asr import _cleanup_transcript_outputs, _make_temp_transcript_output_path
+            from .asr import _call_accepts_keyword, _cleanup_transcript_outputs, _make_temp_transcript_output_path
         except Exception as e:
             logger.debug(f"mlx_audio not available for chunked streaming: {e}")
             return
@@ -233,6 +253,8 @@ class StreamingTranscriber:
         }
         if language and language != "auto":
             kwargs["language"] = language
+        if hotword_context and _call_accepts_keyword(generate_transcription, "context"):
+            kwargs["context"] = hotword_context
 
         try:
             result = generate_transcription(**kwargs)

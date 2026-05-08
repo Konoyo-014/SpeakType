@@ -4,6 +4,7 @@ import os
 import logging
 import tempfile
 import threading
+import inspect
 
 logger = logging.getLogger("speaktype.asr")
 
@@ -33,6 +34,16 @@ def _cleanup_transcript_outputs(output_path: str):
             os.unlink(f"{output_path}{suffix}")
         except OSError:
             pass
+
+
+def _call_accepts_keyword(func, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    if keyword in signature.parameters:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
 
 
 class ASREngine:
@@ -178,7 +189,7 @@ class ASREngine:
         logger.info("Whisper not available, falling back to Qwen ASR")
         self._load_qwen()
 
-    def transcribe(self, audio_input, language: str = "auto") -> str:
+    def transcribe(self, audio_input, language: str = "auto", hotword_context: str = "") -> str:
         """Transcribe an audio file path or in-memory audio buffer to text."""
         if not self._loaded:
             self.load()
@@ -188,9 +199,9 @@ class ASREngine:
         try:
             try:
                 if self.backend == "whisper":
-                    return self._transcribe_whisper(audio_input, language)
+                    return self._transcribe_whisper(audio_input, language, hotword_context)
                 else:
-                    return self._transcribe_qwen(audio_input, language)
+                    return self._transcribe_qwen(audio_input, language, hotword_context)
             finally:
                 self.release_inference()
         finally:
@@ -233,7 +244,7 @@ class ASREngine:
         finally:
             self.release_inference()
 
-    def _transcribe_qwen(self, audio_input, language: str) -> str:
+    def _transcribe_qwen(self, audio_input, language: str, hotword_context: str = "") -> str:
         """Transcribe using Qwen3-ASR via mlx-audio."""
         from mlx_audio.stt.generate import generate_transcription
 
@@ -246,6 +257,8 @@ class ASREngine:
         }
         if language and language != "auto":
             kwargs["language"] = language
+        if hotword_context and _call_accepts_keyword(generate_transcription, "context"):
+            kwargs["context"] = hotword_context
 
         try:
             result = generate_transcription(**kwargs)
@@ -260,29 +273,33 @@ class ASREngine:
             return result["text"].strip()
         return str(result).strip()
 
-    def _transcribe_whisper(self, audio_path: str, language: str) -> str:
+    def _transcribe_whisper(self, audio_path: str, language: str, hotword_context: str = "") -> str:
         """Transcribe using Whisper (mlx-whisper or openai-whisper)."""
         if isinstance(self.model, dict) and self.model.get("backend") == "mlx_whisper":
-            return self._transcribe_mlx_whisper(audio_path, language)
+            return self._transcribe_mlx_whisper(audio_path, language, hotword_context)
         else:
-            return self._transcribe_openai_whisper(audio_path, language)
+            return self._transcribe_openai_whisper(audio_path, language, hotword_context)
 
-    def _transcribe_mlx_whisper(self, audio_path: str, language: str) -> str:
+    def _transcribe_mlx_whisper(self, audio_path: str, language: str, hotword_context: str = "") -> str:
         """Transcribe using mlx-whisper."""
         import mlx_whisper
 
         kwargs = {"path_or_hf_repo": self.model["model_name"]}
         if language and language != "auto":
             kwargs["language"] = language
+        if hotword_context:
+            kwargs["initial_prompt"] = hotword_context
 
         result = mlx_whisper.transcribe(audio_path, **kwargs)
         return result.get("text", "").strip()
 
-    def _transcribe_openai_whisper(self, audio_path: str, language: str) -> str:
+    def _transcribe_openai_whisper(self, audio_path: str, language: str, hotword_context: str = "") -> str:
         """Transcribe using openai-whisper."""
         kwargs = {"fp16": False}
         if language and language != "auto":
             kwargs["language"] = language
+        if hotword_context:
+            kwargs["initial_prompt"] = hotword_context
 
         result = self.model.transcribe(audio_path, **kwargs)
         return result.get("text", "").strip()

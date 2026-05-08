@@ -6,6 +6,42 @@ from pathlib import Path
 logger = logging.getLogger("speaktype.model_download")
 
 
+def format_progress_status(done_bytes: float, total_bytes: float) -> str:
+    if total_bytes <= 0:
+        return ""
+    done_mb = done_bytes / (1024 * 1024)
+    total_mb = total_bytes / (1024 * 1024)
+    if total_mb > 1024:
+        return f"{done_mb / 1024:.1f}/{total_mb / 1024:.1f} GB"
+    return f"{done_mb:.0f}/{total_mb:.0f} MB"
+
+
+def make_progress_tqdm(callback=None):
+    from tqdm.auto import tqdm as auto_tqdm
+
+    class ProgressTqdm(auto_tqdm):
+        """tqdm wrapper that forwards byte progress to the setup wizard."""
+
+        def __init__(self, *args, **kwargs):
+            # huggingface_hub>=1.8 passes a logging/telemetry-only name kwarg
+            # that some tqdm variants reject in packaged macOS builds.
+            kwargs.pop("name", None)
+            super().__init__(*args, **kwargs)
+            self._callback = callback
+
+        def update(self, n=1):
+            super().update(n)
+            if self._callback and self.total and self.total > 0:
+                pct = min(self.n / self.total * 100, 100.0)
+                status = format_progress_status(self.n, self.total)
+                try:
+                    self._callback(pct, status)
+                except Exception:
+                    pass
+
+    return ProgressTqdm
+
+
 def is_model_cached(model_name: str) -> bool:
     """Check if a HuggingFace model is already in the local cache."""
     return get_cached_model_path(model_name) is not None
@@ -34,30 +70,6 @@ def download_model_with_progress(model_name: str, callback=None):
                   progress_pct is 0.0-100.0, status is a human-readable string.
     """
     from huggingface_hub import snapshot_download
-    from tqdm.auto import tqdm as auto_tqdm
-
-    class ProgressTqdm(auto_tqdm):
-        """Custom tqdm that forwards progress to a callback."""
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._callback = callback
-
-        def update(self, n=1):
-            super().update(n)
-            if self._callback and self.total and self.total > 0:
-                pct = min(self.n / self.total * 100, 100.0)
-                # Format size info
-                done_mb = self.n / (1024 * 1024)
-                total_mb = self.total / (1024 * 1024)
-                if total_mb > 1024:
-                    status = f"{done_mb / 1024:.1f}/{total_mb / 1024:.1f} GB"
-                else:
-                    status = f"{done_mb:.0f}/{total_mb:.0f} MB"
-                try:
-                    self._callback(pct, status)
-                except Exception:
-                    pass
 
     if callback:
         callback(0.0, "Starting...")
@@ -66,7 +78,7 @@ def download_model_with_progress(model_name: str, callback=None):
     try:
         snapshot_download(
             model_name,
-            tqdm_class=ProgressTqdm,
+            tqdm_class=make_progress_tqdm(callback),
         )
         if callback:
             callback(100.0, "Done")

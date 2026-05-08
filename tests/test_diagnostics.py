@@ -1,7 +1,32 @@
 """Tests for local readiness diagnostics."""
 
 from speaktype import diagnostics
+from speaktype import diagnostics_window
 from speaktype.inserter import FocusedInputDiagnostic
+
+
+class _FakeSubview:
+    def __init__(self):
+        self.removed = False
+
+    def removeFromSuperview(self):
+        self.removed = True
+
+
+class _FakeRowsView:
+    def __init__(self):
+        self._subviews = [_FakeSubview()]
+        self.added = []
+        self.frame = None
+
+    def subviews(self):
+        return list(self._subviews)
+
+    def addSubview_(self, view):
+        self.added.append(view)
+
+    def setFrame_(self, frame):
+        self.frame = frame
 
 
 def test_check_ollama_reports_missing_install_without_network(monkeypatch):
@@ -97,6 +122,26 @@ def test_check_target_input_reports_post_event_denied(monkeypatch):
     assert "Codex" in item.detail
 
 
+def test_check_hotwords_reports_learning_state(monkeypatch):
+    class FakeHotwordStore:
+        def get_all(self):
+            return [{"term": "Qwen3-ASR", "active": True}, {"term": "mlx-audio", "active": False}]
+
+    monkeypatch.setattr(diagnostics, "HotwordStore", FakeHotwordStore)
+
+    item = diagnostics.check_hotwords(
+        {
+            "hotword_learning_enabled": True,
+            "hotword_context_enabled": True,
+        }
+    )
+
+    assert item.key == "hotwords"
+    assert item.status == "ok"
+    assert "2" in item.detail
+    assert "1" in item.detail
+
+
 def test_render_diagnostics_text_includes_status_and_action():
     items = [
         diagnostics.DiagnosticItem(
@@ -113,3 +158,31 @@ def test_render_diagnostics_text_includes_status_and_action():
     assert "[FAIL] Ollama model" in text
     assert "Missing qwen2.5:3b" in text
     assert "ollama pull qwen2.5:3b" in text
+
+
+def test_diagnostics_window_summary_is_localized():
+    items = [
+        diagnostics.DiagnosticItem("ok", "ok", "OK", "ready"),
+        diagnostics.DiagnosticItem("warn", "warn", "Warn", "attention"),
+        diagnostics.DiagnosticItem("fail", "fail", "Fail", "broken"),
+    ]
+
+    summary = diagnostics_window.diagnostics_summary_text(items, "fallback")
+
+    assert "正常 1" in summary
+    assert "注意 1" in summary
+    assert "失败 1" in summary
+
+
+def test_diagnostics_window_empty_rows_reset_document_height():
+    controller = diagnostics_window.DiagnosticsWindowController({})
+    rows = _FakeRowsView()
+    controller._rows_view = rows
+    controller._label = lambda *args, **kwargs: object()
+    controller._font_weight = lambda name: 0.0
+
+    controller._render_rows([], "正在检查本地状态...")
+
+    assert rows._subviews[0].removed is True
+    assert rows.added
+    assert rows.frame.size.height == 364

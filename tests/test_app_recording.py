@@ -56,6 +56,51 @@ def _make_app():
     return app
 
 
+class _FakeWindow:
+    def __init__(self, visible):
+        self._visible = visible
+
+    def isVisible(self):
+        return self._visible
+
+
+class _FakeWindowController:
+    def __init__(self, visible):
+        self.window = _FakeWindow(visible)
+        self.show_count = 0
+
+    def show(self):
+        self.show_count += 1
+
+
+def test_show_or_create_window_controller_reuses_visible_controller():
+    current = _FakeWindowController(True)
+    created = []
+
+    result = app_mod._show_or_create_window_controller(
+        current,
+        lambda: created.append(_FakeWindowController(True)) or created[-1],
+    )
+
+    assert result is current
+    assert current.show_count == 1
+    assert created == []
+
+
+def test_show_or_create_window_controller_replaces_hidden_controller():
+    current = _FakeWindowController(False)
+    created = []
+
+    result = app_mod._show_or_create_window_controller(
+        current,
+        lambda: created.append(_FakeWindowController(True)) or created[-1],
+    )
+
+    assert result is created[0]
+    assert result.show_count == 1
+    assert current.show_count == 0
+
+
 def test_start_recording_does_not_show_overlay_when_recorder_fails(monkeypatch):
     app = _make_app()
     notifications = []
@@ -785,6 +830,17 @@ def test_do_setup_starts_llm_readiness_before_asr_load(monkeypatch):
     assert events.index(("thread_start", "SpeakTypeLLMSetup")) < events.index("asr_load")
 
 
+def test_about_notification_body_is_localized():
+    try:
+        app_mod.set_language("zh")
+        assert app_mod.about_notification_body("Qwen3-ASR") == "识别后端：Qwen3-ASR\n© 2025-2026 SpeakType"
+
+        app_mod.set_language("en")
+        assert app_mod.about_notification_body("Qwen3-ASR") == "Backend: Qwen3-ASR\n© 2025-2026 SpeakType"
+    finally:
+        app_mod.set_language("zh")
+
+
 def test_process_audio_combines_polish_and_translate_when_plugins_disabled(monkeypatch):
     app = _make_app()
     app.config.update(
@@ -837,11 +893,94 @@ def test_process_audio_combines_polish_and_translate_when_plugins_disabled(monke
                 "filler_removal": True,
                 "scene": None,
                 "scene_template": None,
+                "hotwords": [],
             },
         )
     ]
     assert inserted == [("你好，世界", "paste", "Notes", "com.apple.Notes")]
     assert remembered == [("你好，世界", {"name": "Notes", "bundle_id": "com.apple.Notes"})]
+
+
+def test_handle_observed_edit_learns_hotword_and_correction():
+    app = _make_app()
+    learned_payloads = []
+    added_corrections = []
+    app.config["hotword_auto_corrections_enabled"] = True
+    app.polish_engine = SimpleNamespace(
+        analyze_edit_learning=lambda *args, **kwargs: {
+            "learn": True,
+            "hotwords": [
+                {"term": "Qwen3-ASR", "aliases": ["cute three asr"], "confidence": 0.92}
+            ],
+            "corrections": [
+                {"wrong": "cute three asr", "right": "Qwen3-ASR", "confidence": 0.91}
+            ],
+        }
+    )
+    app.hotwords = SimpleNamespace(
+        learn_from_payload=lambda payload, **kwargs: learned_payloads.append((payload, kwargs)) or [{"term": "Qwen3-ASR"}]
+    )
+    app.corrections = SimpleNamespace(add=lambda wrong, right: added_corrections.append((wrong, right)))
+    observation = app_mod.EditObservation(
+        raw_text="cute three asr",
+        inserted_text="cute three asr",
+        edited_text="Qwen3-ASR",
+        app_info={"name": "Codex", "bundle_id": "com.openai.codex"},
+        scene="code",
+        language="en",
+    )
+
+    app_mod.SpeakTypeApp._handle_observed_edit(app, observation)
+
+    assert learned_payloads[0][0]["hotwords"][0]["term"] == "Qwen3-ASR"
+    assert added_corrections == [("cute three asr", "Qwen3-ASR")]
+
+
+def test_process_audio_passes_active_hotwords_to_asr_and_polish(monkeypatch):
+    app = _make_app()
+    app.config.update(
+        {
+            "voice_commands_enabled": False,
+            "history_enabled": False,
+            "context_aware_tone": False,
+            "scene_prompts_enabled": False,
+            "auto_punctuation": True,
+            "filler_removal": True,
+        }
+    )
+    transcribe_calls = []
+    polish_calls = []
+
+    app.asr = SimpleNamespace(
+        transcribe=lambda audio, language="auto", hotword_context="": transcribe_calls.append(hotword_context) or "cute three asr"
+    )
+    app.hotwords = SimpleNamespace(
+        active_context=lambda **kwargs: app_mod.ActiveHotwordContext(terms=["Qwen3-ASR"], context="Qwen3-ASR")
+    )
+    app.polish_engine = SimpleNamespace(
+        last_error="",
+        polish=lambda text, **kwargs: polish_calls.append(kwargs) or "Qwen3-ASR",
+    )
+    app.snippets = SimpleNamespace(match=lambda text: None)
+    app.corrections = SimpleNamespace(apply=lambda text: text)
+    app.history = SimpleNamespace(add_async=lambda **kwargs: None)
+    app._status_overlay = SimpleNamespace(
+        show_polishing=lambda text: None,
+        show_done=lambda text: None,
+        hide=lambda delay=0.0: None,
+    )
+    app._remember_last_insertion = lambda text, app_info: None
+    app._start_edit_observation = lambda **kwargs: None
+    app._log_pipeline_latency = lambda marks: None
+
+    monkeypatch.setattr(app_mod, "get_active_app", lambda: {"name": "Codex", "bundle_id": "com.openai.codex"})
+    monkeypatch.setattr(app_mod, "process_punctuation_commands", lambda text: text)
+    monkeypatch.setattr(app_mod, "insert_text", lambda text, method, app_name="", bundle_id="": True)
+
+    app_mod.SpeakTypeApp._process_audio(app, "/tmp/fake.wav", 1.0)
+
+    assert transcribe_calls == ["Qwen3-ASR"]
+    assert polish_calls[0]["hotwords"] == ["Qwen3-ASR"]
 
 
 def test_process_audio_notifies_once_when_polish_falls_back_unavailable(monkeypatch):

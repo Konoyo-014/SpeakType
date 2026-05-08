@@ -40,6 +40,12 @@ DEFAULT_CONFIG = {
     "whisper_mode_enabled": True,  # Auto-detect whispers and apply real-time gain boost
     "scene_prompts_enabled": True,  # Use per-application prompt templates during polish
     "scene_prompts": {},  # User overrides keyed by scene id (defaults defined in polish.py)
+    "hotword_learning_enabled": True,  # Learn terminology from immediate edits to SpeakType insertions
+    "hotword_context_enabled": True,  # Feed learned active hotwords into ASR/polish context
+    "hotword_auto_corrections_enabled": True,  # Promote high-confidence learned wrong->right pairs
+    "hotword_observation_seconds": 18,  # Short post-insert edit observation window
+    "hotword_observation_stable_seconds": 1.2,  # Debounce before learning from an edit
+    "hotword_max_context_terms": 30,  # Max active hotwords passed to one recognition turn
 }
 
 CONFIG_DIR = Path.home() / ".speaktype"

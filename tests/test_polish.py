@@ -94,6 +94,12 @@ class TestPolishPromptConstruction:
         assert "不要翻译" in system_msg
         assert "当前任务没有开启翻译" in system_msg
 
+    def test_polish_includes_hotword_preservation_rule(self):
+        self.engine.polish("talk about cute three asr", hotwords=["Qwen3-ASR"])
+        system_msg = self.captured_messages[0]["content"]
+        assert "Qwen3-ASR" in system_msg
+        assert "Do not invent" in system_msg
+
     def test_polish_uses_chinese_system_prompt_for_chinese_input(self):
         self.engine.polish("你好，今天下午三点开会", language="auto")
         system_msg = self.captured_messages[0]["content"]
@@ -196,6 +202,45 @@ class TestPolishPromptConstruction:
         system_msg = self.captured_messages[0]["content"]
         assert "Chinese" in system_msg
         assert "translate the cleaned result" in system_msg.lower()
+
+    def test_translate_includes_hotword_preservation_rule(self):
+        self.engine.translate("test Qwen3-ASR", target_lang="zh", hotwords=["Qwen3-ASR"])
+        system_msg = self.captured_messages[0]["content"]
+        assert "Qwen3-ASR" in system_msg
+
+    def test_analyze_edit_learning_parses_json_payload(self):
+        self.engine._chat = lambda messages, max_tokens=1024: (
+            '{"learn": true, "hotwords": [{"term": "Qwen3-ASR", '
+            '"aliases": ["cute three asr"], "confidence": 0.93, "reason": "term"}], '
+            '"corrections": [{"wrong": "cute three asr", "right": "Qwen3-ASR", "confidence": 0.91}], '
+            '"reason": "technical term correction"}'
+        )
+
+        payload = self.engine.analyze_edit_learning(
+            "cute three asr",
+            "cute three asr",
+            "Qwen3-ASR",
+            app_name="Codex",
+            scene="code",
+            language="en",
+        )
+
+        assert payload["learn"] is True
+        assert payload["hotwords"][0]["term"] == "Qwen3-ASR"
+        assert payload["corrections"][0]["right"] == "Qwen3-ASR"
+
+    def test_analyze_edit_learning_falls_back_when_unavailable(self):
+        engine = PolishEngine()
+        engine._available = False
+
+        payload = engine.analyze_edit_learning(
+            "cute three asr",
+            "cute three asr",
+            "Qwen3-ASR",
+        )
+
+        assert payload["learn"] is True
+        assert payload["hotwords"][0]["term"] == "Qwen3-ASR"
 
 
 class TestPolishEngineAvailability:

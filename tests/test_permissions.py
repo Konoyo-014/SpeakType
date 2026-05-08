@@ -57,16 +57,33 @@ def test_reset_permissions_resets_all_supported_services(monkeypatch):
     monkeypatch.setattr(
         permissions.subprocess,
         "run",
-        lambda cmd, capture_output, text: calls.append((cmd, capture_output, text))
+        lambda cmd, capture_output, text, timeout: calls.append(
+            (cmd, capture_output, text, timeout)
+        )
         or SimpleNamespace(returncode=0, stderr=""),
     )
 
     permissions.reset_permissions("com.speaktype.app")
 
     assert calls == [
-        (["tccutil", "reset", "Accessibility", "com.speaktype.app"], True, True),
-        (["tccutil", "reset", "ListenEvent", "com.speaktype.app"], True, True),
-        (["tccutil", "reset", "PostEvent", "com.speaktype.app"], True, True),
+        (
+            ["tccutil", "reset", "Accessibility", "com.speaktype.app"],
+            True,
+            True,
+            permissions.TCCUTIL_RESET_TIMEOUT_SECONDS,
+        ),
+        (
+            ["tccutil", "reset", "ListenEvent", "com.speaktype.app"],
+            True,
+            True,
+            permissions.TCCUTIL_RESET_TIMEOUT_SECONDS,
+        ),
+        (
+            ["tccutil", "reset", "PostEvent", "com.speaktype.app"],
+            True,
+            True,
+            permissions.TCCUTIL_RESET_TIMEOUT_SECONDS,
+        ),
     ]
 
 

@@ -83,6 +83,16 @@ class FocusedInputDiagnostic:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class FocusedTextSnapshot:
+    """Read-only text snapshot for short post-insert observation."""
+
+    has_focused_element: bool = False
+    role: str = ""
+    value: str | None = None
+    selected_text: str | None = None
+
+
 def reset_last_insert_diagnostic():
     global _last_insert_diagnostic
     _last_insert_diagnostic = None
@@ -308,6 +318,22 @@ def inspect_focused_input(app_name: str = "", bundle_id: str = "") -> FocusedInp
     )
 
 
+def capture_focused_text_snapshot() -> FocusedTextSnapshot:
+    """Return the current focused element text without mutating anything."""
+    element = _get_focused_element()
+    if element is None:
+        return FocusedTextSnapshot(has_focused_element=False)
+    role = _copy_ax_attribute(element, kAXRoleAttribute) or "Unknown"
+    value = _copy_ax_attribute(element, "AXValue")
+    selected_text = _copy_ax_attribute(element, kAXSelectedTextAttribute)
+    return FocusedTextSnapshot(
+        has_focused_element=True,
+        role=str(role),
+        value=value if isinstance(value, str) else None,
+        selected_text=selected_text if isinstance(selected_text, str) else None,
+    )
+
+
 def _press_cmd_v_with_osascript(app_name: str = "") -> bool:
     """Retry paste through System Events for apps that ignore raw CGEvents."""
     script = 'tell application "System Events" to keystroke "v" using command down'
@@ -479,14 +505,32 @@ def _wait_for_accessibility_insert_result(element, value_before, inserted_text: 
 
 
 def _get_focused_element():
+    element = _copy_focused_element(AXUIElementCreateSystemWide())
+    if element is not None:
+        return element
+
     try:
-        system = AXUIElementCreateSystemWide()
-        err, element = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute, None)
+        app = _frontmost_application()
+        if app is None:
+            return None
+        return _copy_focused_element(AXUIElementCreateApplication(app.processIdentifier()))
+    except Exception as e:
+        logger.debug(f"Failed to access frontmost application focused element: {e}")
+    return None
+
+
+def _copy_focused_element(owner):
+    try:
+        err, element = AXUIElementCopyAttributeValue(owner, kAXFocusedUIElementAttribute, None)
         if err == 0:
             return element
     except Exception as e:
         logger.debug(f"Failed to access focused element: {e}")
     return None
+
+
+def _frontmost_application():
+    return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
 
 
 def _copy_ax_attribute(element, attribute: str):

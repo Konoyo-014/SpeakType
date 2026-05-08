@@ -1,0 +1,351 @@
+"""Local adaptive hotword storage and context selection.
+
+Hotwords are learned terminology hints, not unconditional replacements.
+They bias future ASR and protect spelling during local LLM polish, while
+correction rules remain a separate layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+import logging
+import math
+import re
+import threading
+from pathlib import Path
+from typing import Iterable, Optional
+
+from .config import CONFIG_DIR, ensure_config_dir, write_json_file
+
+logger = logging.getLogger("speaktype.hotwords")
+
+HOTWORDS_FILE = CONFIG_DIR / "hotwords.json"
+
+MAX_TERM_CHARS = 80
+MAX_ALIAS_CHARS = 80
+MAX_ALIASES_PER_TERM = 8
+MAX_EVIDENCE_ITEMS = 4
+DEFAULT_ACTIVE_CONFIDENCE = 0.78
+DEFAULT_REPEAT_PROMOTION_COUNT = 2
+
+_SPACE_RE = re.compile(r"\s+")
+_TECH_SIGNAL_RE = re.compile(r"[A-Z]{2,}|[a-z][A-Z]|[A-Za-z]+[0-9]|[0-9][A-Za-z]|[-_./+#]")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+@dataclass(frozen=True)
+class ActiveHotwordContext:
+    """Selected hotwords for one recognition turn."""
+
+    terms: list[str]
+    context: str
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _clean_text(value: str, max_chars: int) -> str:
+    value = _CONTROL_RE.sub("", str(value or "")).strip()
+    value = _SPACE_RE.sub(" ", value)
+    return value[:max_chars].strip()
+
+
+def _term_key(term: str) -> str:
+    return _SPACE_RE.sub(" ", (term or "").strip().casefold())
+
+
+def _looks_like_hotword(term: str) -> bool:
+    term = (term or "").strip()
+    if len(term) < 2 or len(term) > MAX_TERM_CHARS:
+        return False
+    if "\n" in term or "\r" in term:
+        return False
+    if _TECH_SIGNAL_RE.search(term):
+        return True
+    # CJK names / project names are often short and carry no ASCII casing signal.
+    cjk_count = sum(1 for ch in term if "\u3400" <= ch <= "\u9fff")
+    return 2 <= cjk_count <= 12
+
+
+def _clean_aliases(aliases: Iterable[str] | None, term: str) -> list[str]:
+    seen = {_term_key(term)}
+    cleaned: list[str] = []
+    for alias in aliases or []:
+        value = _clean_text(str(alias), MAX_ALIAS_CHARS)
+        key = _term_key(value)
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(value)
+        if len(cleaned) >= MAX_ALIASES_PER_TERM:
+            break
+    return cleaned
+
+
+def _bounded_confidence(value, default: float = 0.5) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        result = default
+    if math.isnan(result) or math.isinf(result):
+        result = default
+    return max(0.0, min(1.0, result))
+
+
+def _increment_counter(mapping: dict, key: str):
+    key = str(key or "").strip()
+    if not key:
+        return
+    mapping[key] = int(mapping.get(key, 0) or 0) + 1
+
+
+class HotwordStore:
+    """Persistent, local-only collection of learned hotwords."""
+
+    def __init__(self, path: Optional[Path] = None):
+        self._path = path or HOTWORDS_FILE
+        self._entries: list[dict] = []
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self):
+        ensure_config_dir()
+        if not self._path.exists():
+            self._entries = []
+            return
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._entries = [self._normalize_entry(e) for e in data if isinstance(e, dict)]
+                self._entries = [e for e in self._entries if e.get("term")]
+            else:
+                self._entries = []
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning("Failed to load hotwords from %s: %s", self._path, e)
+            self._entries = []
+
+    def _save(self):
+        try:
+            write_json_file(self._path, self._entries)
+        except IOError as e:
+            logger.error("Failed to save hotwords: %s", e)
+
+    def _normalize_entry(self, entry: dict) -> dict:
+        term = _clean_text(entry.get("term", ""), MAX_TERM_CHARS)
+        aliases = _clean_aliases(entry.get("aliases") or [], term)
+        observations = max(0, int(entry.get("observations", 0) or 0))
+        confidence = _bounded_confidence(entry.get("confidence"), default=0.5)
+        active = bool(entry.get("active", False))
+        return {
+            "term": term,
+            "key": _term_key(term),
+            "aliases": aliases,
+            "confidence": confidence,
+            "active": active,
+            "observations": observations,
+            "created_at": str(entry.get("created_at") or _now_iso()),
+            "updated_at": str(entry.get("updated_at") or _now_iso()),
+            "last_seen_at": str(entry.get("last_seen_at") or _now_iso()),
+            "source": str(entry.get("source") or "post_edit"),
+            "apps": dict(entry.get("apps") or {}),
+            "scenes": dict(entry.get("scenes") or {}),
+            "languages": dict(entry.get("languages") or {}),
+            "evidence": list(entry.get("evidence") or [])[-MAX_EVIDENCE_ITEMS:],
+        }
+
+    def get_all(self) -> list[dict]:
+        with self._lock:
+            return [dict(e) for e in self._entries]
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def add_or_reinforce(
+        self,
+        term: str,
+        aliases: Iterable[str] | None = None,
+        *,
+        confidence: float = 0.5,
+        app_info: Optional[dict] = None,
+        scene: str = "",
+        language: str = "",
+        source: str = "post_edit",
+        raw_fragment: str = "",
+        edited_fragment: str = "",
+        active_confidence: float = DEFAULT_ACTIVE_CONFIDENCE,
+        repeat_promotion_count: int = DEFAULT_REPEAT_PROMOTION_COUNT,
+    ) -> dict | None:
+        """Add or update a learned hotword and return the stored entry."""
+        term = _clean_text(term, MAX_TERM_CHARS)
+        if not _looks_like_hotword(term):
+            return None
+        key = _term_key(term)
+        now = _now_iso()
+        confidence = _bounded_confidence(confidence)
+        aliases = _clean_aliases(aliases, term)
+        app_info = app_info or {}
+        app_name = str(app_info.get("name", "") or "")
+        bundle_id = str(app_info.get("bundle_id", "") or "")
+
+        evidence = {
+            "raw": _clean_text(raw_fragment, 120),
+            "edited": _clean_text(edited_fragment, 120),
+            "app": app_name[:80],
+            "scene": str(scene or "")[:40],
+            "timestamp": now,
+        }
+
+        with self._lock:
+            entry = next((e for e in self._entries if e.get("key") == key), None)
+            if entry is None:
+                entry = {
+                    "term": term,
+                    "key": key,
+                    "aliases": aliases,
+                    "confidence": confidence,
+                    "active": False,
+                    "observations": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                    "last_seen_at": now,
+                    "source": source,
+                    "apps": {},
+                    "scenes": {},
+                    "languages": {},
+                    "evidence": [],
+                }
+                self._entries.append(entry)
+            else:
+                existing_aliases = _clean_aliases(entry.get("aliases", []), term)
+                merged_aliases = existing_aliases + [
+                    alias for alias in aliases if _term_key(alias) not in {_term_key(a) for a in existing_aliases}
+                ]
+                entry["aliases"] = merged_aliases[:MAX_ALIASES_PER_TERM]
+                previous_confidence = _bounded_confidence(entry.get("confidence"), default=0.5)
+                entry["confidence"] = round(max(previous_confidence, confidence), 3)
+                entry["updated_at"] = now
+                entry["last_seen_at"] = now
+
+            entry["observations"] = int(entry.get("observations", 0) or 0) + 1
+            _increment_counter(entry.setdefault("apps", {}), bundle_id or app_name)
+            _increment_counter(entry.setdefault("scenes", {}), scene)
+            _increment_counter(entry.setdefault("languages", {}), language)
+            if evidence["raw"] or evidence["edited"]:
+                entry.setdefault("evidence", []).append(evidence)
+                entry["evidence"] = entry["evidence"][-MAX_EVIDENCE_ITEMS:]
+            if confidence >= active_confidence or entry["observations"] >= repeat_promotion_count:
+                entry["active"] = True
+            stored = dict(entry)
+
+        self._save()
+        return stored
+
+    def learn_from_payload(
+        self,
+        payload: dict,
+        *,
+        app_info: Optional[dict] = None,
+        scene: str = "",
+        language: str = "",
+        raw_text: str = "",
+        edited_text: str = "",
+    ) -> list[dict]:
+        """Persist hotwords from a local model learning payload."""
+        if not isinstance(payload, dict) or payload.get("learn") is False:
+            return []
+        learned: list[dict] = []
+        for item in payload.get("hotwords") or []:
+            if not isinstance(item, dict):
+                continue
+            entry = self.add_or_reinforce(
+                item.get("term", ""),
+                item.get("aliases") or [],
+                confidence=item.get("confidence", 0.5),
+                app_info=app_info,
+                scene=scene,
+                language=language,
+                source="post_edit",
+                raw_fragment=raw_text,
+                edited_fragment=edited_text,
+            )
+            if entry is not None:
+                learned.append(entry)
+        return learned
+
+    def active_context(
+        self,
+        *,
+        app_info: Optional[dict] = None,
+        scene: str = "",
+        language: str = "",
+        limit: int = 30,
+        max_chars: int = 800,
+    ) -> ActiveHotwordContext:
+        """Build a compact context string for the next ASR request."""
+        app_info = app_info or {}
+        app_keys = {
+            str(app_info.get("bundle_id", "") or ""),
+            str(app_info.get("name", "") or ""),
+        }
+        app_keys.discard("")
+        scene = str(scene or "")
+        language = str(language or "")
+        with self._lock:
+            entries = [dict(e) for e in self._entries if e.get("active") and e.get("term")]
+
+        def score(entry: dict) -> float:
+            value = _bounded_confidence(entry.get("confidence"), default=0.5)
+            value += min(int(entry.get("observations", 0) or 0), 5) * 0.04
+            apps = entry.get("apps") or {}
+            scenes = entry.get("scenes") or {}
+            languages = entry.get("languages") or {}
+            if any(apps.get(k) for k in app_keys):
+                value += 0.25
+            if scene and scenes.get(scene):
+                value += 0.18
+            if language and language != "auto" and languages.get(language):
+                value += 0.08
+            return value
+
+        terms: list[str] = []
+        total_chars = 0
+        for entry in sorted(entries, key=score, reverse=True):
+            term = str(entry.get("term") or "").strip()
+            if not term:
+                continue
+            extra = len(term) + (1 if terms else 0)
+            if len(terms) >= limit or total_chars + extra > max_chars:
+                break
+            terms.append(term)
+            total_chars += extra
+        return ActiveHotwordContext(terms=terms, context=" ".join(terms))
+
+
+def extract_confident_corrections(payload: dict, *, min_confidence: float = 0.86) -> list[dict]:
+    """Return conservative correction candidates from a learning payload."""
+    if not isinstance(payload, dict) or payload.get("learn") is False:
+        return []
+    corrections: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in payload.get("corrections") or []:
+        if not isinstance(item, dict):
+            continue
+        wrong = _clean_text(item.get("wrong", ""), 100)
+        right = _clean_text(item.get("right", ""), 100)
+        confidence = _bounded_confidence(item.get("confidence"), default=0.0)
+        key = (_term_key(wrong), _term_key(right))
+        if not wrong or not right or key in seen:
+            continue
+        if confidence < min_confidence:
+            continue
+        if len(wrong) < 3 or len(right) < 2:
+            continue
+        if wrong.casefold() == right.casefold():
+            continue
+        seen.add(key)
+        corrections.append({"wrong": wrong, "right": right, "confidence": confidence})
+    return corrections
