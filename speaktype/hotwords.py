@@ -33,6 +33,8 @@ DEFAULT_REPEAT_PROMOTION_COUNT = 2
 _SPACE_RE = re.compile(r"\s+")
 _TECH_SIGNAL_RE = re.compile(r"[A-Z]{2,}|[a-z][A-Z]|[A-Za-z]+[0-9]|[0-9][A-Za-z]|[-_./+#]")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_SENTENCE_PUNCT_RE = re.compile(r"[，。！？；：、,!?;:]")
+_ASCII_ACRONYM_RE = re.compile(r"^[A-Za-z]{2,12}$")
 
 
 @dataclass(frozen=True)
@@ -57,17 +59,60 @@ def _term_key(term: str) -> str:
     return _SPACE_RE.sub(" ", (term or "").strip().casefold())
 
 
+def _match_key(text: str) -> str:
+    text = _CONTROL_RE.sub("", str(text or "")).casefold()
+    return _SPACE_RE.sub("", text)
+
+
+def _text_contains_term(text: str, term: str) -> bool:
+    text = _clean_text(text, 4000)
+    term = _clean_text(term, MAX_TERM_CHARS)
+    if not text or not term:
+        return False
+    if term.casefold() in text.casefold():
+        return True
+    return _match_key(term) in _match_key(text)
+
+
+def _is_sentence_like_term(term: str) -> bool:
+    term = _clean_text(term, MAX_TERM_CHARS)
+    if not term:
+        return True
+    if "\n" in term or "\r" in term:
+        return True
+    if _SENTENCE_PUNCT_RE.search(term):
+        return True
+    if term.endswith(".") and not re.search(r"\.[A-Za-z0-9]+$", term):
+        return True
+    return False
+
+
 def _looks_like_hotword(term: str) -> bool:
     term = (term or "").strip()
     if len(term) < 2 or len(term) > MAX_TERM_CHARS:
         return False
-    if "\n" in term or "\r" in term:
+    if _is_sentence_like_term(term):
         return False
     if _TECH_SIGNAL_RE.search(term):
         return True
     # CJK names / project names are often short and carry no ASCII casing signal.
     cjk_count = sum(1 for ch in term if "\u3400" <= ch <= "\u9fff")
     return 2 <= cjk_count <= 12
+
+
+def _looks_like_reusable_correction(wrong: str, right: str) -> bool:
+    wrong = _clean_text(wrong, 100)
+    right = _clean_text(right, 100)
+    if not wrong or not right:
+        return False
+    if _looks_like_hotword(right):
+        cjk_count = sum(1 for ch in right if "\u3400" <= ch <= "\u9fff")
+        if cjk_count and cjk_count < 3 and not _TECH_SIGNAL_RE.search(right):
+            return False
+        return True
+    if _ASCII_ACRONYM_RE.fullmatch(right) and re.search(r"\s", wrong):
+        return True
+    return False
 
 
 def _clean_aliases(aliases: Iterable[str] | None, term: str) -> list[str]:
@@ -257,12 +302,17 @@ class HotwordStore:
         """Persist hotwords from a local model learning payload."""
         if not isinstance(payload, dict) or payload.get("learn") is False:
             return []
+        edited_text = _clean_text(edited_text, 4000)
         learned: list[dict] = []
         for item in payload.get("hotwords") or []:
             if not isinstance(item, dict):
                 continue
+            term = _clean_text(item.get("term", ""), MAX_TERM_CHARS)
+            if edited_text and not _text_contains_term(edited_text, term):
+                logger.debug("Rejected learned hotword not present in edited text: %s", term)
+                continue
             entry = self.add_or_reinforce(
-                item.get("term", ""),
+                term,
                 item.get("aliases") or [],
                 confidence=item.get("confidence", 0.5),
                 app_info=app_info,
@@ -325,12 +375,21 @@ class HotwordStore:
         return ActiveHotwordContext(terms=terms, context=" ".join(terms))
 
 
-def extract_confident_corrections(payload: dict, *, min_confidence: float = 0.86) -> list[dict]:
+def extract_confident_corrections(
+    payload: dict,
+    *,
+    min_confidence: float = 0.86,
+    raw_text: str = "",
+    inserted_text: str = "",
+    edited_text: str = "",
+) -> list[dict]:
     """Return conservative correction candidates from a learning payload."""
     if not isinstance(payload, dict) or payload.get("learn") is False:
         return []
     corrections: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    source_text = f"{raw_text or ''}\n{inserted_text or ''}"
+    has_context = bool((source_text or "").strip() or (edited_text or "").strip())
     for item in payload.get("corrections") or []:
         if not isinstance(item, dict):
             continue
@@ -345,6 +404,13 @@ def extract_confident_corrections(payload: dict, *, min_confidence: float = 0.86
         if len(wrong) < 3 or len(right) < 2:
             continue
         if wrong.casefold() == right.casefold():
+            continue
+        if has_context:
+            if not _text_contains_term(source_text, wrong):
+                continue
+            if not _text_contains_term(edited_text, right):
+                continue
+        if not _looks_like_reusable_correction(wrong, right):
             continue
         seen.add(key)
         corrections.append({"wrong": wrong, "right": right, "confidence": confidence})

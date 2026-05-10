@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from difflib import SequenceMatcher
 import requests
 
 logger = logging.getLogger("speaktype.polish")
@@ -91,6 +92,8 @@ _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 _HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 _HOTWORD_TERM_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9._+#/-]{1,79}\b")
+_LEARNING_TECH_SIGNAL_RE = re.compile(r"[A-Z]{2,}|[a-z][A-Z]|[A-Za-z]+[0-9]|[0-9][A-Za-z]|[-_./+#]")
+_LEARNING_PUNCT_RE = re.compile(r"[\s，。！？；：、,!?;:.。\"'“”‘’（）()【】\\[\\]{}<>《》、/\\\\_-]+")
 
 
 def _strip_leading_fillers(text: str) -> str:
@@ -219,6 +222,101 @@ def _heuristic_edit_learning(raw_text: str, inserted_text: str, edited_text: str
         "hotwords": hotwords[:4],
         "corrections": [],
         "reason": "heuristic_fallback",
+    }
+
+
+def _learning_match_key(text: str) -> str:
+    return _LEARNING_PUNCT_RE.sub("", (text or "").casefold())
+
+
+def _edit_similarity(left: str, right: str) -> float:
+    left_key = _learning_match_key(left)
+    right_key = _learning_match_key(right)
+    if not left_key or not right_key:
+        return 0.0
+    return SequenceMatcher(None, left_key, right_key).ratio()
+
+
+def _has_learning_technical_signal(text: str) -> bool:
+    return bool(_LEARNING_TECH_SIGNAL_RE.search(text or ""))
+
+
+def _is_probable_semantic_rewrite(inserted_text: str, edited_text: str) -> bool:
+    """Return True for broad rewrites that should not train dictation memory."""
+    similarity = _edit_similarity(inserted_text, edited_text)
+    if similarity >= 0.28:
+        return False
+    return not _has_learning_technical_signal(edited_text)
+
+
+def _contains_learning_term(text: str, term: str) -> bool:
+    if not text or not term:
+        return False
+    if term.casefold() in text.casefold():
+        return True
+    return _learning_match_key(term) in _learning_match_key(text)
+
+
+def _looks_like_learning_sentence(term: str) -> bool:
+    return bool(re.search(r"[，。！？；：、,!?;:]", term or ""))
+
+
+def _looks_like_learning_correction(wrong: str, right: str) -> bool:
+    if _has_learning_technical_signal(right):
+        return True
+    if re.fullmatch(r"[A-Za-z]{2,12}", right or "") and re.search(r"\s", wrong or ""):
+        return True
+    cjk_count = sum(1 for ch in right or "" if "\u3400" <= ch <= "\u9fff")
+    return cjk_count >= 3 and not _looks_like_learning_sentence(right)
+
+
+def _sanitize_edit_learning_payload(
+    payload: dict,
+    raw_text: str,
+    inserted_text: str,
+    edited_text: str,
+) -> dict:
+    """Keep only model suggestions supported by the observed edit."""
+    if not isinstance(payload, dict):
+        return {"learn": False, "hotwords": [], "corrections": [], "reason": "invalid_payload"}
+
+    clean_hotwords = []
+    for item in payload.get("hotwords") or []:
+        if not isinstance(item, dict):
+            continue
+        term = re.sub(r"\s+", " ", str(item.get("term") or "")).strip()
+        if not term or len(term) > 80:
+            continue
+        if _looks_like_learning_sentence(term):
+            continue
+        if not _contains_learning_term(edited_text, term):
+            continue
+        clean_hotwords.append(item)
+
+    source = f"{raw_text or ''}\n{inserted_text or ''}"
+    clean_corrections = []
+    for item in payload.get("corrections") or []:
+        if not isinstance(item, dict):
+            continue
+        wrong = re.sub(r"\s+", " ", str(item.get("wrong") or "")).strip()
+        right = re.sub(r"\s+", " ", str(item.get("right") or "")).strip()
+        if not wrong or not right:
+            continue
+        if not _contains_learning_term(source, wrong):
+            continue
+        if not _contains_learning_term(edited_text, right):
+            continue
+        if _looks_like_learning_sentence(right):
+            continue
+        if not _looks_like_learning_correction(wrong, right):
+            continue
+        clean_corrections.append(item)
+
+    return {
+        "learn": bool(clean_hotwords or clean_corrections),
+        "hotwords": clean_hotwords,
+        "corrections": clean_corrections,
+        "reason": payload.get("reason") or "sanitized_model_payload",
     }
 
 
@@ -472,23 +570,34 @@ class PolishEngine:
             return self.check_available()
         return False
 
-    def _chat(self, messages: list, max_tokens: int = 1024, keep_alive=OLLAMA_KEEP_ALIVE) -> str:
+    def _chat(
+        self,
+        messages: list,
+        max_tokens: int = 1024,
+        keep_alive=OLLAMA_KEEP_ALIVE,
+        *,
+        json_format: bool = False,
+        temperature: float = 0.3,
+    ) -> str:
         """Send a chat request to Ollama and return the response text."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "think": False,  # Disable thinking mode for fast, direct responses
+            "keep_alive": keep_alive,
+            "options": {
+                "temperature": temperature,
+                "top_p": 0.9,
+                "num_predict": max_tokens,
+            },
+        }
+        if json_format:
+            payload["format"] = "json"
         try:
             resp = requests.post(
                 f"{self.ollama_url}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "think": False,  # Disable thinking mode for fast, direct responses
-                    "keep_alive": keep_alive,
-                    "options": {
-                        "temperature": 0.3,
-                        "top_p": 0.9,
-                        "num_predict": max_tokens,
-                    },
-                },
+                json=payload,
                 timeout=120,
                 proxies=NO_PROXY_FOR_LOCAL_OLLAMA,
             )
@@ -874,6 +983,8 @@ class PolishEngine:
             return {"learn": False, "hotwords": [], "corrections": [], "reason": "empty"}
         if inserted_text.strip() == edited_text.strip():
             return {"learn": False, "hotwords": [], "corrections": [], "reason": "unchanged"}
+        if _is_probable_semantic_rewrite(inserted_text, edited_text):
+            return {"learn": False, "hotwords": [], "corrections": [], "reason": "semantic_rewrite"}
 
         if not self._ensure_available():
             return _heuristic_edit_learning(raw_text, inserted_text, edited_text)
@@ -883,10 +994,12 @@ class PolishEngine:
                 "role": "system",
                 "content": (
                     "You analyze an immediate user edit made after a local voice dictation insertion. "
-                    "Extract durable dictation-learning facts only. Learn hotwords for ASR when the edit "
-                    "corrects a rare term, proper noun, acronym, code identifier, product name, file path, "
-                    "API name, or exact spelling/capitalization/hyphenation. Do not learn ordinary grammar, "
-                    "style, punctuation, paraphrases, user-added content, or semantic rewrites.\n\n"
+                    "Extract durable dictation-learning facts only. A valid hotword MUST be text that appears "
+                    "in <user_edited>, and it should be a rare term, proper noun, acronym, code identifier, "
+                    "product name, file path, API name, or exact spelling/capitalization/hyphenation. Never "
+                    "learn text that appears only in <inserted>; that is usually the wrong recognition. Do not "
+                    "learn ordinary grammar, style, punctuation, paraphrases, user-added content, deleted text, "
+                    "whole sentences, conversational phrases, or semantic rewrites.\n\n"
                     "Return strict JSON only with this schema:\n"
                     "{"
                     "\"learn\": boolean, "
@@ -894,8 +1007,15 @@ class PolishEngine:
                     "\"corrections\": [{\"wrong\": string, \"right\": string, \"confidence\": number}], "
                     "\"reason\": string"
                     "}\n\n"
-                    "Use aliases only for plausible spoken forms or common ASR wrong forms. "
-                    "Set learn=false when the edit is not clearly reusable for future dictation."
+                    "Use aliases only for plausible spoken forms or common ASR wrong forms found in the raw or "
+                    "inserted text. Set learn=false when the edit is not clearly reusable for future dictation.\n\n"
+                    "Negative examples:\n"
+                    "- inserted='Hello，Hello，测试仪。', user_edited='Hello，测试' => do not learn 测试仪; it was removed.\n"
+                    "- inserted='可以，那你下面开始。', user_edited='要求后续变更' => learn=false; this is a semantic rewrite.\n"
+                    "- inserted='I think this is good', user_edited='This is good.' => learn=false; style only.\n\n"
+                    "Positive examples:\n"
+                    "- inserted='cute three asr', user_edited='Qwen3-ASR' => hotword Qwen3-ASR, alias cute three asr.\n"
+                    "- inserted='Pro 点 txt', user_edited='Pro.txt' => hotword Pro.txt, alias Pro 点 txt."
                 ),
             },
             {
@@ -910,11 +1030,8 @@ class PolishEngine:
                 ),
             },
         ]
-        result = self._chat(messages, max_tokens=700)
+        result = self._chat(messages, max_tokens=700, json_format=True, temperature=0.0)
         payload = _extract_json_object(result)
         if not payload:
             return _heuristic_edit_learning(raw_text, inserted_text, edited_text)
-        payload.setdefault("hotwords", [])
-        payload.setdefault("corrections", [])
-        payload.setdefault("learn", bool(payload.get("hotwords") or payload.get("corrections")))
-        return payload
+        return _sanitize_edit_learning_payload(payload, raw_text, inserted_text, edited_text)

@@ -26,7 +26,7 @@ class TestPolishPromptConstruction:
         self.captured_messages = []
         self.chat_calls = []
 
-        def mock_chat(messages, max_tokens=1024):
+        def mock_chat(messages, max_tokens=1024, **kwargs):
             self.chat_calls.append(messages)
             self.captured_messages = messages
             if "你好" in messages[1]["content"] or "今天下午三点开会" in messages[1]["content"]:
@@ -77,7 +77,7 @@ class TestPolishPromptConstruction:
     def test_polish_short_text_uses_tight_generation_budget(self):
         token_budgets = []
 
-        def fake_chat(messages, max_tokens=1024):
+        def fake_chat(messages, max_tokens=1024, **kwargs):
             token_budgets.append(max_tokens)
             return "Hello."
 
@@ -123,14 +123,14 @@ class TestPolishPromptConstruction:
         assert result == "  "
 
     def test_polish_rejects_accidental_cjk_to_english_translation(self):
-        self.engine._chat = lambda messages, max_tokens=1024: "Let's test this."
+        self.engine._chat = lambda messages, max_tokens=1024, **kwargs: "Let's test this."
 
         assert self.engine.polish("嗯那个测试一下", language="auto") == "测试一下"
 
     def test_polish_retries_chinese_prompt_after_translation_drift(self):
         calls = []
 
-        def fake_chat(messages, max_tokens=1024):
+        def fake_chat(messages, max_tokens=1024, **kwargs):
             calls.append(messages)
             if len(calls) == 1:
                 return "Users will authorize it."
@@ -143,7 +143,7 @@ class TestPolishPromptConstruction:
         assert "上一轮输出错误地变成了英文" in calls[1][0]["content"]
 
     def test_polish_allows_english_when_language_explicitly_english(self):
-        self.engine._chat = lambda messages, max_tokens=1024: "Let's test this."
+        self.engine._chat = lambda messages, max_tokens=1024, **kwargs: "Let's test this."
 
         assert self.engine.polish("测试一下", language="en") == "Let's test this."
 
@@ -209,7 +209,7 @@ class TestPolishPromptConstruction:
         assert "Qwen3-ASR" in system_msg
 
     def test_analyze_edit_learning_parses_json_payload(self):
-        self.engine._chat = lambda messages, max_tokens=1024: (
+        self.engine._chat = lambda messages, max_tokens=1024, **kwargs: (
             '{"learn": true, "hotwords": [{"term": "Qwen3-ASR", '
             '"aliases": ["cute three asr"], "confidence": 0.93, "reason": "term"}], '
             '"corrections": [{"wrong": "cute three asr", "right": "Qwen3-ASR", "confidence": 0.91}], '
@@ -228,6 +228,45 @@ class TestPolishPromptConstruction:
         assert payload["learn"] is True
         assert payload["hotwords"][0]["term"] == "Qwen3-ASR"
         assert payload["corrections"][0]["right"] == "Qwen3-ASR"
+
+    def test_analyze_edit_learning_rejects_semantic_rewrite_before_llm(self):
+        def fail_chat(*args, **kwargs):
+            raise AssertionError("semantic rewrite should not call local model")
+
+        self.engine._chat = fail_chat
+
+        payload = self.engine.analyze_edit_learning(
+            "可以，那你下面开始。",
+            "可以，那你下面开始。",
+            "要求后续变更",
+            app_name="Codex",
+        )
+
+        assert payload == {
+            "learn": False,
+            "hotwords": [],
+            "corrections": [],
+            "reason": "semantic_rewrite",
+        }
+
+    def test_analyze_edit_learning_sanitizes_model_hallucinated_deleted_term(self):
+        self.engine._chat = lambda messages, max_tokens=1024, **kwargs: (
+            '{"learn": true, "hotwords": [{"term": "测试仪", '
+            '"aliases": ["测试"], "confidence": 0.95, "reason": "term"}], '
+            '"corrections": [{"wrong": "测试仪", "right": "测试", "confidence": 0.95}], '
+            '"reason": "bad model output"}'
+        )
+
+        payload = self.engine.analyze_edit_learning(
+            "Hello，Hello，测试仪。",
+            "Hello，Hello，测试仪。",
+            "Hello，测试",
+            app_name="Codex",
+        )
+
+        assert payload["learn"] is False
+        assert payload["hotwords"] == []
+        assert payload["corrections"] == []
 
     def test_analyze_edit_learning_falls_back_when_unavailable(self):
         engine = PolishEngine()

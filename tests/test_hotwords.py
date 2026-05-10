@@ -68,6 +68,52 @@ def test_learn_from_payload_persists_hotwords(tmp_path):
     assert store.active_context(scene="code").context == "mlx-audio"
 
 
+def test_learn_from_payload_rejects_term_absent_from_user_edit(tmp_path):
+    store = HotwordStore(path=tmp_path / "hotwords.json")
+    payload = {
+        "learn": True,
+        "hotwords": [
+            {
+                "term": "测试仪",
+                "aliases": ["测试"],
+                "confidence": 0.95,
+            }
+        ],
+    }
+
+    learned = store.learn_from_payload(
+        payload,
+        raw_text="Hello，Hello，测试仪。",
+        edited_text="Hello，测试",
+    )
+
+    assert learned == []
+    assert store.get_all() == []
+
+
+def test_learn_from_payload_rejects_sentence_like_terms(tmp_path):
+    store = HotwordStore(path=tmp_path / "hotwords.json")
+    payload = {
+        "learn": True,
+        "hotwords": [
+            {
+                "term": "可以，那你下面开始。",
+                "aliases": [],
+                "confidence": 0.95,
+            }
+        ],
+    }
+
+    learned = store.learn_from_payload(
+        payload,
+        raw_text="可以，那你下面开始。",
+        edited_text="可以，那你下面开始。",
+    )
+
+    assert learned == []
+    assert store.get_all() == []
+
+
 def test_extract_confident_corrections_filters_weak_pairs():
     payload = {
         "learn": True,
@@ -80,4 +126,23 @@ def test_extract_confident_corrections_filters_weak_pairs():
 
     assert extract_confident_corrections(payload) == [
         {"wrong": "cute three asr", "right": "Qwen3-ASR", "confidence": 0.91}
+    ]
+
+
+def test_extract_confident_corrections_rejects_generic_cjk_pair_with_context():
+    payload = {
+        "learn": True,
+        "corrections": [
+            {"wrong": "测试仪", "right": "测试", "confidence": 0.95},
+            {"wrong": "Pro 点 txt", "right": "Pro.txt", "confidence": 0.95},
+        ],
+    }
+
+    assert extract_confident_corrections(
+        payload,
+        raw_text="Hello，Hello，测试仪。 Pro 点 txt",
+        inserted_text="Hello，Hello，测试仪。 Pro 点 txt",
+        edited_text="Hello，测试。 Pro.txt",
+    ) == [
+        {"wrong": "Pro 点 txt", "right": "Pro.txt", "confidence": 0.95}
     ]

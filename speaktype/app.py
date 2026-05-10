@@ -605,7 +605,12 @@ class SpeakTypeApp(rumps.App):
             )
 
         if self.config.get("hotword_auto_corrections_enabled", True):
-            for correction in extract_confident_corrections(payload):
+            for correction in extract_confident_corrections(
+                payload,
+                raw_text=observation.raw_text,
+                inserted_text=observation.inserted_text,
+                edited_text=observation.edited_text,
+            ):
                 try:
                     self.corrections.add(correction["wrong"], correction["right"])
                 except Exception as e:
