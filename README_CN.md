@@ -24,7 +24,7 @@
 
 ## v2.2.0 新增内容
 
-SpeakType v2.2.0 是正式的自适应热词版本。它会从你对 SpeakType 刚插入文本的即时修改中学习可复用术语，用本地 Ollama 模型分析这些修改，只把学习结果保存在你的 Mac 上，并把一小组 active context 回传给本地 Qwen3-ASR 以及润色/翻译提示。
+SpeakType v2.2.0 是正式的自适应热词版本。它会从你对 SpeakType 刚插入文本的即时修改中学习可复用术语，用本地 Ollama 模型分析这些修改，只把学习结果保存在你的 Mac 上，并把一小组 active context 回传给本地 Qwen3-ASR 以及润色/翻译提示。本地模型负责提出候选项，确定性的学习门禁负责拒绝被用户删除的词、整句改写、泛化替换，以及没有出现在用户最终编辑文本里的词。
 
 这个版本还加入了原生 Adaptive Hotwords 窗口、偏好设置里的热词控制、本地自检里的热词 readiness、更加安全的词典与片段编辑器、重建后的统计面板、更可读的首次启动向导、补齐的中文 UI 细节、可换行的录音 HUD、更稳的 Accessibility 聚焦输入 fallback，以及重复点击菜单栏时的窗口复用。完整中英双语功能说明见 [v2.2.0 release notes](docs/releases/v2.2.0.md)。
 

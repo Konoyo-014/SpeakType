@@ -24,7 +24,7 @@
 
 ## What's New in v2.2.0
 
-SpeakType v2.2.0 is the official adaptive-hotword release. It learns reusable terminology from the edits you make immediately after SpeakType inserts text, analyzes those edits with the local Ollama model, stores learned terms only on your Mac, and feeds a compact active context back into local Qwen3-ASR plus the polish/translation prompts.
+SpeakType v2.2.0 is the official adaptive-hotword release. It learns reusable terminology from the edits you make immediately after SpeakType inserts text, analyzes those edits with the local Ollama model, stores learned terms only on your Mac, and feeds a compact active context back into local Qwen3-ASR plus the polish/translation prompts. The local model proposes candidates, while deterministic gates reject deleted words, sentence rewrites, generic substitutions, and terms that are not present in the user's final edited text.
 
 This release also adds the native Adaptive Hotwords window, dedicated hotword controls in Preferences, hotword readiness checks in Local Diagnostics, safer Dictionary & Snippets editing, a rebuilt Statistics dashboard, a more readable first-launch setup wizard, localized Chinese UI details, wrapped recording HUD text, stronger Accessibility fallback for focused text fields, and duplicate-window prevention for repeated menubar actions. See [v2.2.0 release notes](docs/releases/v2.2.0.md) for the full bilingual feature list.
 
