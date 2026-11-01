@@ -7,10 +7,11 @@ import threading
 import logging
 import subprocess
 from pathlib import Path
+from weakref import WeakSet
 import rumps
 import AppKit
 import objc
-from Foundation import NSObject
+from Foundation import NSDate, NSObject, NSRunLoop
 
 from .config import (
     load_config,
@@ -35,6 +36,7 @@ from .inserter import (
 from .hotkey import HotkeyListener
 from .history import DictationHistory
 from .context import get_active_app, get_tone_for_app, get_scene_for_app, get_selected_text
+from .delivery_target import capture_target_field, prepare_unchanged_target
 from .commands import process_punctuation_commands, detect_edit_command, detect_action_command
 from .status_overlay import StatusOverlay
 from .snippets import SnippetLibrary
@@ -47,8 +49,8 @@ from .hotwords import ActiveHotwordContext, HotwordStore, extract_confident_corr
 from .applescript import run_osascript
 from .permissions import (
     get_permission_status,
+    microphone_is_authorized,
     request_missing_permissions,
-    refresh_permissions_for_update,
 )
 from .runtime import BUNDLE_IDENTIFIER, get_running_bundle_path, get_runtime_version
 from .runtime import get_bundle_fingerprint
@@ -144,6 +146,13 @@ class _MainThreadBridge(NSObject):
     def setAppTitle_(self, _):
         self._app.title = self._title_text
 
+    def refreshMainWindow_(self, _):
+        self._app._refresh_main_window_main()
+
+    def flushMainEdits_(self, _):
+        if self._app._main_controller:
+            self._app._main_controller.flush_edits()
+
     def triggerSetup_(self, timer):
         """Called by NSTimer to start setup after wizard closes."""
         self._app._do_setup()
@@ -195,6 +204,34 @@ class SpeakTypeApp(rumps.App):
         recent = self.history.get_recent(1)
         self._latest_dictation = recent[-1] if recent and self.config["history_enabled"] else None
         self._dictation_lock = threading.Lock()
+        self._main_state_lock = threading.RLock()
+        self._operation_lock = threading.RLock()
+        self._model_workers = WeakSet()
+        self._asr_engines = WeakSet([self.asr])
+        self._polish_engines = WeakSet([self.polish_engine])
+        self._operation_id = 0
+        self._quitting = False
+        self._operation_cancel = threading.Event()
+        self._delivery_operation_id = None
+        self._recording_operation_id = None
+        self._starting_operation_id = None
+        self._stopping_operation_id = None
+        self._recording_target = {}
+        self._recording_field = None
+        self._recording_preview_only = False
+        self._last_external_app = {}
+        self._main_controller = None
+        self._setup_center = None
+        self._readiness_thread = None
+        self._engine_thread = None
+        self._engine_error = ""
+        self._pending_trial = False
+        self._main_state = {"phase": "idle", "status": "", "raw": "", "final": "",
+                            "partial": "", "level": 0.0, "elapsed": 0.0,
+                            "target_name": "", "ready": False, "readiness": [], "busy": False}
+        if self._latest_dictation:
+            self._main_state.update(raw=self._latest_dictation.get("raw", ""),
+                                    final=self._latest_dictation.get("polished", ""))
         self.snippets = SnippetLibrary()
         self.corrections = CorrectionStore()
         self.hotwords = HotwordStore()
@@ -310,6 +347,8 @@ class SpeakTypeApp(rumps.App):
         self._hotkey_item = rumps.MenuItem(t("hotkey_prefix") + self._hotkey_display())
 
         self._prefs_item = rumps.MenuItem(t("menu_preferences"), callback=self._open_settings, key=",")
+        self._main_item = rumps.MenuItem(t("menu_main_window"), callback=self._show_main_window, key="0")
+        self._prepare_item = rumps.MenuItem(t("menu_setup_center"), callback=self._show_setup_center)
         self._dict_item = rumps.MenuItem(t("menu_dict_snippets"), callback=self._open_dict)
         self._hotwords_item = rumps.MenuItem(self._hotword_status_title(), callback=self._open_hotwords_window)
         self._stats_item = rumps.MenuItem(t("menu_history_stats"), callback=self._show_stats)
@@ -325,6 +364,8 @@ class SpeakTypeApp(rumps.App):
 
         self.menu = [
             rumps.MenuItem(f"SpeakType v{APP_VERSION}"),
+            self._main_item,
+            self._prepare_item,
             None,
             self._hotkey_item,
             self._status_item,
@@ -357,6 +398,8 @@ class SpeakTypeApp(rumps.App):
         ]
 
     def _refresh_menu_titles(self):
+        self._main_item.title = t("menu_main_window")
+        self._prepare_item.title = t("menu_setup_center")
         """Update all menu item titles after UI language change."""
         self._hotkey_item.title = t("hotkey_prefix") + self._hotkey_display()
         self._polish_item.title = t("menu_polish")
@@ -439,14 +482,7 @@ class SpeakTypeApp(rumps.App):
 
     def _make_ui_lang_callback(self, lang_code):
         def callback(sender):
-            self.config["ui_language"] = lang_code
-            save_config(self.config)
-            set_language(lang_code)
-            # Update checkmarks
-            for lc, (item, _) in self._ui_lang_items.items():
-                item.state = lc == lang_code
-            # Refresh all menu titles to new language
-            self._refresh_menu_titles()
+            self._apply_settings({**self.config, "ui_language": lang_code})
         return callback
 
     def _hotkey_display(self):
@@ -479,16 +515,17 @@ class SpeakTypeApp(rumps.App):
     @rumps.timer(1)
     def _startup_timer(self, timer):
         """Run once after app starts to initialize engines."""
+        if self._quitting:
+            return
         if self._setup_done:
             timer.stop()
             return
         self._setup_done = True
         timer.stop()
 
-        if self._first_launch:
-            self._show_setup_wizard()
-        else:
-            self._check_permissions_and_setup()
+        self._show_main_window(None)
+        self._readiness_timer = rumps.Timer(lambda _: self._refresh_main_readiness(), 3)
+        self._readiness_timer.start()
 
     def _show_setup_wizard(self):
         """Show first-launch setup wizard."""
@@ -505,10 +542,426 @@ class SpeakTypeApp(rumps.App):
         self._do_setup()
 
     def _on_wizard_complete(self):
-        if get_running_bundle_path():
-            self._relaunch_app()
+        self._show_main_window(None)
+        self._refresh_main_readiness()
+
+    def _desktop_text(self, chinese, english):
+        return chinese if get_language() == "zh" else english
+
+    def _new_polish_engine(self):
+        config = dict(self.config)
+        engine = PolishEngine(model=config["llm_model"], ollama_url=config["ollama_url"])
+        with self._operation_lock:
+            self._polish_engines.add(engine)
+        return engine
+
+    def _start_model_worker(self, target, *, name, args=(), kwargs=None):
+        with self._operation_lock:
+            if self._quitting:
+                return None
+            worker = threading.Thread(target=target, name=name, args=args,
+                                      kwargs=kwargs or {}, daemon=True)
+            self._model_workers.add(worker)
+            worker.start()
+            return worker
+
+    def _active_model_workers(self):
+        with self._operation_lock:
+            workers = set(self._model_workers)
+            workers.update(worker for worker in (
+                self._engine_thread, self._processing_thread, self._readiness_thread,
+                self._permission_watch_thread, self._release_guard_thread, self._edit_observer._thread,
+            )
+                           if worker is not None)
+            if self._setup_center is not None:
+                workers.update(self._setup_center.worker_threads)
+            if self._diagnostics_controller is not None:
+                workers.update(self._diagnostics_controller.worker_threads)
+            for engine in set(self._asr_engines) | {self.asr}:
+                workers.update(worker for worker in (engine._load_thread, engine._warmup_thread)
+                               if worker is not None)
+            for engine in set(self._polish_engines) | {self.polish_engine}:
+                workers.update(worker for worker in (engine._prewarm_thread, engine._chat_prewarm_thread)
+                               if worker is not None)
+            return [worker for worker in workers if worker.is_alive()]
+
+    def _wait_for_model_workers(self, deadline):
+        previous = None
+        while True:
+            workers = self._active_model_workers()
+            if not workers:
+                logger.info("Model workers finished before quit")
+                return True
+            names = sorted({worker.name for worker in workers})
+            if names != previous:
+                logger.info("Waiting for model workers before quit: %s", ", ".join(names))
+                previous = names
+            if time.monotonic() >= deadline or threading.current_thread() in workers:
+                logger.warning("Quit postponed while model workers remain active: %s", ", ".join(names))
+                return False
+            NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.02))
+            workers[0].join(timeout=min(0.02, max(0, deadline - time.monotonic())))
+
+    def _new_operation(self):
+        with self._operation_lock:
+            self._operation_cancel.set()
+            self._operation_id += 1
+            self._operation_cancel = threading.Event()
+            self._delivery_operation_id = None
+            return self._operation_id
+
+    def _operation_current(self, operation_id):
+        with self._operation_lock:
+            return operation_id == self._operation_id and not self._operation_cancel.is_set()
+
+    def _update_operation_state(self, operation_id, **changes):
+        with self._operation_lock:
+            if not self._operation_current(operation_id):
+                return False
+            self._update_main_state(**changes)
+            return True
+
+    def _finish_operation(self, operation_id):
+        with self._operation_lock:
+            if self._operation_current(operation_id):
+                self._is_processing = False
+                self._delivery_operation_id = None
+                self._update_main_state(busy=False)
+
+    def _update_main_state(self, **changes):
+        with self._main_state_lock:
+            self._main_state.update(changes)
+        if self._quitting:
+            return
+        if threading.current_thread() is threading.main_thread():
+            self._refresh_main_window_main()
         else:
-            self._check_permissions_and_setup()
+            self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(b"refreshMainWindow:", None, False)
+
+    def _flush_main_edits(self):
+        if self._main_controller is None:
+            return
+        if threading.current_thread() is threading.main_thread():
+            self._main_controller.flush_edits()
+        else:
+            self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(b"flushMainEdits:", None, True)
+
+    def _refresh_main_window_main(self):
+        if self._quitting or self._main_controller is None:
+            return
+        with self._main_state_lock:
+            snapshot = dict(self._main_state)
+        snapshot.update(recent=self.history.get_recent(8), hotkey=self._hotkey_display(),
+                        target_name=self._last_external_app.get("name", ""),
+                        target_pid=self._last_external_app.get("pid"),
+                        translate_target=self.config.get("translate_target", "en"),
+                        target_apps=[{"name": str(app.localizedName() or ""),
+                                      "bundle_id": str(app.bundleIdentifier() or ""),
+                                      "pid": int(app.processIdentifier())}
+                                     for app in AppKit.NSWorkspace.sharedWorkspace().runningApplications()
+                                     if app.activationPolicy() == AppKit.NSApplicationActivationPolicyRegular
+                                     and app.processIdentifier() != os.getpid()
+                                     and app.bundleIdentifier() != BUNDLE_IDENTIFIER])
+        self._main_controller.update_state(snapshot)
+        if self._quitting:
+            return
+        if snapshot.get("ready") and self._pending_trial:
+            self._pending_trial = False
+            self._start_recording(preview_only=True)
+            return
+        if snapshot.get("asr_cached") and not self.asr._loaded and self._engine_thread is None:
+            self._do_setup()
+
+    def _remember_external_app(self):
+        info = get_active_app()
+        if info.get("pid") != os.getpid() and info.get("bundle_id") != BUNDLE_IDENTIFIER:
+            if info.get("bundle_id") or info.get("name") not in {"", "Unknown", "Python"}:
+                self._last_external_app = dict(info)
+        return dict(self._last_external_app)
+
+    def _show_main_window(self, _=None):
+        if self._quitting:
+            return
+        from .main_window import MainWindowController
+        self._remember_external_app()
+        if self._main_controller is None:
+            self._main_controller = MainWindowController(
+                on_record=self._main_record, on_cancel=self._main_cancel,
+                on_copy=self._main_copy, on_insert=self._main_insert,
+                on_polish=lambda text: self._main_transform(text, False),
+                on_translate=lambda text: self._main_transform(text, True),
+                on_history=lambda: self._show_history(None), on_settings=lambda: self._open_settings(None),
+                on_setup=self._show_setup_center, on_dictionary=lambda: self._open_dict(None),
+                on_recent=self._main_select_recent, language=self.config.get("ui_language", "zh"),
+                on_target=self._main_select_target, on_translate_language=self._main_set_translate_language,
+                on_edit=self._main_edit,
+            )
+        self._main_controller.show()
+        self._refresh_main_window_main()
+        self._refresh_main_readiness()
+
+    def _show_setup_center(self, action=None):
+        if self._quitting:
+            return
+        if action == "help":
+            from .help_window import HelpWindowController
+            self._help_controller = _show_or_create_window_controller(
+                getattr(self, "_help_controller", None),
+                lambda: HelpWindowController(self.config.get("ui_language", "zh"), self._hotkey_display()),
+            )
+            return
+        from .setup_center import SetupCenterController
+        if self._setup_center is None:
+            self._setup_center = SetupCenterController(
+                config=dict(self.config), on_change=self._apply_desktop_settings,
+                on_test=self._main_test_recording, on_ready=self._return_from_setup,
+            )
+        self._setup_center.show()
+        self._setup_center.refresh()
+
+    def _return_from_setup(self):
+        if not self.asr._loaded and (self._engine_thread is None or not self._engine_thread.is_alive()):
+            self._engine_thread = None
+            self._engine_error = ""
+        self._show_main_window(None)
+
+    def _main_test_recording(self):
+        if self._setup_center:
+            self._setup_center.close()
+        self._show_main_window(None)
+        if self.asr._loaded:
+            self._start_recording(preview_only=True)
+        else:
+            self._pending_trial = True
+            self._refresh_main_readiness()
+
+    def _apply_desktop_settings(self, patch):
+        self._apply_settings({**self.config, **patch})
+        self._refresh_main_readiness()
+
+    def _refresh_main_readiness(self):
+        with self._operation_lock:
+            if self._quitting or self._readiness_thread and self._readiness_thread.is_alive():
+                return
+
+        def inspect():
+            from .model_download import is_model_cached
+            mic = microphone_is_authorized()
+            permissions = get_permission_status()
+            try:
+                cached = is_model_cached(self.config["asr_model"])
+            except Exception as error:
+                self._update_main_state(phase="error", ready=False, status=str(error))
+                return
+            llm = PolishEngine(self.config["llm_model"], self.config["ollama_url"])
+            enabled = self.config["polish_enabled"] or self.config.get("translate_enabled", False)
+            llm_ready = llm.check_available()
+            rows = [
+                {"key": "microphone", "label": self._desktop_text("麦克风", "Microphone"),
+                 "status": "ready" if mic else "missing",
+                 "detail": self._desktop_text("录音权限已授权" if mic else "需要授予麦克风权限",
+                                               "Microphone allowed" if mic else "Microphone permission required"),
+                 "action": "permissions", "action_label": self._desktop_text("检查权限", "Permissions")},
+                {"key": "asr", "label": self._desktop_text("语音识别", "Speech recognition"),
+                 "status": "ready" if self.asr._loaded else "error" if self._engine_error else "working" if cached else "missing",
+                 "detail": self._engine_error or self.config["asr_model"], "action": "asr",
+                 "action_label": self._desktop_text("管理模型", "Manage model")},
+                {"key": "llm", "label": self._desktop_text("本地润色与翻译", "Local polish and translation"),
+                 "status": "ready" if llm_ready else "missing" if enabled else "optional",
+                 "detail": self.config["llm_model"] if enabled or llm_ready else self._desktop_text("自动处理已关闭，可直接听写", "Automatic processing is off; dictation is available"),
+                 "action": "llm", "action_label": self._desktop_text("配置润色", "Configure")},
+                {"key": "accessibility", "label": self._desktop_text("文字插入", "Text insertion"),
+                 "status": "ready" if permissions.accessibility and permissions.post_event else "missing",
+                 "detail": self._desktop_text("辅助功能与输入控制", "Accessibility and input control"),
+                 "action": "permissions", "action_label": self._desktop_text("检查权限", "Permissions")},
+                {"key": "hotkey", "label": self._desktop_text("全局快捷键", "Global shortcut"),
+                 "status": "ready" if permissions.listen_event else "missing",
+                 "detail": self._hotkey_display(), "action": "permissions",
+                 "action_label": self._desktop_text("检查权限", "Permissions")},
+            ]
+            self._update_main_state(readiness=rows, asr_cached=cached, ready=mic and self.asr._loaded)
+
+        with self._operation_lock:
+            if self._quitting or self._readiness_thread and self._readiness_thread.is_alive():
+                return
+            self._readiness_thread = threading.Thread(target=inspect, daemon=True, name="SpeakTypeReadiness")
+            self._readiness_thread.start()
+
+    def _reset_hotkey_recording_state(self):
+        if self.hotkey_listener:
+            self.hotkey_listener.reset_recording_state()
+
+    def _main_record(self):
+        if self._quitting:
+            return
+        if self.recorder.is_recording:
+            self._stop_recording()
+        elif not self._is_processing:
+            self._start_recording(preview_only=True)
+
+    def _main_cancel(self):
+        with self._operation_lock:
+            with self._main_state_lock:
+                if self._delivery_operation_id == self._operation_id or self._main_state.get("phase") == "delivering":
+                    return
+            cancelled_operation_id = self._operation_id
+            self._operation_cancel.set()
+        if self.recorder.is_recording:
+            self.recorder.set_stream_callback(None)
+            self.recorder.stop_audio()
+        if self._streaming_transcriber:
+            self._streaming_transcriber.stop(wait=False)
+            self._streaming_transcriber = None
+        self._release_guard_stop.set()
+        self._stop_level_monitor()
+        self._reset_hotkey_recording_state()
+        with self._operation_lock:
+            if cancelled_operation_id != self._operation_id:
+                return
+            self._is_processing = False
+            with self._dictation_lock:
+                entry = dict(self._latest_dictation or {})
+            if entry.get("operation_id") == cancelled_operation_id and entry.get("outcome") == "pending":
+                self._finish_dictation_delivery(entry, False, outcome="cancelled")
+            self._status_overlay.hide()
+            self._update_main_state(phase="cancelled", busy=False, level=0,
+                                    raw=entry.get("raw", ""), final=entry.get("polished", ""),
+                                    status=self._desktop_text("已取消，现有文本已保留。", "Cancelled. Available text has been kept."))
+
+    def _update_latest_final_text(self, text):
+        with self._dictation_lock:
+            entry = self._latest_dictation
+            if entry is not None:
+                changed = entry.get("polished") != text
+                entry["polished"] = text
+                entry = dict(entry)
+            else:
+                changed = False
+        if entry is None:
+            entry = self._retain_dictation("", text, self._last_external_app)
+            changed = True
+        elif changed and entry.get("id"):
+            self.history.update_text(entry["id"], text)
+        if changed:
+            entry["outcome"] = "saved"
+            with self._dictation_lock:
+                self._latest_dictation["outcome"] = "saved"
+            if entry.get("id"):
+                self.history.set_outcome(entry["id"], "saved")
+        self._update_main_state(raw=entry.get("raw", ""), final=text)
+        return entry
+
+    def _main_edit(self, text):
+        self._update_latest_final_text(text)
+
+    def _begin_delivery(self, operation_id, status=None):
+        with self._operation_lock:
+            if not self._operation_current(operation_id):
+                return False
+            self._delivery_operation_id = operation_id
+            self._update_main_state(phase="delivering", status=status or self._desktop_text("正在插入文字…", "Inserting text…"))
+            return True
+
+    def _main_copy(self, text):
+        if not text:
+            return
+        self._update_latest_final_text(text)
+        self._copy_last_dictation(None)
+        self._update_main_state(status=self._desktop_text("文本已复制。", "Text copied."))
+
+    def _main_insert(self, text):
+        if not text or self._is_processing or self._quitting:
+            return
+        if not self._last_external_app:
+            self._update_main_state(status=self._desktop_text("请先选择其他应用中的输入框，再打开 SpeakType。", "Select a field in another app, then open SpeakType."))
+            return
+        with self._operation_lock:
+            entry = self._update_latest_final_text(text)
+            target = dict(self._last_external_app)
+            operation_id = self._new_operation()
+            self._is_processing = True
+            self._update_main_state(busy=True)
+            self._begin_delivery(operation_id)
+
+        def deliver():
+            try:
+                if not self._operation_current(operation_id):
+                    return
+                inserted = insert_text(text, method=self.config["insert_method"],
+                                       app_name=target.get("name", ""), bundle_id=target.get("bundle_id", ""),
+                                       target_pid=target.get("pid"))
+                if not self._finish_dictation_delivery(entry, inserted, operation_id=operation_id):
+                    return
+                if inserted:
+                    self._remember_last_insertion(text, target)
+                else:
+                    self._notify_insert_failed(target)
+            finally:
+                self._finish_operation(operation_id)
+
+        with self._operation_lock:
+            self._processing_thread = self._start_model_worker(deliver, name="SpeakTypeWindowInsert")
+
+    def _main_transform(self, text, translate):
+        if not text or self._is_processing or self._quitting:
+            return
+        with self._operation_lock:
+            operation_id = self._new_operation()
+            entry = self._update_latest_final_text(text)
+            entry.update(operation_id=operation_id, outcome="pending")
+            with self._dictation_lock:
+                self._latest_dictation.update(operation_id=operation_id, outcome="pending")
+            if entry.get("id"):
+                self.history.set_outcome(entry["id"], "pending")
+            self._is_processing = True
+            polish_engine = self._new_polish_engine()
+            self._update_main_state(busy=True, phase="translating" if translate else "polishing",
+                                    status=self._desktop_text("正在处理文本…", "Processing text…"))
+
+        def transform():
+            try:
+                if not polish_engine.check_available():
+                    raise RuntimeError(polish_engine.last_error)
+                result = (polish_engine.translate(text, target_lang=self.config.get("translate_target", "en"))
+                          if translate else polish_engine.polish(text, language=self.config.get("language", "auto")))
+                if polish_engine.last_error:
+                    raise RuntimeError(polish_engine.last_error)
+                self._commit_dictation_text(entry, result, operation_id, outcome="saved",
+                                            status=self._desktop_text("文本已准备好，可以复制或插入。", "Text is ready to copy or insert."))
+            except Exception as error:
+                with self._operation_lock:
+                    if self._commit_dictation_text(entry, entry["polished"], operation_id, outcome="saved"):
+                        self._update_main_state(phase="error", status=str(error))
+            finally:
+                self._finish_operation(operation_id)
+
+        with self._operation_lock:
+            self._processing_thread = self._start_model_worker(transform, name="SpeakTypeTextTransform")
+
+    def _main_select_recent(self, entry_id):
+        if self._is_processing or self.recorder.is_recording:
+            return
+        entry = next(item for item in self.history.snapshot() if item["id"] == entry_id)
+        with self._dictation_lock:
+            self._latest_dictation = dict(entry)
+        self._update_main_state(phase="done", raw=entry["raw"], final=entry["polished"],
+                                status=self._desktop_text("已打开这条听写。", "Dictation opened."))
+
+    def _main_select_target(self, app_info):
+        app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(app_info["pid"]))
+        if app is None or app.isTerminated() or app.processIdentifier() == os.getpid():
+            self._update_main_state(status=self._desktop_text("目标应用已经关闭，请重新选择。", "The target app closed. Choose another app."))
+            return
+        if str(app.bundleIdentifier() or "") != app_info.get("bundle_id", ""):
+            raise ValueError("The selected application no longer matches its process")
+        self._last_external_app = dict(app_info)
+        self._update_main_state(target_name=app_info["name"],
+                                status=self._desktop_text("已选择目标应用，请确保其中有可编辑输入框。", "Target selected. Make sure it has an editable field."))
+
+    def _main_set_translate_language(self, code):
+        self.config["translate_target"] = code
+        save_config(self.config)
+        self._update_main_state(translate_target=code)
 
     def _set_status(self, text):
         """Thread-safe: update status menu item title from any thread."""
@@ -525,9 +978,17 @@ class SpeakTypeApp(rumps.App):
         )
 
     def _build_streaming_transcriber(self):
+        operation_id = self._recording_operation_id
+
+        def partial(text):
+            with self._operation_lock:
+                if self._operation_current(operation_id):
+                    self._status_overlay.update_partial_text(text)
+                    self._update_main_state(partial=text)
+
         return StreamingTranscriber(
             self.asr,
-            on_partial_text=self._status_overlay.update_partial_text,
+            on_partial_text=partial,
             sample_rate=self.config["sample_rate"],
         )
 
@@ -562,22 +1023,23 @@ class SpeakTypeApp(rumps.App):
         app_info: dict | None,
         scene_id: str = "",
     ):
-        if not self.config.get("hotword_learning_enabled", True):
-            return
-        observer = getattr(self, "_edit_observer", None)
-        if observer is None or not hasattr(observer, "start"):
-            return
-        try:
-            observer.start(
-                raw_text=raw_text,
-                inserted_text=inserted_text,
-                app_info=app_info or {},
-                scene=scene_id,
-                language=self.config.get("language", "auto"),
-                on_edit=self._handle_observed_edit,
-            )
-        except Exception as e:
-            logger.debug(f"Post-insert edit observation did not start: {e}")
+        with self._operation_lock:
+            if self._quitting or not self.config.get("hotword_learning_enabled", True):
+                return
+            observer = getattr(self, "_edit_observer", None)
+            if observer is None or not hasattr(observer, "start"):
+                return
+            try:
+                observer.start(
+                    raw_text=raw_text,
+                    inserted_text=inserted_text,
+                    app_info=app_info or {},
+                    scene=scene_id,
+                    language=self.config.get("language", "auto"),
+                    on_edit=self._handle_observed_edit,
+                )
+            except Exception as e:
+                logger.debug(f"Post-insert edit observation did not start: {e}")
 
     def _cancel_edit_observation(self):
         observer = getattr(self, "_edit_observer", None)
@@ -588,13 +1050,19 @@ class SpeakTypeApp(rumps.App):
                 pass
 
     def _handle_observed_edit(self, observation: EditObservation):
+        with self._operation_lock:
+            if self._quitting:
+                return
+            if threading.current_thread() is not threading.main_thread():
+                self._model_workers.add(threading.current_thread())
         logger.info(
             "Observed post-insert edit for hotword learning (inserted_len=%d edited_len=%d app=%s)",
             len(observation.inserted_text or ""),
             len(observation.edited_text or ""),
             (observation.app_info or {}).get("name", "Unknown"),
         )
-        analyzer = getattr(self.polish_engine, "analyze_edit_learning", None)
+        polish_engine = self._new_polish_engine()
+        analyzer = getattr(polish_engine, "analyze_edit_learning", None)
         if not callable(analyzer):
             return
         payload = analyzer(
@@ -649,20 +1117,22 @@ class SpeakTypeApp(rumps.App):
             return self.asr.transcribe(audio_input, language=self.config["language"])
 
     def _start_streaming_preview(self) -> bool:
-        if self._streaming_transcriber is not None or not self.recorder.is_recording:
-            return False
-        try:
-            streamer = self._build_streaming_transcriber()
-            self.recorder.set_stream_callback(streamer.feed_audio)
-            context = self._hotword_context_for_app()
-            streamer.start(language=self.config["language"], hotword_context=context.context)
-            self._streaming_transcriber = streamer
-            return True
-        except Exception as e:
-            logger.debug(f"Streaming preview failed to start: {e}")
-            self._streaming_transcriber = None
-            self.recorder.set_stream_callback(None)
-            return False
+        with self._operation_lock:
+            if self._quitting or self._streaming_transcriber is not None or not self.recorder.is_recording:
+                return False
+            try:
+                streamer = self._build_streaming_transcriber()
+                self.recorder.set_stream_callback(streamer.feed_audio)
+                context = self._hotword_context_for_app()
+                streamer.start(language=self.config["language"], hotword_context=context.context)
+                self._model_workers.add(streamer._thread)
+                self._streaming_transcriber = streamer
+                return True
+            except Exception as e:
+                logger.debug(f"Streaming preview failed to start: {e}")
+                self._streaming_transcriber = None
+                self.recorder.set_stream_callback(None)
+                return False
 
     def _late_start_streaming_preview(self):
         deadline = time.monotonic() + 4.0
@@ -675,20 +1145,15 @@ class SpeakTypeApp(rumps.App):
             time.sleep(0.05)
 
     def _prime_pipeline_for_recording(self):
-        if not getattr(self.asr, "_loaded", False):
-            if hasattr(self.asr, "load_async"):
+        with self._operation_lock:
+            if self._quitting:
+                return
+            if not self.asr._loaded:
                 self.asr.load_async()
-            else:
-                threading.Thread(target=self.asr.load, daemon=True).start()
-
-        if self.config.get("streaming_preview", True) and not getattr(self.asr, "_loaded", False):
-            threading.Thread(target=self._late_start_streaming_preview, daemon=True).start()
-
-        if self.config.get("polish_enabled") or self.config.get("translate_enabled", False):
-            if hasattr(self.polish_engine, "chat_prewarm_async"):
+            if self.config.get("streaming_preview", True) and not self.asr._loaded:
+                self._start_model_worker(self._late_start_streaming_preview, name="SpeakTypeLatePreview")
+            if self.config.get("polish_enabled") or self.config.get("translate_enabled", False):
                 self.polish_engine.chat_prewarm_async()
-            elif hasattr(self.polish_engine, "prewarm_async"):
-                self.polish_engine.prewarm_async()
 
     def _setup_llm_engine(self):
         if not (self.config.get("polish_enabled") or self.config.get("translate_enabled", False)):
@@ -828,8 +1293,8 @@ class SpeakTypeApp(rumps.App):
         except TypeError:
             self._status_overlay.show_error(text)
 
-    def _observe_llm_status(self) -> bool:
-        error = getattr(self.polish_engine, "last_error", "")
+    def _observe_llm_status(self, engine=None) -> bool:
+        error = (self.polish_engine if engine is None else engine).last_error
         if error:
             logger.warning(
                 "Local LLM post-processing fallback: polish/translation skipped for this dictation; raw or partially processed text will be inserted. reason=%s",
@@ -877,6 +1342,7 @@ class SpeakTypeApp(rumps.App):
         app_info: dict | None,
         inserted_text: str,
         llm_fallback_used: bool = False,
+        llm_error: str | None = None,
     ):
         app_name = (app_info or {}).get("name") or "Unknown"
         diagnostic = get_last_insert_diagnostic()
@@ -889,7 +1355,7 @@ class SpeakTypeApp(rumps.App):
                 diagnostic.reason,
             )
             self._show_overlay_notice(
-                self._llm_fallback_overlay_text(),
+                self._llm_fallback_overlay_text(llm_error),
                 auto_hide_after=2.2,
             )
             return
@@ -903,33 +1369,44 @@ class SpeakTypeApp(rumps.App):
             return
         if llm_fallback_used:
             self._show_overlay_notice(
-                self._llm_fallback_overlay_text(),
+                self._llm_fallback_overlay_text(llm_error),
                 auto_hide_after=2.2,
             )
 
     def _do_setup(self):
+        with self._operation_lock:
+            if self._engine_thread is not None or self._quitting:
+                return
+            engine = self.asr
+
         def init_engines():
             if self.config["polish_enabled"] or self.config.get("translate_enabled", False):
-                threading.Thread(
-                    target=self._setup_llm_engine,
-                    daemon=True,
-                    name="SpeakTypeLLMSetup",
-                ).start()
+                self._start_model_worker(self._setup_llm_engine, name="SpeakTypeLLMSetup")
 
+            with self._operation_lock:
+                if not self._update_asr_engine_state(engine, phase="loading", status=self._desktop_text("正在加载语音模型…", "Loading speech model…")):
+                    return
+                self._set_status(t("status_loading_asr"))
             logger.info("Loading ASR engine...")
-            self._set_status(t("status_loading_asr"))
 
             def _asr_progress(pct, status):
-                self._set_status(t("status_downloading_asr", pct=pct, size=status))
+                with self._operation_lock:
+                    if self._update_asr_engine_state(engine, status=t("status_downloading_asr", pct=pct, size=status)):
+                        self._set_status(t("status_downloading_asr", pct=pct, size=status))
 
             try:
-                self.asr.load(progress_callback=_asr_progress)
-                logger.info(f"ASR engine loaded: {self.asr.get_backend_info()}")
+                engine.load(progress_callback=_asr_progress)
+                logger.info(f"ASR engine loaded: {engine.get_backend_info()}")
             except Exception as e:
                 logger.error(f"ASR load failed: {e}")
-                self._set_status(t("status_asr_error"))
-                self._set_title(ICON_ERROR)
-                rumps.notification("SpeakType", t("notif_asr_failed"), str(e))
+                with self._operation_lock:
+                    if self.asr is engine:
+                        self._engine_error = str(e)
+                    if self._update_asr_engine_state(engine, phase="error", ready=False, status=str(e)):
+                        self._set_status(t("status_asr_error"))
+                        self._set_title(ICON_ERROR)
+                        self._engine_error = str(e)
+                        rumps.notification("SpeakType", t("notif_asr_failed"), str(e))
                 return
 
             # Load plugins
@@ -939,19 +1416,24 @@ class SpeakTypeApp(rumps.App):
                 except Exception as e:
                     logger.warning(f"Plugin loading failed: {e}")
 
-            self._set_status(t("status_ready"))
-            self._set_title(ICON_IDLE)
-            mode_str = t("notif_ready_mode_toggle") if self.config.get("dictation_mode") == "toggle" else t("notif_ready_mode_hold")
-            rumps.notification("SpeakType", t("notif_ready_title"), t("notif_ready_body", mode_str=mode_str, hotkey=self._hotkey_display()))
+            with self._operation_lock:
+                if self._update_asr_engine_state(engine, phase="idle", ready=microphone_is_authorized(),
+                                                status=self._desktop_text("可以开始听写。点击录音按钮，或在其他应用中使用快捷键。",
+                                                                          "Ready. Click Record, or use the shortcut in another app.")):
+                    self._set_status(t("status_ready"))
+                    self._set_title(ICON_IDLE)
 
-        threading.Thread(target=init_engines, daemon=True).start()
+        with self._operation_lock:
+            if self.asr is not engine or self._quitting or self._engine_thread is not None:
+                return
+            self._engine_thread = self._start_model_worker(init_engines, name="SpeakTypeEngines")
         self._restart_hotkey_listener()
         self._start_permission_restart_watcher()
 
         # Delayed accessibility check — warn if pynput can't listen
         def _delayed_perm_check():
-            import time
-            time.sleep(5)
+            if self._permission_watch_stop.wait(5) or self._quitting:
+                return
             if self.hotkey_listener and not self.hotkey_listener.is_running:
                 logger.warning(
                     "Hotkey listener backend is not running (backend=%s) — accessibility may be missing",
@@ -962,42 +1444,56 @@ class SpeakTypeApp(rumps.App):
                     t("notif_perm_missing_title"),
                     t("notif_perm_missing_body", missing=t("wizard_access_label")),
                 )
-        threading.Thread(target=_delayed_perm_check, daemon=True).start()
+        self._start_model_worker(_delayed_perm_check, name="SpeakTypePermissionCheck")
+
+    def _update_asr_engine_state(self, engine, **changes):
+        with self._operation_lock:
+            if self.asr is not engine or self._quitting:
+                return False
+            if self._is_processing or self.recorder.is_recording:
+                changes.pop("phase", None)
+                changes.pop("status", None)
+            self._update_main_state(**changes)
+            return True
 
     def _start_permission_restart_watcher(self):
         """Prompt for restart if macOS grants input permissions while running."""
-        if self._permission_watch_thread is not None and self._permission_watch_thread.is_alive():
-            return
+        with self._operation_lock:
+            if self._quitting:
+                return
+            if (self._permission_watch_thread is not None and self._permission_watch_thread.is_alive()
+                    and not self._permission_watch_stop.is_set()):
+                return
         try:
             status = get_permission_status()
         except Exception as e:
             logger.debug(f"Permission watcher could not read initial status: {e}")
             return
 
-        self._last_permission_status = status
-        if status.all_granted:
-            if self.config.get(PERMISSION_RESTART_PENDING_KEY):
-                self._prompt_for_permission_restart(
-                    "Input permissions already granted after permission refresh"
-                )
-            return
+        with self._operation_lock:
+            if self._quitting:
+                return
+            self._last_permission_status = status
+            if status.all_granted:
+                if self.config.get(PERMISSION_RESTART_PENDING_KEY):
+                    self._prompt_for_permission_restart(
+                        "Input permissions already granted after permission refresh"
+                    )
+                return
+            self._permission_watch_stop = threading.Event()
+            self._permission_watch_thread = self._start_model_worker(
+                self._permission_restart_watch_loop, name="SpeakTypePermissionWatcher",
+                args=(self._permission_watch_stop,))
 
-        self._permission_watch_stop.clear()
-        self._permission_watch_thread = threading.Thread(
-            target=self._permission_restart_watch_loop,
-            daemon=True,
-            name="SpeakTypePermissionWatcher",
-        )
-        self._permission_watch_thread.start()
-
-    def _permission_restart_watch_loop(self):
-        while not self._permission_watch_stop.wait(2.0):
+    def _permission_restart_watch_loop(self, stop_event):
+        while not stop_event.wait(2.0):
             try:
                 current = get_permission_status()
             except Exception as e:
                 logger.debug(f"Permission watcher read failed: {e}")
                 continue
-
+            if stop_event.is_set() or self._quitting:
+                return
             previous = self._last_permission_status
             self._last_permission_status = current
             if (
@@ -1010,13 +1506,12 @@ class SpeakTypeApp(rumps.App):
                 )
                 and not self._permission_restart_prompt_shown
             ):
-                self._prompt_for_permission_restart(
-                    "Input permissions changed while SpeakType is running"
-                )
+                self._restart_hotkey_listener()
+                self._refresh_main_readiness()
                 return
 
     def _prompt_for_permission_restart(self, reason: str):
-        if self._permission_restart_prompt_shown:
+        if self._quitting or self._permission_restart_prompt_shown:
             return
         logger.info("%s; restart required", reason)
         self._permission_restart_prompt_shown = True
@@ -1029,6 +1524,8 @@ class SpeakTypeApp(rumps.App):
         )
 
     def _show_permission_restart_alert_main(self):
+        if self._quitting:
+            return
         alert = AppKit.NSAlert.alloc().init()
         alert.setMessageText_(t("perm_restart_title"))
         alert.setInformativeText_(t("perm_restart_body"))
@@ -1040,24 +1537,36 @@ class SpeakTypeApp(rumps.App):
             self._relaunch_app()
 
     def _relaunch_app(self):
+        if self._quitting or not self._prepare_to_quit():
+            return
         bundle_path = get_running_bundle_path()
-        command = ["open", bundle_path] if bundle_path else [
+        command = [str(Path(bundle_path) / "Contents/MacOS/SpeakType")] if bundle_path else [
             sys.executable, str(Path(__file__).resolve().parents[1] / "main.py")
         ]
         try:
             subprocess.Popen(
-                ["/bin/sh", "-c", 'sleep 0.4; exec "$@"', "speaktype-restart", *command],
+                ["/bin/sh", "-c", 'while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; shift; exec "$@"',
+                 "speaktype-restart", str(os.getpid()), *command],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
         except Exception as e:
             logger.warning(f"Failed to schedule app relaunch: {e}")
-        self._quit(None)
+            self._resume_after_quit(str(e))
+            return
+        self._finish_quit()
 
     def _restart_hotkey_listener(self):
         """(Re)start the hotkey listener with current config."""
         if self.hotkey_listener:
             self.hotkey_listener.stop()
+        if self._quitting:
+            return
+        permissions = get_permission_status()
+        if not permissions.listen_event or not permissions.accessibility:
+            self.hotkey_listener = None
+            return
 
         mode = self.config.get("dictation_mode", "push_to_talk")
 
@@ -1082,6 +1591,7 @@ class SpeakTypeApp(rumps.App):
 
     def _on_hotkey_press(self):
         if self._is_processing:
+            self._reset_hotkey_recording_state()
             return
         self._start_recording()
 
@@ -1093,17 +1603,60 @@ class SpeakTypeApp(rumps.App):
     # --- Toggle mode handler ---
 
     def _on_toggle(self, is_active: bool):
-        if is_active:
-            if self._is_processing:
-                return
-            self._start_recording()
+        if self.recorder.is_recording:
+            self._stop_recording()
+        elif self._is_processing:
+            self._reset_hotkey_recording_state()
         else:
-            if self.recorder.is_recording:
-                self._stop_recording()
+            self._start_recording()
 
     # --- Common recording logic ---
 
-    def _start_recording(self):
+    def _start_recording(self, preview_only=False):
+        with self._operation_lock:
+            if self._quitting:
+                return
+            if threading.current_thread() is not threading.main_thread():
+                self._model_workers.add(threading.current_thread())
+        if self._is_processing or self.recorder.is_recording or self._quitting or self._stopping_operation_id is not None:
+            self._reset_hotkey_recording_state()
+            return
+        self._flush_main_edits()
+        if not microphone_is_authorized():
+            self._reset_hotkey_recording_state()
+            self._update_main_state(phase="error", status=self._desktop_text("请在权限与模型准备中授予麦克风权限。", "Allow microphone access in Permissions and Models."))
+            return
+        if not self.asr._loaded:
+            self._reset_hotkey_recording_state()
+            self._update_main_state(phase="loading", ready=False,
+                                    status=self._desktop_text("语音模型尚未准备好，请打开权限与模型准备。",
+                                                              "Speech model is not ready. Open Permissions and Models."))
+            self._refresh_main_readiness()
+            return
+        current = get_active_app()
+        own_app = current.get("pid") == os.getpid() or current.get("bundle_id") == BUNDLE_IDENTIFIER
+        recording_preview_only = bool(preview_only or own_app)
+        recording_target = dict(self._last_external_app if own_app else current)
+        try:
+            recording_field = None if recording_preview_only else capture_target_field(current)
+        except RuntimeError as error:
+            self._reset_hotkey_recording_state()
+            self._update_main_state(phase="error", status=str(error))
+            return
+        with self._operation_lock:
+            if self._starting_operation_id is not None or self._quitting or self.recorder.is_recording:
+                self._reset_hotkey_recording_state()
+                return
+            operation_id = self._new_operation()
+            self._recording_operation_id = operation_id
+            self._starting_operation_id = operation_id
+            self._recording_preview_only = recording_preview_only
+            self._recording_target = recording_target
+            self._recording_field = recording_field
+            if not own_app:
+                self._last_external_app = dict(current)
+            with self._recording_stop_lock:
+                self._recording_stop_requested = False
         self._cancel_edit_observation()
         streamer = None
         self.recorder.set_whisper_state_callback(self._on_whisper_state_change)
@@ -1135,46 +1688,85 @@ class SpeakTypeApp(rumps.App):
             started = False
             logger.error(f"Recorder start raised: {e}")
 
+        with self._operation_lock:
+            abandoned = not self._operation_current(operation_id) or self._quitting
+        if abandoned:
+            if self.recorder.is_recording:
+                self.recorder.stop_audio()
+            with self._operation_lock:
+                if self._starting_operation_id == operation_id:
+                    self._starting_operation_id = None
+            return
+
         if not started:
-            self.recorder.set_stream_callback(None)
-            self.recorder.set_whisper_state_callback(None)
-            self._streaming_transcriber = None
-            with self._recording_stop_lock:
-                self._recording_stop_requested = False
-            self._recording_start_time = 0
-            err = getattr(self.recorder, "last_start_error", None)
-            message = str(err) if err else "Could not open microphone."
-            logger.error(f"Recording failed to start: {message}")
-            self._show_overlay_error(t("overlay_mic_start_failed"), auto_hide_after=3.0)
-            rumps.notification("SpeakType", t("notif_error"), message)
+            with self._operation_lock:
+                if not self._operation_current(operation_id) or self._quitting:
+                    if self._starting_operation_id == operation_id:
+                        self._starting_operation_id = None
+                    return
+                self._reset_hotkey_recording_state()
+                self.recorder.set_stream_callback(None)
+                self.recorder.set_whisper_state_callback(None)
+                self._streaming_transcriber = None
+                with self._recording_stop_lock:
+                    self._recording_stop_requested = False
+                self._recording_start_time = 0
+                err = self.recorder.last_start_error
+                message = str(err) if err else "Could not open microphone."
+                logger.error(f"Recording failed to start: {message}")
+                self._show_overlay_error(t("overlay_mic_start_failed"), auto_hide_after=3.0)
+                rumps.notification("SpeakType", t("notif_error"), message)
+                self._update_main_state(phase="error", busy=False, status=message)
+                if self._starting_operation_id == operation_id:
+                    self._starting_operation_id = None
             return
 
         with self._recording_stop_lock:
-            self._recording_stop_requested = False
+            stop_already_requested = self._recording_stop_requested
+        if stop_already_requested:
+            with self._operation_lock:
+                if self._starting_operation_id == operation_id:
+                    self._starting_operation_id = None
+            return
 
-        logger.info("Recording started")
+        with self._operation_lock:
+            if self._starting_operation_id == operation_id:
+                self._starting_operation_id = None
+            if not self._operation_current(operation_id):
+                return
+            logger.info("Recording started")
+            if self.hotkey_listener and self.hotkey_listener.mode == "toggle":
+                self.hotkey_listener._toggle_active = True
+            self._update_main_state(phase="recording", busy=True, raw="", final="", partial="", elapsed=0,
+                                    status=self._desktop_text("正在录音，再次点击即可停止。", "Recording. Click again to stop."))
         if self.config["sound_feedback"]:
             _play_sound("Tink")
 
         if self.config.get("plugins_enabled"):
             self._plugin_manager.run_hook("on_recording_start")
 
+        if not self._operation_current(operation_id):
+            return
         self._prime_pipeline_for_recording()
-        context = self._hotword_context_for_app()
+        context = self._hotword_context_for_app(self._recording_target)
         recording_note = ""
         if context.terms:
             recording_note = t("overlay_hotwords_active", count=len(context.terms))
-        try:
+        with self._operation_lock:
+            if not self._operation_current(operation_id):
+                return
             self._status_overlay.show_recording(recording_note)
-        except TypeError:
-            self._status_overlay.show_recording()
         self._start_level_monitor()
 
         if streamer is not None:
             try:
-                self.recorder.set_stream_callback(streamer.feed_audio)
-                streamer.start(language=self.config["language"], hotword_context=context.context)
-                self._streaming_transcriber = streamer
+                with self._operation_lock:
+                    if not self._operation_current(operation_id):
+                        return
+                    self.recorder.set_stream_callback(streamer.feed_audio)
+                    streamer.start(language=self.config["language"], hotword_context=context.context)
+                    self._model_workers.add(streamer._thread)
+                    self._streaming_transcriber = streamer
             except Exception as e:
                 logger.debug(f"Streaming preview failed to start: {e}")
                 self._streaming_transcriber = None
@@ -1182,7 +1774,8 @@ class SpeakTypeApp(rumps.App):
         else:
             self._streaming_transcriber = None
 
-        self._start_hotkey_release_guard()
+        if not self._recording_preview_only:
+            self._start_hotkey_release_guard()
 
     def _on_whisper_state_change(self, new_state: str):
         """Forward whisper detector state into the overlay (any thread)."""
@@ -1212,77 +1805,72 @@ class SpeakTypeApp(rumps.App):
 
     def _stop_recording(self):
         stop_started = time.perf_counter()
-        self._release_guard_stop.set()
-        with self._recording_stop_lock:
-            if self._recording_stop_requested or not self.recorder.is_recording:
+        with self._operation_lock:
+            if self._quitting:
                 return
-            self._recording_stop_requested = True
-
-        start_time = self._recording_start_time or time.time()
-        duration = max(0.0, time.time() - start_time)
-        logger.info(f"Recording stopped after {duration:.1f}s")
-        if self.config["sound_feedback"]:
-            _play_sound("Pop")
-        self._is_processing = True
-
-        # Notify plugins
-        if self.config.get("plugins_enabled"):
-            self._plugin_manager.run_hook("on_recording_stop")
-
-        # Stop the level monitor and any streaming transcription
-        self._stop_level_monitor()
-        preview_text = ""
-        preview_snapshot = None
-        if self._streaming_transcriber:
-            snapshot = getattr(self._streaming_transcriber, "snapshot", None)
-            if callable(snapshot):
-                preview_snapshot = snapshot()
-            preview_text = self._streaming_transcriber.stop(wait=False) or ""
+            if threading.current_thread() is not threading.main_thread():
+                self._model_workers.add(threading.current_thread())
+            operation_id = self._recording_operation_id
+            if not self._operation_current(operation_id):
+                return
+            with self._recording_stop_lock:
+                if self._recording_stop_requested or not self.recorder.is_recording:
+                    return
+                self._recording_stop_requested = True
+            self._stopping_operation_id = operation_id
+            recorder = self.recorder
+            target = dict(self._recording_target)
+            target_field = self._recording_field
+            insert_result = not self._recording_preview_only
+            streamer = self._streaming_transcriber
             self._streaming_transcriber = None
-        self.recorder.set_stream_callback(None)
-
-        # Move the overlay into transcribing state while we wait on ASR
-        if hasattr(self.asr, "_loaded") and not getattr(self.asr, "_loaded", False):
-            logger.info("ASR model is still loading; showing cold-start transcription status")
-            self._show_overlay_transcribing(t("overlay_asr_loading"))
-        elif preview_text:
-            self._show_overlay_transcribing(t("overlay_finalizing_preview"))
-        else:
-            self._show_overlay_transcribing()
-
-        can_use_in_memory_audio = (
-            getattr(self.asr, "backend", "qwen") == "qwen"
-            and not self.config.get("plugins_enabled")
-            and hasattr(self.recorder, "stop_audio")
-        )
-        audio_input = self.recorder.stop_audio() if can_use_in_memory_audio else self.recorder.stop()
-        audio_ready_at = time.perf_counter()
-        if audio_input is None:
-            reason = getattr(self.recorder, "last_stop_reason", "") or "unknown"
-            message = getattr(self.recorder, "last_stop_message", "") or ""
-            logger.info("No usable audio captured (reason=%s message=%s duration=%.2fs)", reason, message, duration)
-            self._is_processing = False
-            overlay_key = {
-                "too_short": "overlay_audio_too_short",
-                "too_quiet": "overlay_audio_too_quiet",
-                "no_frames": "overlay_no_audio",
-                "not_recording": "overlay_no_audio",
-            }.get(reason, "overlay_no_audio")
-            self._show_overlay_error(t(overlay_key), auto_hide_after=2.0)
-            return
-
-        self._processing_thread = threading.Thread(
-            target=self._process_audio,
-            args=(audio_input, duration, preview_snapshot),
-            daemon=True,
-        )
-        self._processing_thread.start()
-        dispatched_at = time.perf_counter()
-        logger.info(
-            "Stop latency: finalize_audio=%.3fs dispatch_processing=%.3fs",
-            audio_ready_at - stop_started,
-            dispatched_at - audio_ready_at,
-        )
+            duration = max(0.0, time.time() - (self._recording_start_time or time.time()))
+            self._is_processing = True
+            self._update_main_state(phase="transcribing", busy=True, level=0,
+                                    status=self._desktop_text("正在识别语音…", "Transcribing…"))
+        try:
+            self._reset_hotkey_recording_state()
+            self._release_guard_stop.set()
+            logger.info(f"Recording stopped after {duration:.1f}s")
+            if self.config["sound_feedback"]:
+                _play_sound("Pop")
+            if self.config.get("plugins_enabled"):
+                self._plugin_manager.run_hook("on_recording_stop")
+            self._stop_level_monitor()
+            preview_text = ""
+            preview_snapshot = None
+            if streamer is not None:
+                preview_snapshot = streamer.snapshot()
+                preview_text = streamer.stop(wait=False) or ""
+            recorder.set_stream_callback(None)
+            can_use_in_memory_audio = self.asr.backend == "qwen" and not self.config.get("plugins_enabled")
+            audio_input = recorder.stop_audio() if can_use_in_memory_audio else recorder.stop()
+            audio_ready_at = time.perf_counter()
+            with self._operation_lock:
+                if not self._operation_current(operation_id):
+                    if isinstance(audio_input, (str, os.PathLike)):
+                        Path(audio_input).unlink(missing_ok=True)
+                    return
+                if audio_input is None:
+                    reason = recorder.last_stop_reason or "unknown"
+                    message = recorder.last_stop_message or ""
+                    overlay_key = {"too_short": "overlay_audio_too_short", "too_quiet": "overlay_audio_too_quiet",
+                                   "no_frames": "overlay_no_audio", "not_recording": "overlay_no_audio"}.get(reason, "overlay_no_audio")
+                    self._show_overlay_error(t(overlay_key), auto_hide_after=2.0)
+                    self._is_processing = False
+                    self._update_main_state(phase="error", busy=False, status=message or t(overlay_key))
+                    return
+                self._show_overlay_transcribing(t("overlay_finalizing_preview") if preview_text else "")
+                self._processing_thread = self._start_model_worker(
+                    self._process_audio, name="SpeakTypeTranscription", args=(audio_input, duration, preview_snapshot),
+                    kwargs={"app_info": target, "insert_result": insert_result,
+                            "operation_id": operation_id, "target_field": target_field})
+            logger.info("Stop latency: finalize_audio=%.3fs dispatch_processing=%.3fs",
+                        audio_ready_at - stop_started, time.perf_counter() - audio_ready_at)
+        finally:
+            with self._operation_lock:
+                if self._stopping_operation_id == operation_id:
+                    self._stopping_operation_id = None
 
     def _start_hotkey_release_guard(self):
         if self.config.get("dictation_mode", "push_to_talk") != "push_to_talk":
@@ -1292,13 +1880,11 @@ class SpeakTypeApp(rumps.App):
             return
         self._release_guard_stop.set()
         self._release_guard_stop = threading.Event()
-        self._release_guard_thread = threading.Thread(
-            target=self._hotkey_release_guard_loop,
+        self._release_guard_thread = self._start_model_worker(
+            self._hotkey_release_guard_loop,
             args=(self._release_guard_stop,),
-            daemon=True,
             name="SpeakTypeHotkeyReleaseGuard",
         )
-        self._release_guard_thread.start()
 
     def _hotkey_release_guard_loop(self, stop_event: threading.Event):
         if stop_event.wait(HOTKEY_RELEASE_GUARD_GRACE_SECONDS):
@@ -1341,6 +1927,8 @@ class SpeakTypeApp(rumps.App):
 
     def _start_level_monitor_main(self):
         """Poll the recorder's audio level and feed it into the overlay."""
+        if not self.recorder.is_recording or not self._operation_current(self._recording_operation_id) or self._quitting:
+            return
         if self._level_timer is not None:
             try:
                 self._level_timer.stop()
@@ -1387,6 +1975,7 @@ class SpeakTypeApp(rumps.App):
         except Exception:
             level = 0.0
         self._status_overlay.update_audio_level(level)
+        self._update_main_state(level=level, elapsed=max(0, time.time() - self._recording_start_time))
 
     def _preview_reuse_candidate(self, audio_input, preview_snapshot) -> str:
         if not PREVIEW_FINAL_ACCELERATION_ENABLED:
@@ -1497,12 +2086,23 @@ class SpeakTypeApp(rumps.App):
             return ""
         return _merge_transcript_text(preview_text, tail_text)
 
-    def _process_audio(self, audio_input, duration: float, preview_snapshot=None):
+    def _process_audio(self, audio_input, duration: float, preview_snapshot=None, *,
+                       app_info=None, insert_result=True, operation_id=None, target_field=None):
+        operation_id = self._new_operation() if operation_id is None else operation_id
         marks = {"start": time.perf_counter()}
         llm_fallback_used = False
+        llm_fallback_error = ""
+        polish_engine = self._new_polish_engine()
+        entry = None
         recording_path = audio_input if isinstance(audio_input, (str, os.PathLike)) else None
         try:
-            app_info = get_active_app()
+            with self._operation_lock:
+                if not self._operation_current(operation_id):
+                    return
+                self._is_processing = True
+                self._update_main_state(phase="transcribing", busy=True,
+                                        status=self._desktop_text("正在识别语音…", "Transcribing…"))
+            app_info = dict(app_info) if app_info is not None else get_active_app()
             tone = get_tone_for_app(app_info) if self.config["context_aware_tone"] else "neutral"
             active_scene_id = get_scene_for_app(app_info)
             active_hotwords = self._hotword_context_for_app(app_info, active_scene_id)
@@ -1524,11 +2124,14 @@ class SpeakTypeApp(rumps.App):
                 else:
                     raw_text = self._transcribe_with_hotwords(audio_input, active_hotwords.context)
             marks["transcribed"] = time.perf_counter()
-
-            if not raw_text.strip():
-                logger.info("Empty transcription")
-                self._show_overlay_error(t("overlay_empty_transcription"), auto_hide_after=1.8)
-                return
+            with self._operation_lock:
+                if not self._operation_current(operation_id):
+                    return
+                if not raw_text.strip():
+                    logger.info("Empty transcription")
+                    self._show_overlay_error(t("overlay_empty_transcription"), auto_hide_after=1.8)
+                    self._update_main_state(phase="error", status=t("overlay_empty_transcription"))
+                    return
 
             logger.info(f"Raw: {raw_text}")
             original_transcription = raw_text
@@ -1544,29 +2147,51 @@ class SpeakTypeApp(rumps.App):
                 logger.debug(f"Correction store apply failed: {e}")
 
             # Local action commands (undo last dictation, etc.)
-            if self.config["voice_commands_enabled"]:
+            if not self._operation_current(operation_id):
+                return
+            if self.config["voice_commands_enabled"] and insert_result:
                 action = detect_action_command(raw_text)
                 if action == "undo_last":
-                    if self._handle_undo_last():
+                    if not self._begin_delivery(operation_id, self._desktop_text("正在撤销听写…", "Undoing dictation…")):
+                        return
+                    undone = self._handle_undo_last()
+                    if undone:
                         self._status_overlay.show_done("\u21b6")  # ↶ undo glyph
                     else:
                         self._status_overlay.hide(delay=0.4)
+                    self._update_operation_state(operation_id, phase="done", status=self._desktop_text(
+                        "已撤销最近听写。" if undone else "输入位置已经变化，当前文字已保留。",
+                        "Last dictation undone." if undone else "The input position changed. Current text was preserved."))
                     return
 
             # Check for snippet triggers
             snippet_text = self.snippets.match(raw_text)
             if snippet_text:
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
-                self._status_overlay.show_done(snippet_text)
-                entry = self._retain_dictation(original_transcription, snippet_text, app_info, duration)
+                entry = self._retain_dictation(original_transcription, snippet_text, app_info, duration, operation_id=operation_id)
+                if entry is None:
+                    return
+                if not insert_result:
+                    self._commit_dictation_text(entry, snippet_text, operation_id, outcome="saved", show_done=True)
+                    return
+                if not self._begin_delivery(operation_id):
+                    return
+                if target_field is not None and not prepare_unchanged_target(target_field):
+                    self._finish_dictation_delivery(entry, False, operation_id=operation_id)
+                    self._update_operation_state(operation_id, status=self._desktop_text("原来的输入位置已经变化，文本已保留。请选择目标后再次插入。",
+                                                                      "The original field changed. Text kept. Choose a target and insert again."))
+                    return
+                if not self._operation_current(operation_id):
+                    return
                 reset_last_insert_diagnostic()
                 inserted_ok = insert_text(
                     snippet_text,
                     method=self.config["insert_method"],
                     app_name=app_info.get("name", ""),
                     bundle_id=app_info.get("bundle_id", ""),
+                    target_pid=app_info.get("pid"),
                 )
-                self._finish_dictation_delivery(entry, inserted_ok)
+                self._finish_dictation_delivery(entry, inserted_ok, operation_id=operation_id)
                 if not inserted_ok:
                     self._notify_insert_failed(app_info)
                     return
@@ -1575,14 +2200,26 @@ class SpeakTypeApp(rumps.App):
                 return
 
             # Check for edit commands
-            if self.config["voice_commands_enabled"]:
+            if self.config["voice_commands_enabled"] and insert_result:
                 is_edit, command = detect_edit_command(raw_text)
                 if is_edit:
-                    self._status_overlay.show_polishing(raw_text)
-                    if self._handle_edit_command(command, tone, app_info):
-                        self._status_overlay.show_done(command)
-                    else:
-                        self._status_overlay.hide(delay=0.4)
+                    if target_field is not None and not prepare_unchanged_target(target_field):
+                        self._update_operation_state(operation_id, phase="error", status=self._desktop_text("原来的输入位置已经变化，请重新选择后重试。", "The original input field changed. Select it and try again."))
+                        return
+                    with self._operation_lock:
+                        if not self._operation_current(operation_id):
+                            return
+                        self._status_overlay.show_polishing(raw_text)
+                    edited = self._handle_edit_command(command, tone, app_info, operation_id=operation_id, target_field=target_field)
+                    with self._operation_lock:
+                        if not self._operation_current(operation_id):
+                            return
+                        if edited:
+                            self._status_overlay.show_done(command)
+                        else:
+                            self._status_overlay.hide(delay=0.4)
+                        if self._main_state["phase"] not in {"done", "error"}:
+                            self._update_main_state(phase="done", status=self._desktop_text("编辑处理已结束。", "Editing finished."))
                     return
 
             # Process punctuation commands
@@ -1597,11 +2234,16 @@ class SpeakTypeApp(rumps.App):
                     text = result
 
             combined_llm_path = self.config["polish_enabled"] and self.config.get("translate_enabled", False) and not self.config.get("plugins_enabled")
-            entry = self._retain_dictation(original_transcription, text, app_info, duration)
+            entry = self._retain_dictation(original_transcription, text, app_info, duration, operation_id=operation_id)
+            if entry is None:
+                return
 
             # Polish with LLM
             if combined_llm_path:
-                self._status_overlay.show_polishing(text)
+                with self._operation_lock:
+                    if not self._update_operation_state(operation_id, phase="translating", status=self._desktop_text("正在润色并翻译…", "Polishing and translating…")):
+                        return
+                    self._status_overlay.show_polishing(text)
                 target = self.config.get("translate_target", "en")
                 logger.info("Polishing and translating to %s...", target)
                 polish_scene_id = None
@@ -1610,7 +2252,7 @@ class SpeakTypeApp(rumps.App):
                     polish_scene_id = active_scene_id
                     overrides = self.config.get("scene_prompts") or {}
                     scene_template = overrides.get(polish_scene_id) if isinstance(overrides, dict) else None
-                polished = self.polish_engine.polish_and_translate(
+                polished = polish_engine.polish_and_translate(
                     text,
                     tone=tone,
                     target_lang=target,
@@ -1620,12 +2262,20 @@ class SpeakTypeApp(rumps.App):
                     scene_template=scene_template,
                     hotwords=active_hotwords.terms,
                 )
-                llm_fallback_used = self._observe_llm_status() or llm_fallback_used
+                with self._operation_lock:
+                    if not self._operation_current(operation_id):
+                        return
+                    if self._observe_llm_status(polish_engine):
+                        llm_fallback_used = True
+                        llm_fallback_error = polish_engine.last_error
                 marks["polished"] = time.perf_counter()
                 marks["translated"] = marks["polished"]
             else:
                 if self.config["polish_enabled"]:
-                    self._status_overlay.show_polishing(text)
+                    with self._operation_lock:
+                        if not self._update_operation_state(operation_id, phase="polishing", status=self._desktop_text("正在润色…", "Polishing…")):
+                            return
+                        self._status_overlay.show_polishing(text)
                     logger.info("Polishing text...")
                     polish_scene_id = None
                     scene_template = None
@@ -1633,7 +2283,7 @@ class SpeakTypeApp(rumps.App):
                         polish_scene_id = active_scene_id
                         overrides = self.config.get("scene_prompts") or {}
                         scene_template = overrides.get(polish_scene_id) if isinstance(overrides, dict) else None
-                    polished = self.polish_engine.polish(
+                    polished = polish_engine.polish(
                         text,
                         tone=tone,
                         language=self.config["language"],
@@ -1643,7 +2293,12 @@ class SpeakTypeApp(rumps.App):
                         scene_template=scene_template,
                         hotwords=active_hotwords.terms,
                     )
-                    llm_fallback_used = self._observe_llm_status() or llm_fallback_used
+                    with self._operation_lock:
+                        if not self._operation_current(operation_id):
+                            return
+                        if self._observe_llm_status(polish_engine):
+                            llm_fallback_used = True
+                            llm_fallback_error = polish_engine.last_error
                 else:
                     polished = text
                 marks["polished"] = time.perf_counter()
@@ -1654,33 +2309,61 @@ class SpeakTypeApp(rumps.App):
 
                 # Translate if enabled
                 if self.config.get("translate_enabled", False):
+                    if not self._update_operation_state(operation_id, phase="translating", status=self._desktop_text("正在翻译…", "Translating…")):
+                        return
                     target = self.config.get("translate_target", "en")
-                    self._status_overlay.show_polishing(polished)
+                    with self._operation_lock:
+                        if not self._operation_current(operation_id):
+                            return
+                        self._status_overlay.show_polishing(polished)
                     logger.info(f"Translating to {target}...")
-                    polished = self.polish_engine.translate(
+                    polished = polish_engine.translate(
                         polished,
                         target_lang=target,
                         hotwords=active_hotwords.terms,
                     )
-                    llm_fallback_used = self._observe_llm_status() or llm_fallback_used
+                    with self._operation_lock:
+                        if not self._operation_current(operation_id):
+                            return
+                        if self._observe_llm_status(polish_engine):
+                            llm_fallback_used = True
+                            llm_fallback_error = polish_engine.last_error
                 marks["translated"] = time.perf_counter()
 
             logger.info(f"Final: {polished}")
+            if not self._operation_current(operation_id):
+                return
 
             # Plugin: pre_insert
             if self.config.get("plugins_enabled"):
+                before_plugin = polished
                 polished = self._plugin_manager.run_hook("pre_insert", polished)
                 if polished is None:
-                    self._status_overlay.hide(delay=0.4)
+                    with self._operation_lock:
+                        if self._commit_dictation_text(entry, before_plugin, operation_id, outcome="saved"):
+                            self._status_overlay.hide(delay=0.4)
                     return
 
             # Show the final text in the overlay before inserting
-            entry["polished"] = polished
-            if entry.get("id"):
-                self.history.update_text(entry["id"], polished)
-            self._status_overlay.show_done(polished)
+            final_status = self._desktop_text("原始转写已保留。请在权限与模型准备中检查润色模型。",
+                                              "Transcription kept. Review the polishing model in Permissions and Models.") if llm_fallback_used and not insert_result else None
+            if not self._commit_dictation_text(entry, polished, operation_id,
+                                               outcome="saved" if not insert_result else None,
+                                               status=final_status, show_done=True):
+                return
+            if not insert_result:
+                return
 
             # Insert text at cursor
+            if not self._begin_delivery(operation_id):
+                return
+            if target_field is not None and not prepare_unchanged_target(target_field):
+                self._finish_dictation_delivery(entry, False, operation_id=operation_id)
+                self._update_operation_state(operation_id, status=self._desktop_text("原来的输入位置已经变化，文本已保留。请选择目标后再次插入。",
+                                                                  "The original field changed. Text kept. Choose a target and insert again."))
+                return
+            if not self._operation_current(operation_id):
+                return
             logger.info(
                 "Inserting text via %s into %s",
                 self.config["insert_method"],
@@ -1692,13 +2375,14 @@ class SpeakTypeApp(rumps.App):
                 method=self.config["insert_method"],
                 app_name=app_info.get("name", ""),
                 bundle_id=app_info.get("bundle_id", ""),
+                target_pid=app_info.get("pid"),
             )
-            self._finish_dictation_delivery(entry, inserted_ok)
+            self._finish_dictation_delivery(entry, inserted_ok, operation_id=operation_id)
             if not inserted_ok:
                 self._notify_insert_failed(app_info)
                 return
             marks["inserted"] = time.perf_counter()
-            self._show_successful_insert_feedback(app_info, polished, llm_fallback_used)
+            self._show_successful_insert_feedback(app_info, polished, llm_fallback_used, llm_fallback_error)
             self._remember_last_insertion(polished, app_info)
             self._start_edit_observation(
                 raw_text=raw_text,
@@ -1713,41 +2397,94 @@ class SpeakTypeApp(rumps.App):
 
             marks["history_saved"] = time.perf_counter()
         except Exception as e:
-            logger.error(f"Processing failed: {e}")
-            self._show_overlay_error(t("overlay_processing_failed"), auto_hide_after=3.0)
-            rumps.notification("SpeakType", t("notif_error"), str(e))
+            with self._operation_lock:
+                if not self._operation_current(operation_id):
+                    return
+                logger.error(f"Processing failed: {e}")
+                if entry is not None and entry.get("outcome") == "pending":
+                    self._commit_dictation_text(entry, entry["polished"], operation_id, outcome="saved")
+                self._show_overlay_error(t("overlay_processing_failed"), auto_hide_after=3.0)
+                rumps.notification("SpeakType", t("notif_error"), str(e))
+                self._update_main_state(phase="error", status=str(e))
         finally:
             marks["end"] = time.perf_counter()
             self._log_pipeline_latency(marks)
-            self._is_processing = False
+            self._finish_operation(operation_id)
             if recording_path is not None:
                 Path(recording_path).unlink(missing_ok=True)
 
-    def _retain_dictation(self, raw_text, final_text, app_info, duration=0):
-        entry = {"raw": raw_text, "polished": final_text, "outcome": "pending"}
-        with self._dictation_lock:
-            self._latest_dictation = entry
-        if self.config.get("history_enabled", True):
-            entry["id"] = self.history.add(
-                raw_text=raw_text,
-                polished_text=final_text,
-                app_name=app_info.get("name", ""),
-                duration_sec=duration,
-                outcome="pending",
-            )
-        return entry
+    def _retain_dictation(self, raw_text, final_text, app_info, duration=0, *, operation_id=None):
+        with self._operation_lock:
+            if operation_id is not None and not self._operation_current(operation_id):
+                return None
+            entry = {"raw": raw_text, "polished": final_text, "outcome": "pending",
+                     "operation_id": self._operation_id if operation_id is None else operation_id}
+            with self._dictation_lock:
+                self._latest_dictation = entry
+            self._update_main_state(raw=raw_text, final=final_text)
+            if self.config.get("history_enabled", True):
+                entry["id"] = self.history.add(
+                    raw_text=raw_text, polished_text=final_text,
+                    app_name=app_info.get("name", ""), duration_sec=duration, outcome="pending")
+            return entry
 
-    def _finish_dictation_delivery(self, entry, inserted):
+    def _commit_dictation_text(self, entry, text, operation_id, *, outcome=None, status=None, show_done=False):
+        with self._operation_lock:
+            if not self._operation_current(operation_id):
+                return False
+            entry["polished"] = text
+            if entry.get("id"):
+                self.history.update_text(entry["id"], text)
+            with self._dictation_lock:
+                latest = self._latest_dictation
+                if latest is entry or (latest and (
+                    (entry.get("id") and latest.get("id") == entry["id"])
+                    or latest.get("operation_id") == operation_id
+                )):
+                    latest["polished"] = text
+            if show_done:
+                self._status_overlay.show_done(text)
+            if outcome is None:
+                self._update_main_state(final=text)
+            else:
+                self._finish_dictation_delivery(entry, False, outcome=outcome, operation_id=operation_id)
+            if status is not None:
+                self._update_main_state(status=status)
+            return True
+
+    def _finish_dictation_delivery(self, entry, inserted, outcome=None, *, operation_id=None):
+        with self._operation_lock:
+            if operation_id is not None and not self._operation_current(operation_id):
+                return False
+            return self._finish_dictation_delivery_locked(entry, inserted, outcome)
+
+    def _finish_dictation_delivery_locked(self, entry, inserted, outcome=None):
         diagnostic = get_last_insert_diagnostic()
-        outcome = "failed"
-        if inserted:
-            outcome = "inserted" if diagnostic and diagnostic.verified else "sent"
+        if outcome is None:
+            outcome = "failed"
+            if inserted:
+                outcome = "inserted" if diagnostic and diagnostic.verified else "sent"
         entry["outcome"] = outcome
         with self._dictation_lock:
-            if self._latest_dictation and self._latest_dictation.get("id") == entry.get("id"):
+            if self._latest_dictation and (
+                self._latest_dictation is entry
+                or (entry.get("id") and self._latest_dictation.get("id") == entry["id"])
+                or (entry.get("operation_id") is not None and self._latest_dictation.get("operation_id") == entry["operation_id"])
+            ):
                 self._latest_dictation["outcome"] = outcome
         if entry.get("id"):
             self.history.set_outcome(entry["id"], outcome)
+        messages = {
+            "saved": self._desktop_text("文本已保存，可以编辑、复制或插入。", "Text saved. Edit, copy, or insert it."),
+            "inserted": self._desktop_text("文字已插入目标应用。", "Text inserted into the target app."),
+            "sent": self._desktop_text("已发送输入，请检查目标应用；结果仍可复制。", "Input sent. Check the target; text remains available to copy."),
+            "failed": self._desktop_text("插入失败，文本已保留。可以复制，或重新选择输入框。", "Insertion failed. Text kept. Copy it or select another field."),
+            "cancelled": self._desktop_text("已取消，现有文本已保留。", "Cancelled. Available text has been kept."),
+        }
+        self._update_main_state(phase="error" if outcome == "failed" else "cancelled" if outcome == "cancelled" else "done",
+                                raw=entry.get("raw", ""), final=entry.get("polished", ""),
+                                status=messages[outcome])
+        return True
 
     def _copy_last_dictation(self, _):
         with self._dictation_lock:
@@ -1771,27 +2508,8 @@ class SpeakTypeApp(rumps.App):
         if not text:
             self._show_overlay_notice(t("notif_no_recent_dictation"))
             return
-        app_info = get_active_app()
-        self._is_processing = True
-        self._cancel_edit_observation()
-
-        def deliver():
-            try:
-                inserted = insert_text(text, method=self.config["insert_method"],
-                                       app_name=app_info.get("name", ""),
-                                       bundle_id=app_info.get("bundle_id", ""))
-                self._finish_dictation_delivery(entry, inserted)
-                if inserted:
-                    self._remember_last_insertion(text, app_info)
-                    self._show_successful_insert_feedback(app_info, text)
-                    self._show_overlay_done(text)
-                else:
-                    self._notify_insert_failed(app_info)
-            finally:
-                self._is_processing = False
-
-        self._processing_thread = threading.Thread(target=deliver, daemon=True, name="SpeakTypeRetryInsert")
-        self._processing_thread.start()
+        self._remember_external_app()
+        self._main_insert(text)
 
     def _remember_last_insertion(self, text: str, app_info: dict | None = None):
         snapshot = capture_verified_insertion(text)
@@ -1860,7 +2578,10 @@ class SpeakTypeApp(rumps.App):
         self._clear_last_insertion()
         return True
 
-    def _handle_edit_command(self, command: str, tone: str, app_info: dict | None = None) -> bool:
+    def _handle_edit_command(self, command: str, tone: str, app_info: dict | None = None,
+                             operation_id=None, target_field=None) -> bool:
+        operation_id = self._new_operation() if operation_id is None else operation_id
+        entry = None
         try:
             selected = get_selected_text()
             if not selected:
@@ -1869,14 +2590,30 @@ class SpeakTypeApp(rumps.App):
                     _play_sound("Basso")
                 return False
             logger.info(f"Edit command: '{command}' on: '{selected[:50]}...'")
-            result = self.polish_engine.edit_text(command, selected, tone)
-            self._observe_llm_status()
             target = app_info or get_active_app()
-            entry = self._retain_dictation(selected, result, target)
+            entry = self._retain_dictation(selected, selected, target, operation_id=operation_id)
+            if entry is None:
+                return False
+            polish_engine = self._new_polish_engine()
+            result = polish_engine.edit_text(command, selected, tone)
+            with self._operation_lock:
+                if not self._operation_current(operation_id):
+                    return False
+                if self._observe_llm_status(polish_engine):
+                    self._commit_dictation_text(entry, selected, operation_id, outcome="saved")
+                    self._update_main_state(phase="error", status=polish_engine.last_error)
+                    return False
+                self._commit_dictation_text(entry, result, operation_id)
+            if not self._begin_delivery(operation_id):
+                return False
+            if target_field is not None and not prepare_unchanged_target(target_field):
+                self._finish_dictation_delivery(entry, False, operation_id=operation_id)
+                return False
             inserted = insert_text(result, method=self.config["insert_method"],
                                    app_name=target.get("name", ""),
-                                   bundle_id=target.get("bundle_id", ""))
-            self._finish_dictation_delivery(entry, inserted)
+                                   bundle_id=target.get("bundle_id", ""), target_pid=target.get("pid"))
+            if not self._finish_dictation_delivery(entry, inserted, operation_id=operation_id):
+                return False
             if inserted:
                 self._remember_last_insertion(result, target)
             else:
@@ -1884,9 +2621,14 @@ class SpeakTypeApp(rumps.App):
             return inserted
         except Exception as e:
             logger.error(f"Edit command failed: {e}")
+            with self._operation_lock:
+                if self._operation_current(operation_id):
+                    if entry is not None:
+                        self._commit_dictation_text(entry, entry["polished"], operation_id, outcome="saved")
+                    self._update_main_state(phase="error", status=str(e))
             return False
         finally:
-            self._is_processing = False
+            self._finish_operation(operation_id)
 
     def _open_settings(self, _):
         """Open the native Settings window."""
@@ -1911,6 +2653,14 @@ class SpeakTypeApp(rumps.App):
 
     def _apply_settings(self, new_config: dict):
         """Apply new settings from the Settings window."""
+        if self._quitting:
+            return
+        if self._main_controller and not self._is_processing and not self.recorder.is_recording:
+            edited = self._main_controller.get_final_text()
+            if edited:
+                self._update_latest_final_text(edited)
+        if self._is_processing or self.recorder.is_recording:
+            self._main_cancel()
         old_hotkey = self.config.get("hotkey")
         old_asr = self.config.get("asr_model")
         old_mode = self.config.get("dictation_mode")
@@ -1939,18 +2689,24 @@ class SpeakTypeApp(rumps.App):
 
         # Reload ASR model if changed
         if new_config.get("asr_model") != old_asr:
-            self.asr = ASREngine(
-                model_name=self.config["asr_model"],
-                backend="qwen",
-                whisper_model="base",
-            )
-            self.asr.load_async()
+            with self._operation_lock:
+                self.asr = ASREngine(
+                    model_name=self.config["asr_model"],
+                    backend="qwen",
+                    whisper_model="base",
+                )
+                self._asr_engines.add(self.asr)
+                self._engine_thread = None
+                self._engine_error = ""
+                self._update_main_state(phase="idle", ready=False, busy=False,
+                                        status=self._desktop_text("语音模型已更改，正在检查准备状态。", "Speech model changed. Checking readiness."))
 
         # Update polish engine
         self.polish_engine = PolishEngine(
             model=self.config["llm_model"],
             ollama_url=self.config["ollama_url"],
         )
+        self._polish_engines.add(self.polish_engine)
         if self.config.get("polish_enabled") or self.config.get("translate_enabled", False):
             self._llm_unavailable_notified = False
             self.polish_engine.prewarm_async()
@@ -1985,6 +2741,20 @@ class SpeakTypeApp(rumps.App):
         self._tone_item.state = self.config["context_aware_tone"]
         self._update_hotword_menu_title()
 
+        if new_ui_lang != old_ui_lang:
+            if self._main_controller:
+                self._main_controller.flush_edits()
+                self._main_controller.dispose()
+                self._main_controller = None
+                self._show_main_window(None)
+            help_controller = getattr(self, "_help_controller", None)
+            if help_controller:
+                help_controller.close()
+                self._help_controller = None
+        if self._setup_center:
+            self._setup_center.apply_config(dict(self.config))
+        self._refresh_main_readiness()
+
         rumps.notification("SpeakType", t("notif_settings_saved_title"), t("notif_settings_saved_body"))
 
     def _toggle_polish(self, sender):
@@ -2017,6 +2787,8 @@ class SpeakTypeApp(rumps.App):
         )
 
     def _show_diagnostics(self, _):
+        if self._quitting:
+            return
         from .diagnostics_window import DiagnosticsWindowController
         self._diagnostics_controller = _show_or_create_window_controller(
             getattr(self, "_diagnostics_controller", None),
@@ -2046,7 +2818,7 @@ class SpeakTypeApp(rumps.App):
                 rumps.notification("SpeakType", t("notif_mic_test"), t("notif_mic_ok", size=size))
             else:
                 rumps.notification("SpeakType", t("notif_mic_test"), t("notif_mic_fail"))
-        threading.Thread(target=_do_test, daemon=True).start()
+        self._start_model_worker(_do_test, name="SpeakTypeMicrophoneTest")
 
     def _reload_config(self, _):
         self.config = load_config()
@@ -2099,7 +2871,7 @@ class SpeakTypeApp(rumps.App):
                     t("notif_up_to_date_body", version=APP_VERSION),
                 )
 
-        threading.Thread(target=_do_check, daemon=True).start()
+        self._start_model_worker(_do_check, name="SpeakTypeUpdateCheck")
 
     def _show_about(self, _):
         rumps.notification(
@@ -2108,7 +2880,79 @@ class SpeakTypeApp(rumps.App):
             about_notification_body(self.asr.get_backend_info()),
         )
 
+    def _resume_after_quit(self, status):
+        with self._operation_lock:
+            self._quitting = False
+            self._update_main_state(status=status)
+        readiness_timer = getattr(self, "_readiness_timer", None)
+        if readiness_timer:
+            readiness_timer.start()
+        self._start_permission_restart_watcher()
+        if self._setup_center:
+            self._setup_center.resume_after_shutdown()
+        if self._diagnostics_controller:
+            self._diagnostics_controller.resume_after_shutdown()
+        self._refresh_main_readiness()
+
+    def _prepare_to_quit(self, timeout=60.0):
+        deadline = time.monotonic() + timeout
+        self._flush_main_edits()
+        with self._operation_lock:
+            self._quitting = True
+            self._pending_trial = False
+            delivering = self._delivery_operation_id == self._operation_id or self._main_state.get("phase") == "delivering"
+        readiness_timer = getattr(self, "_readiness_timer", None)
+        if readiness_timer:
+            readiness_timer.stop()
+        self._permission_watch_stop.set()
+        self._release_guard_stop.set()
+        self._cancel_edit_observation()
+        if self._setup_center:
+            self._setup_center.shutdown()
+        if self._diagnostics_controller:
+            self._diagnostics_controller.shutdown()
+        if delivering:
+            worker = self._processing_thread
+            while worker is not None and worker.is_alive() and time.monotonic() < deadline:
+                NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.02))
+                worker.join(timeout=0.02)
+            if worker is not None and worker.is_alive():
+                self._resume_after_quit(self._desktop_text(
+                    "文字仍在插入，应用将保持运行。完成后可以再次退出。",
+                    "Text insertion is still running. SpeakType will stay open. Quit again after it finishes."))
+                return False
+            with self._operation_lock:
+                with self._dictation_lock:
+                    entry = dict(self._latest_dictation or {})
+                if entry.get("outcome") == "pending":
+                    self._finish_dictation_delivery(entry, False)
+        else:
+            self._main_cancel()
+        with self._operation_lock:
+            self._operation_cancel.set()
+        if not self._wait_for_model_workers(deadline):
+            self._resume_after_quit(self._desktop_text(
+                "模型任务仍在结束，应用将保持运行。完成后可以再次退出。",
+                "Model tasks are still finishing. SpeakType will stay open. Quit again after they finish."))
+            return False
+        return True
+
     def _quit(self, _):
+        if self._quitting:
+            return
+        if not self._prepare_to_quit():
+            return
+        self._finish_quit()
+
+    def _finish_quit(self):
+        if self.recorder.is_recording:
+            self.recorder.set_stream_callback(None)
+            self.recorder.stop_audio()
+        readiness_timer = getattr(self, "_readiness_timer", None)
+        if readiness_timer:
+            readiness_timer.stop()
+        if self._setup_center:
+            self._setup_center.shutdown()
         self._cancel_edit_observation()
         self._permission_watch_stop.set()
         if self.hotkey_listener:
@@ -2120,13 +2964,6 @@ class SpeakTypeApp(rumps.App):
             except Exception:
                 pass
             self._streaming_transcriber = None
-        # Wait briefly for any in-flight transcription/polish thread so we
-        # don't yank the rug out from under a write the user expects.
-        if self._processing_thread is not None and self._processing_thread.is_alive():
-            try:
-                self._processing_thread.join(timeout=2.0)
-            except Exception:
-                pass
         try:
             self._status_overlay.hide()
         except Exception:
@@ -2219,67 +3056,16 @@ def _permission_status_has_new_grant(previous, current) -> bool:
     )
 
 
-def _refresh_permissions_after_bundle_update(config: dict):
-    """Force a permission re-request once per newly installed bundled build."""
-    current_version = APP_VERSION
-    previous_version = str(config.get("last_seen_version") or "")
-    running_bundle = get_running_bundle_path()
-    current_fingerprint = get_bundle_fingerprint(running_bundle) if running_bundle else ""
-    previous_fingerprint = str(config.get("last_seen_bundle_fingerprint") or "")
-    existing_config = CONFIG_FILE.exists()
-
-    if not previous_version and not previous_fingerprint:
-        config["last_seen_version"] = current_version
-        if current_fingerprint:
-            config["last_seen_bundle_fingerprint"] = current_fingerprint
-        if running_bundle and existing_config:
-            config[PERMISSION_RESTART_PENDING_KEY] = True
-            save_config(config)
-            logger.info(
-                "Existing config has no bundle marker; forcing one-time permission refresh for %s",
-                current_version,
-            )
-            refresh_permissions_for_update(BUNDLE_IDENTIFIER)
-            return
+def _record_running_build(config: dict):
+    fingerprint = get_bundle_fingerprint()
+    changed = config.get("last_seen_version") != APP_VERSION or config.get("permission_restart_pending_after_refresh")
+    changed = changed or fingerprint and config.get("last_seen_bundle_fingerprint") != fingerprint
+    if changed:
+        config["last_seen_version"] = APP_VERSION
+        config[PERMISSION_RESTART_PENDING_KEY] = False
+        if fingerprint:
+            config["last_seen_bundle_fingerprint"] = fingerprint
         save_config(config)
-        logger.info("Recording current bundle for permission refresh tracking: %s", current_version)
-        return
-
-    version_changed = previous_version != current_version
-    bundle_changed = bool(
-        running_bundle
-        and current_fingerprint
-        and previous_fingerprint
-        and previous_fingerprint != current_fingerprint
-    )
-    missing_fingerprint_for_bundle = bool(running_bundle and current_fingerprint and not previous_fingerprint)
-
-    if not version_changed and not bundle_changed and not missing_fingerprint_for_bundle:
-        return
-
-    config["last_seen_version"] = current_version
-    if current_fingerprint:
-        config["last_seen_bundle_fingerprint"] = current_fingerprint
-    if running_bundle:
-        config[PERMISSION_RESTART_PENDING_KEY] = True
-    save_config(config)
-
-    if not running_bundle:
-        logger.info(
-            "Detected version change outside bundled app (%s -> %s); skipping permission reset",
-            previous_version,
-            current_version,
-        )
-        return
-
-    logger.info(
-        "Detected bundled app install/update %s -> %s (bundle_changed=%s); resetting permissions for %s",
-        previous_version,
-        current_version,
-        bundle_changed or missing_fingerprint_for_bundle,
-        BUNDLE_IDENTIFIER,
-    )
-    refresh_permissions_for_update(BUNDLE_IDENTIFIER)
 
 
 def run():
@@ -2304,8 +3090,7 @@ def run():
     )
 
     config = load_config()
-    _refresh_permissions_after_bundle_update(config)
-    _check_permissions()
+    _record_running_build(config)
 
     logger.info("Starting SpeakType v%s...", APP_VERSION)
     app = SpeakTypeApp()

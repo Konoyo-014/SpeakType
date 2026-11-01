@@ -15,7 +15,7 @@ from uuid import uuid4
 from .config import HISTORY_FILE, write_json_file
 
 EXPORT_FORMATS = ("txt", "md", "csv", "json")
-INSERTION_OUTCOMES = ("pending", "inserted", "sent", "failed")
+INSERTION_OUTCOMES = ("pending", "saved", "inserted", "sent", "failed", "cancelled")
 
 
 def _validate_duration(value) -> float:

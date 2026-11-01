@@ -1,5 +1,3 @@
-"""Native local diagnostics window."""
-
 import threading
 import unicodedata
 import AppKit
@@ -8,6 +6,10 @@ from Foundation import NSObject, NSMakeRect
 
 from .i18n import t
 from .diagnostics import run_readiness_checks, render_diagnostics_text
+
+_diagnostics_workers = set()
+_diagnostics_worker_lock = threading.Lock()
+_diagnostics_shutdown = threading.Event()
 
 
 def diagnostics_counts(items: list) -> dict[str, int]:
@@ -85,8 +87,11 @@ class DiagnosticsWindowController:
         self._copy_button = None
         self._last_report = ""
         self._last_items = []
+        self._worker_thread = None
 
     def show(self):
+        if _diagnostics_shutdown.is_set():
+            raise RuntimeError("A shutting-down diagnostics window cannot be shown")
         if self.window and self.window.isVisible():
             self.window.makeKeyAndOrderFront_(None)
             AppKit.NSApp.activateIgnoringOtherApps_(True)
@@ -101,6 +106,19 @@ class DiagnosticsWindowController:
         if self.window:
             self.window.close()
 
+    @property
+    def worker_threads(self):
+        with _diagnostics_worker_lock:
+            return tuple(_diagnostics_workers)
+
+    def shutdown(self):
+        _diagnostics_shutdown.set()
+
+    def resume_after_shutdown(self):
+        _diagnostics_shutdown.clear()
+        if self.window is not None:
+            self.refresh()
+
     def copy_report(self):
         pb = AppKit.NSPasteboard.generalPasteboard()
         pb.clearContents()
@@ -109,23 +127,33 @@ class DiagnosticsWindowController:
             self._copy_button.setTitle_(t("diag_copy_done"))
 
     def refresh(self):
+        if _diagnostics_shutdown.is_set() or (self._worker_thread is not None and self._worker_thread.is_alive()):
+            return
         self._set_running(True)
         self._set_report_text(t("diag_running"))
 
         def worker():
             try:
-                items = run_readiness_checks(self.config, asr_engine=self.asr_engine)
-                text = render_diagnostics_text(items)
-            except Exception as e:
-                items = []
-                text = t("diag_failed", error=str(e))
-            self._updater._text = text
-            self._updater._items = items
-            self._updater.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"applyText:", None, False
-            )
+                try:
+                    items = run_readiness_checks(self.config, asr_engine=self.asr_engine)
+                    text = render_diagnostics_text(items)
+                except Exception as e:
+                    items = []
+                    text = t("diag_failed", error=str(e))
+                if not _diagnostics_shutdown.is_set():
+                    self._updater._text = text
+                    self._updater._items = items
+                    self._updater.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        b"applyText:", None, False
+                    )
+            finally:
+                with _diagnostics_worker_lock:
+                    _diagnostics_workers.discard(threading.current_thread())
 
-        threading.Thread(target=worker, daemon=True, name="SpeakTypeDiagnostics").start()
+        self._worker_thread = threading.Thread(target=worker, daemon=True, name="SpeakTypeDiagnostics")
+        with _diagnostics_worker_lock:
+            _diagnostics_workers.add(self._worker_thread)
+        self._worker_thread.start()
 
     def _build_window(self):
         frame = NSMakeRect(0, 0, 640, 560)
@@ -137,6 +165,7 @@ class DiagnosticsWindowController:
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, AppKit.NSBackingStoreBuffered, False
         )
+        self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(t("diag_window_title"))
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
@@ -197,6 +226,8 @@ class DiagnosticsWindowController:
         return button
 
     def _apply_report(self, text: str, items: list):
+        if _diagnostics_shutdown.is_set():
+            return
         self._last_report = text
         self._last_items = list(items or [])
         is_running = not self._last_items and text == t("diag_running")

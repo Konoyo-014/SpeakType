@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
+import time
 
 import AppKit
 from ApplicationServices import AXValueCreate, kAXSelectedTextAttribute, kAXSelectedTextRangeAttribute, kAXValueCFRangeType
@@ -38,8 +40,14 @@ if bundled:
 
 
 def focus_textedit():
-    _prepare_target_app(bundle_id="com.apple.TextEdit", app_name="TextEdit")
-    assert get_active_app()["bundle_id"] == "com.apple.TextEdit"
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(pid=_prepare_target_app(bundle_id="com.apple.TextEdit", app_name="TextEdit")))
+    worker.start()
+    deadline = time.monotonic() + 10
+    while worker.is_alive() and time.monotonic() < deadline:
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.02))
+    assert not worker.is_alive() and result.get("pid") is not None, result
+    assert get_active_app()["bundle_id"] == "com.apple.TextEdit", get_active_app()
     element = _get_focused_element()
     assert element is not None
     assert isinstance(_copy_ax_attribute(element, "AXValue"), str)

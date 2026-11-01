@@ -212,6 +212,7 @@ class SettingsWindowController:
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame, style, AppKit.NSBackingStoreBuffered, False
         )
+        self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(t("settings_title"))
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)

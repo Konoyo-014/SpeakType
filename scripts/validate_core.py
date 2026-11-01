@@ -14,6 +14,7 @@ from uuid import uuid4
 
 
 REPO = Path(__file__).resolve().parents[1]
+BUNDLE = os.environ.get("SPEAKTYPE_TEST_BUNDLE")
 SUITE_NAMES = ("commands", "config", "corrections", "snippets", "hotwords", "history")
 
 
@@ -421,7 +422,7 @@ def validate_history(run_dir):
         history.add("bad", "bad", outcome="invented")
     with TestCase().assertRaises(ValueError):
         history.set_outcome(first, "invented")
-    assert set(INSERTION_OUTCOMES) == {"pending", "inserted", "sent", "failed"}
+    assert set(INSERTION_OUTCOMES) == {"pending", "saved", "inserted", "sent", "failed", "cancelled"}
     entries = history.snapshot()
     entries[0]["polished"] = "External mutation"
     assert history.snapshot()[0]["polished"] == "整理之后 café\n第二行"
@@ -514,6 +515,8 @@ def run_worker(run_dir, suites):
 
     assert run_dir.is_relative_to(REPO / "work")
     assert os.environ["SPEAKTYPE_CONFIG_DIR"] == str(run_dir / "config")
+    if BUNDLE:
+        assert Path(sys.prefix).resolve().is_relative_to(Path(BUNDLE).resolve())
     started = datetime.now(timezone.utc).isoformat()
     passed = []
     available = {name: globals()[f"validate_{name}"] for name in SUITE_NAMES}
@@ -521,14 +524,19 @@ def run_worker(run_dir, suites):
         available[name](run_dir)
         passed.append(name)
         print(f"PASS {name}", flush=True)
+    module_paths = {name: Path(sys.modules[f"speaktype.{name}"].__file__).resolve()
+                    for name in ("context", *suites) if f"speaktype.{name}" in sys.modules}
+    if BUNDLE:
+        assert all(path.is_relative_to(Path(BUNDLE).resolve()) for path in module_paths.values())
     report = {"started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
               "python": sys.version, "executable": sys.executable,
+              "runtime": BUNDLE or "source", "prefix": sys.prefix,
               "app_version": __version__,
               "config_dir": os.environ["SPEAKTYPE_CONFIG_DIR"],
               "suites_passed": passed, "suite_count": len(passed),
-              "source_sha256": {str(path.relative_to(REPO)): sha256(path.read_bytes()).hexdigest()
-                                for path in [Path(__file__).resolve(), REPO / "speaktype" / "context.py",
-                                             *[REPO / "speaktype" / f"{name}.py" for name in SUITE_NAMES]]},
+              "module_paths": {name: str(path) for name, path in module_paths.items()},
+              "source_sha256": {str(path): sha256(path.read_bytes()).hexdigest()
+                                for path in [Path(__file__).resolve(), *module_paths.values()]},
               "method": "real isolated files and production functions; no mocks or monkeypatches"}
     write_json(run_dir / "report.json", report)
     print(f"REPORT {run_dir / 'report.json'}", flush=True)
@@ -543,6 +551,8 @@ def main():
     if args.worker is not None:
         run_worker(args.worker.resolve(), suites)
         return
+    if BUNDLE:
+        parser.error("Bundled validation requires --worker and an isolated SPEAKTYPE_CONFIG_DIR")
     run_dir = REPO / "work" / "core-validation" / (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8])
     run_dir.mkdir(parents=True)

@@ -1,17 +1,10 @@
-"""Shared helpers for native utility-window lifecycle management."""
-
-
 def controller_window_is_visible(controller) -> bool:
-    window = getattr(controller, "window", None)
+    if controller is None:
+        return False
+    window = controller.window
     if window is None:
         return False
-    is_visible = getattr(window, "isVisible", None)
-    if not callable(is_visible):
-        return False
-    try:
-        return bool(is_visible())
-    except Exception:
-        return False
+    return bool(window.isVisible())
 
 
 def show_or_create_window_controller(current_controller, factory):
@@ -20,4 +13,6 @@ def show_or_create_window_controller(current_controller, factory):
         return current_controller
     controller = factory()
     controller.show()
+    if controller.window is None or controller.window.isReleasedWhenClosed():
+        raise RuntimeError("Native window controllers must retain their windows after closing")
     return controller

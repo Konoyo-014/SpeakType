@@ -5,15 +5,8 @@ import os
 import sys
 import threading
 
-try:
-    import AppKit
-except Exception:  # pragma: no cover - AppKit is only available on macOS
-    AppKit = None
-
-try:
-    import Quartz
-except Exception:  # pragma: no cover - Quartz is only available on macOS
-    Quartz = None
+import AppKit
+import Quartz
 
 from pynput import keyboard
 
@@ -289,6 +282,11 @@ class HotkeyListener:
 
     def clear_pressed_state(self):
         """Clear stale pressed state after an external recovery stop."""
+        self._is_pressed = False
+        self._combo_keys.clear()
+
+    def reset_recording_state(self):
+        self._toggle_active = False
         self._is_pressed = False
         self._combo_keys.clear()
 

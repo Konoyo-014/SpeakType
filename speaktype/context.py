@@ -1,8 +1,7 @@
 """Detect the active application for context-aware tone adjustment."""
 
 import logging
-
-from .applescript import run_osascript
+import AppKit
 
 logger = logging.getLogger("speaktype.context")
 
@@ -35,23 +34,12 @@ NOTE_APPS = {
 
 
 def get_active_app() -> dict:
-    """Get the active (frontmost) application info."""
-    try:
-        script = '''
-        tell application "System Events"
-            set frontApp to first application process whose frontmost is true
-            set appName to name of frontApp
-            set appID to bundle identifier of frontApp
-            return appName & "|" & appID
-        end tell
-        '''
-        result = run_osascript(script, timeout=2)
-        if result.returncode == 0 and "|" in result.stdout.strip():
-            name, bundle_id = result.stdout.strip().split("|", 1)
-            return {"name": name, "bundle_id": bundle_id}
-    except Exception as e:
-        logger.debug(f"Failed to detect active app: {e}")
-    return {"name": "Unknown", "bundle_id": ""}
+    app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    if app is None:
+        return {"name": "Unknown", "bundle_id": "", "pid": None}
+    return {"name": str(app.localizedName() or "Unknown"),
+            "bundle_id": str(app.bundleIdentifier() or ""),
+            "pid": int(app.processIdentifier())}
 
 
 def get_tone_for_app(app_info: dict) -> str:
@@ -91,19 +79,19 @@ def get_scene_for_app(app_info: dict) -> str:
 
 
 def get_selected_text() -> str:
-    """Get currently selected text via Cmd+C using CGEvent + NSPasteboard.
-
-    Always restores the user's previous clipboard contents, even if any
-    intermediate step throws — the previous implementation could lose the
-    user's clipboard on errors.
-    """
+    from .inserter import _copy_ax_attribute, _get_focused_element
+    element = _get_focused_element()
+    if element is not None:
+        selected = _copy_ax_attribute(element, "AXSelectedText")
+        if isinstance(selected, str):
+            return selected if selected.strip() else ""
     import time
     import AppKit
     import Quartz
 
     pb = AppKit.NSPasteboard.generalPasteboard()
 
-    # Snapshot the current clipboard so we can put it back no matter what.
+    # 保留原有剪贴板内容，只在剪贴板仍由本次复制操作占用时恢复。
     old_types = pb.types()
     old_data: dict = {}
     if old_types:
@@ -116,12 +104,13 @@ def get_selected_text() -> str:
                 continue
 
     new_text = ""
+    expected_change_count = None
     try:
-        # Clear clipboard so we can detect new content
         pb.clearContents()
         pb.setString_forType_("", AppKit.NSPasteboardTypeString)
+        expected_change_count = pb.changeCount()
 
-        # Simulate Cmd+C via CGEvent
+        # 使用系统复制快捷键获取不提供 AXSelectedText 的应用选区。
         src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
         cmd_c_down = Quartz.CGEventCreateKeyboardEvent(src, 8, True)
         Quartz.CGEventSetFlags(cmd_c_down, Quartz.kCGEventFlagMaskCommand)
@@ -134,11 +123,11 @@ def get_selected_text() -> str:
         time.sleep(0.15)
 
         new_text = pb.stringForType_(AppKit.NSPasteboardTypeString) or ""
+        expected_change_count = pb.changeCount()
     except Exception as e:
         logger.debug(f"Failed to get selected text: {e}")
     finally:
-        # Restore the old clipboard contents.
-        if old_data:
+        if old_data and expected_change_count is not None and pb.changeCount() == expected_change_count:
             try:
                 pb.clearContents()
                 for t, d in old_data.items():

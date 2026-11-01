@@ -34,7 +34,7 @@ AX_VERIFY_ATTEMPTS = 2
 CLIPBOARD_RESTORE_DELAY = 0.75
 KEYCODE_V = 9
 KEYCODE_COMMAND = 55
-TARGET_ACTIVATION_DELAY = 0.3
+TARGET_ACTIVATION_TIMEOUT = 1.0
 PASTE_FIRST_BUNDLE_MARKERS = (
     "com.openai.codex",
     "com.anthropic.claudefordesktop",
@@ -213,13 +213,15 @@ def _set_insert_diagnostic(
     )
 
 
-def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id: str = "") -> bool:
+def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id: str = "", target_pid: int | None = None) -> bool:
     """Insert text at the current cursor position."""
     reset_last_insert_diagnostic()
     if not text:
         _set_insert_diagnostic(True, True, method, "empty_text")
         return True
-    _prepare_target_app(bundle_id=bundle_id, app_name=app_name)
+    target_pid = _prepare_target_app(bundle_id=bundle_id, app_name=app_name, method=method, target_pid=target_pid)
+    if target_pid is None:
+        return False
     logger.info(
         "Insert text via %s (%d chars) into %s [%s]",
         method,
@@ -228,12 +230,14 @@ def insert_text(text: str, method: str = "paste", app_name: str = "", bundle_id:
         bundle_id or "",
     )
     if method == "paste":
-        return _insert_via_paste(text, app_name=app_name, bundle_id=bundle_id)
-    return _insert_via_keystroke(text)
+        return _insert_via_paste(text, app_name=app_name, bundle_id=bundle_id, target_pid=target_pid)
+    return _insert_via_keystroke(text, target_pid=target_pid)
 
 
-def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> bool:
+def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "", target_pid: int = 0) -> bool:
     """Insert text by setting pasteboard and simulating Cmd+V via CGEvent."""
+    if not _target_is_frontmost(target_pid, "paste"):
+        return False
     if _should_try_accessibility_first(app_name=app_name, bundle_id=bundle_id) and _insert_via_accessibility(text):
         return True
     if not _can_post_synthetic_input():
@@ -259,10 +263,11 @@ def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> boo
 
         if PASTEBOARD_SETTLE_DELAY > 0:
             time.sleep(PASTEBOARD_SETTLE_DELAY)
+        if not _target_is_frontmost(target_pid, "paste"):
+            _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+            return False
 
-        # Some desktop shells handle UI scripting paste more reliably than raw
-        # CGEvents, especially when the editor is embedded inside Chromium.
-        _press_cmd_v(app_name=app_name)
+        _press_cmd_v(app_name=app_name, target_pid=target_pid)
         verification = _verify_paste_result(element, value_before, text)
         if verification is True:
             _schedule_pasteboard_restore(
@@ -284,10 +289,13 @@ def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> boo
             return True
 
         logger.info(
-            "Quartz paste did not change the focused text field; retrying via System Events (app=%s)",
+            "Quartz paste did not change the focused text field (app=%s)",
             app_name or "Unknown",
         )
-        if _press_cmd_v_with_osascript(app_name=app_name):
+        if not _target_is_frontmost(target_pid, "paste"):
+            _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+            return False
+        if not target_pid and _press_cmd_v_with_osascript(app_name=app_name):
             verification = _verify_paste_result(element, value_before, text)
             if verification is True:
                 _schedule_pasteboard_restore(
@@ -308,7 +316,7 @@ def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> boo
                 logger.info("Clipboard paste path completed via System Events without AX verification (app=%s)", app_name or "Unknown")
                 return True
 
-        if _insert_via_keystroke(text):
+        if _insert_via_keystroke(text, target_pid=target_pid):
             _schedule_pasteboard_restore(
                 old_data,
                 temporary_text=text,
@@ -322,6 +330,8 @@ def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> boo
             return True
 
         _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
+        if not _target_is_frontmost(target_pid, "paste"):
+            return False
         _set_insert_diagnostic(False, False, "paste", "paste_verification_failed")
         logger.error("Clipboard paste failed verification (app=%s)", app_name or "Unknown")
         return False
@@ -330,7 +340,9 @@ def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> boo
         logger.error(f"Paste insertion failed: {e}")
         if pb is not None:
             _restore_pasteboard(pb, _cancel_pending_pasteboard_restore(old_data))
-        if _insert_via_keystroke(text):
+        if not _target_is_frontmost(target_pid, "paste"):
+            return False
+        if _insert_via_keystroke(text, target_pid=target_pid):
             logger.info(
                 "Clipboard paste failed; direct keystroke fallback succeeded (%d chars, app=%s)",
                 len(text),
@@ -341,14 +353,14 @@ def _insert_via_paste(text: str, app_name: str = "", bundle_id: str = "") -> boo
         return False
 
 
-def _press_cmd_v(app_name: str = ""):
+def _press_cmd_v(app_name: str = "", target_pid: int = 0):
     """Simulate Cmd+V keypress using Quartz CGEvent."""
     src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
     tap = Quartz.kCGAnnotatedSessionEventTap
-    _post_key_event(src, tap, KEYCODE_COMMAND, True, Quartz.kCGEventFlagMaskCommand)
-    _post_key_event(src, tap, KEYCODE_V, True, Quartz.kCGEventFlagMaskCommand)
-    _post_key_event(src, tap, KEYCODE_V, False, Quartz.kCGEventFlagMaskCommand)
-    _post_key_event(src, tap, KEYCODE_COMMAND, False, 0)
+    _post_key_event(src, tap, KEYCODE_COMMAND, True, Quartz.kCGEventFlagMaskCommand, target_pid)
+    _post_key_event(src, tap, KEYCODE_V, True, Quartz.kCGEventFlagMaskCommand, target_pid)
+    _post_key_event(src, tap, KEYCODE_V, False, Quartz.kCGEventFlagMaskCommand, target_pid)
+    _post_key_event(src, tap, KEYCODE_COMMAND, False, 0, target_pid)
     logger.info("Paste shortcut sent via Quartz CGEvent (app=%s)", app_name or "Unknown")
 
 
@@ -478,33 +490,82 @@ def _verify_paste_result(element, value_before, inserted_text: str):
     return False
 
 
-def _post_key_event(source, tap, keycode: int, is_down: bool, flags: int = 0):
+def _post_event(event, tap, target_pid: int = 0):
+    if target_pid:
+        Quartz.CGEventPostToPid(target_pid, event)
+    else:
+        Quartz.CGEventPost(tap, event)
+
+
+def _post_key_event(source, tap, keycode: int, is_down: bool, flags: int = 0, target_pid: int = 0):
     event = Quartz.CGEventCreateKeyboardEvent(source, keycode, is_down)
     if flags:
         Quartz.CGEventSetFlags(event, flags)
-    Quartz.CGEventPost(tap, event)
+    _post_event(event, tap, target_pid)
 
 
-def _prepare_target_app(bundle_id: str = "", app_name: str = ""):
+def _prepare_target_app(bundle_id: str = "", app_name: str = "", method: str = "paste", target_pid: int | None = None) -> int | None:
     """Bring the target app back to front before synthetic input."""
-    app = _find_running_app(bundle_id=bundle_id, app_name=app_name)
-    if app is None:
-        return
-
+    if not bundle_id and not app_name and target_pid is None:
+        return 0
     try:
-        if not app.isActive():
-            app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
-            time.sleep(TARGET_ACTIVATION_DELAY)
-        _enable_manual_accessibility_once(app.processIdentifier())
+        if target_pid is not None:
+            app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(target_pid)
+            if app is not None and (
+                (bundle_id and app.bundleIdentifier() != bundle_id)
+                or (not bundle_id and app_name and app.localizedName() != app_name)
+            ):
+                _set_insert_diagnostic(False, False, method, "target_process_changed", f"expected_pid={target_pid}, bundle_id={bundle_id}")
+                return None
+        else:
+            app = _find_running_app(bundle_id=bundle_id, app_name=app_name)
+        if app is None or app.isTerminated():
+            _set_insert_diagnostic(False, False, method, "target_not_running", bundle_id or app_name)
+            return None
+        target_pid = int(app.processIdentifier())
+        workspace = AppKit.NSWorkspace.sharedWorkspace()
+        frontmost = workspace.frontmostApplication()
+        if frontmost is None or frontmost.processIdentifier() != target_pid:
+            if not app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps):
+                _set_insert_diagnostic(False, False, method, "target_activation_failed", bundle_id or app_name)
+                return None
+        deadline = time.monotonic() + TARGET_ACTIVATION_TIMEOUT
+        while True:
+            if app.isTerminated():
+                _set_insert_diagnostic(False, False, method, "target_not_running", bundle_id or app_name)
+                return None
+            frontmost = workspace.frontmostApplication()
+            if frontmost is not None and frontmost.processIdentifier() == target_pid:
+                _enable_manual_accessibility_once(target_pid)
+                return target_pid
+            if time.monotonic() >= deadline:
+                _set_insert_diagnostic(False, False, method, "target_not_frontmost", bundle_id or app_name)
+                return None
+            time.sleep(0.02)
     except Exception as e:
-        logger.debug(f"Failed to prepare target app {bundle_id or app_name}: {e}")
+        logger.error("Failed to prepare target app %s: %s", bundle_id or app_name, e)
+        _set_insert_diagnostic(False, False, method, "target_preparation_failed", str(e))
+        return None
+
+
+def _target_is_frontmost(target_pid: int, method: str) -> bool:
+    if not target_pid:
+        return True
+    try:
+        frontmost = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if frontmost is not None and frontmost.processIdentifier() == target_pid:
+            return True
+        current_pid = frontmost.processIdentifier() if frontmost is not None else None
+        _set_insert_diagnostic(False, False, method, "target_focus_changed", f"expected_pid={target_pid}, current_pid={current_pid}")
+    except Exception as e:
+        _set_insert_diagnostic(False, False, method, "target_focus_check_failed", str(e))
+    return False
 
 
 def _find_running_app(bundle_id: str = "", app_name: str = ""):
     if bundle_id:
         matches = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
-        if matches:
-            return matches[0]
+        return next((app for app in matches if not app.isTerminated()), None)
 
     if app_name:
         for app in AppKit.NSWorkspace.sharedWorkspace().runningApplications():
@@ -801,8 +862,10 @@ def delete_chars(count: int):
         logger.error(f"delete_chars failed: {e}")
 
 
-def _insert_via_keystroke(text: str):
+def _insert_via_keystroke(text: str, target_pid: int = 0):
     """Insert text character by character via CGEvent (slower fallback)."""
+    if not _target_is_frontmost(target_pid, "keystroke"):
+        return False
     if not _can_post_synthetic_input():
         _set_insert_diagnostic(False, False, "keystroke", "post_event_denied")
         logger.error("Cannot use keystroke insertion because PostEvent access is not granted")
@@ -813,12 +876,14 @@ def _insert_via_keystroke(text: str):
         value_before = _copy_ax_attribute(element, "AXValue") if element is not None else None
         src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
         for char in text:
+            if not _target_is_frontmost(target_pid, "keystroke"):
+                return False
             event = Quartz.CGEventCreateKeyboardEvent(src, 0, True)
-            Quartz.CGEventKeyboardSetUnicodeString(event, len(char), char)
-            Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event)
+            Quartz.CGEventKeyboardSetUnicodeString(event, CFStringGetLength(char), char)
+            _post_event(event, Quartz.kCGAnnotatedSessionEventTap, target_pid)
 
             event_up = Quartz.CGEventCreateKeyboardEvent(src, 0, False)
-            Quartz.CGEventPost(Quartz.kCGAnnotatedSessionEventTap, event_up)
+            _post_event(event_up, Quartz.kCGAnnotatedSessionEventTap, target_pid)
             time.sleep(0.01)
         time.sleep(0.05)
         if element is not None and isinstance(value_before, str):

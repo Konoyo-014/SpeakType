@@ -79,6 +79,7 @@ if args.source is not None:
     for source_script, bundled_script in (
         (source_package.parent / "main.py", resources / "main.py"),
         (source_package.parent / "scripts" / "verify_runtime.py", resources / "verify_runtime.py"),
+        (source_package / "model_download_worker.py", resources / "model_download_worker.py"),
         (source_package.parent / "resources" / "verify_error.sh", resources / "verify_error.sh"),
     ):
         if source_script.read_bytes() != bundled_script.read_bytes():

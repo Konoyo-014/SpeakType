@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-Hold Right Command, speak, and release to insert text at the cursor. SpeakType runs Qwen3-ASR on your Mac and uses a local Ollama model for optional polishing and translation.
+Record speech in the native SpeakType window, edit the result, and copy or insert it into another app. Hold Right Command to dictate directly into a focused input field. Qwen3-ASR runs on your Mac; a local Ollama model provides optional polishing and translation.
 
 ## Install
 
@@ -10,25 +10,42 @@ Requires **macOS 14 or later and an Apple Silicon Mac**. The DMG includes the Py
 
 1. Open the [latest GitHub release](https://github.com/Konoyo-014/SpeakType/releases/latest) and download the `SpeakType-*.dmg` attachment.
 2. Open the DMG, drag **SpeakType** into **Applications**, and launch it from Applications.
-3. Follow the setup window to prepare the speech recognition model. The first download requires an internet connection.
-4. In **System Settings > Privacy & Security**, allow SpeakType to use **Microphone**, **Accessibility**, and **Input Monitoring** when requested. Restart SpeakType if it prompts you after a permission change.
-5. Click an editable text field, hold **Right Command**, speak, and release.
+3. The main window shows microphone, recognition, local-model, insertion, and global-shortcut readiness. Open **Setup** to prepare permissions and models.
+4. Use the permission buttons to open **System Settings > Privacy & Security** for **Microphone**, **Accessibility**, and **Input Monitoring**. Allow SpeakType, refresh its status, and restart it when macOS requests a restart.
+5. Click **Download model** for speech recognition. The default model downloads about 2.47 GB. Keep an internet connection available until the files are verified.
+6. Select **Use dictation only**, or prepare the optional local model in the same window. Click **Try dictation** to record in the main window.
 
-SpeakType appears in the menu bar. Click its microphone icon to change settings or open **Local Diagnostics**. If macOS requests approval to open the downloaded app, use **System Settings > Privacy & Security > Open Anyway** for SpeakType.
+The app also provides a menu-bar microphone for opening the main window, setup, preferences, history, and diagnostics. If macOS requests approval to open the downloaded app, use **System Settings > Privacy & Security > Open Anyway** for SpeakType.
 
 ### Optional polishing and translation
 
-Open your local Ollama app and install the model selected in **Preferences > AI Models**. The default model is:
+In **Setup**, enable polishing or translation and check the Ollama service. **Install Ollama…** opens the [official macOS download page](https://ollama.com/download/mac). Once Ollama is installed, **Start Ollama** starts its installed app or service. SpeakType connects to `http://localhost:11434` by default; Preferences can select another server.
 
-```bash
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
+Choose an installed model from the list, or click **Download model** to install the configured model. The default is `huihui_ai/qwen3.5-abliterated:9b-Claude`, a download of about 6.59 GB. The window shows actual downloaded bytes and percentage. **Cancel download** ends this window's request and preserves the official cache for retry. Returning to the main window keeps the download running.
 
-For a Homebrew installation, run `brew services start ollama` to keep the local service running in the background. `ollama serve` runs a foreground service that stops when its Terminal window closes. SpeakType connects to `http://localhost:11434` by default.
+If Ollama reports that a model requires a newer server, **Update Ollama…** opens the official download page. **Error details…** displays the complete error in a scrollable window with text selection and **Copy error**. You can turn off both language features with **Use dictation only**.
 
-When Ollama is unavailable, SpeakType inserts the transcription and displays a message explaining that polishing or translation was skipped. **Local Diagnostics** shows the configured model and the command needed to install it.
+Setup checks the configured service and full model tag. Recognition is marked ready after configuration, tokenizer, and weight files pass complete-cache validation. A damaged cache offers **Redownload model**, which downloads and validates the complete model through the official Hugging Face client.
 
-Setup and diagnostics check the configured Ollama service and exact model tag. The ASR download is ready after its configuration, tokenizer, and weight files pass the cache check. Skipping an unavailable optional Ollama model disables polishing and translation in the saved settings.
+If an enabled language feature becomes unavailable during dictation, SpeakType keeps the transcription and reports that processing was skipped. The main window and history retain available text for recovery.
+
+## Record, edit, and insert
+
+1. Click **Start dictation** in the main window, speak, and click **Stop recording**. The window shows microphone level, elapsed time, live recognition, original transcription, and final text.
+2. Edit **Final text** directly. You can copy it, use **Polish again**, or choose a language and click **Translate**. These language actions use the configured local Ollama model.
+3. Click the intended input field in another app, return to SpeakType, and select that app under **Target app**. Click **Insert into…**. SpeakType checks the target before sending text and reports the insertion result.
+4. Use **Cancel** during recording, recognition, polishing, or translation to stop the current operation. Available text stays in the window. A cancelled operation cannot insert a later result.
+
+Main-window recording prepares text for review. For direct insertion, focus the destination and use the global shortcut. Its destination is the app selected when recording starts.
+
+| Main-window shortcut | Action |
+|---|---|
+| `⌘R` | Start or stop recording |
+| `⌘↩` | Insert the current final text into the selected app |
+| `⇧⌘C` | Copy final text |
+| `⇧⌘P` | Polish final text again |
+| `⇧⌘T` | Translate final text |
+| `Esc` | Cancel the current operation |
 
 ## Dictate and recover text
 
@@ -48,9 +65,11 @@ With **Save Dictation History** enabled, SpeakType saves the original transcript
 | Result | Meaning |
 |---|---|
 | Unconfirmed | Text is saved; insertion has not been confirmed |
+| Saved; ready to insert | Final text is available for review or manual insertion |
 | Inserted | Accessibility reported the inserted text in the target field |
 | Sent, unverified | Input was sent, but the target did not expose enough information to verify it |
 | Failed | SpeakType could not complete insertion |
+| Cancelled | The operation ended before delivery; available text remains saved |
 
 For a failed insertion, copy the saved result from history or use **Copy Last Dictation**. For **Sent, unverified**, check the destination before inserting again to avoid duplicate text. When history is disabled, the most recent result remains available for copying or insertion during the current session.
 
@@ -91,8 +110,11 @@ Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phra
 - **Local Diagnostics** checks input permissions, microphones, model availability, Ollama, hotwords, and focused-input readiness. It provides commands and local repair steps.
 - **Preferences** includes Chinese and English UI choices, push-to-talk or toggle recording, microphone selection, and a six-minute default recording limit.
 
-## What's new in v2.3.0
+## What's new in v3.0.0
 
+- A native main window with recording controls, readiness checks, original and editable final text, target-app selection, local polish/translation, recent records, and keyboard shortcuts.
+- A single setup window for permissions, complete ASR downloads and repair, Ollama installation/startup, installed-model selection, actual progress, cancellation, and retry.
+- Main-window recording prepares a reviewable result; the global shortcut inserts into the app captured at recording start. Cancellation and target checks protect delivery.
 - Searchable native dictation history with full original/final text, copy buttons, insertion results, refresh, and export.
 - Original transcription retained before polishing; final text saved before insertion; menu actions to copy or insert the latest result again.
 - Consecutive spoken quotation marks, brackets, and punctuation in English and Chinese.
@@ -102,7 +124,7 @@ Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phra
 - Literal correction replacements and priority for longer correction terms, plus explicit validation of saved data files.
 - Standalone app builds verify ad hoc code signatures and embedded runtime dependencies, with a macOS 14 minimum target.
 
-See the [v2.3.0 release notes](docs/releases/v2.3.0.md) for feature details and completed validation.
+See the [v3.0.0 release notes](docs/releases/v3.0.0.md) for feature details and completed validation.
 
 ## Settings and local files
 
@@ -139,11 +161,13 @@ Preferences saves settings in `~/.speaktype/config.json`. History, hotwords, cor
 
 ## Troubleshooting
 
-**Recording or hotkey failure:** open **Local Diagnostics**, check Microphone, Accessibility, and Input Monitoring in System Settings, and select the intended microphone. Restart SpeakType after changing permissions if prompted.
+**Recording or hotkey failure:** open **Setup**, check Microphone, Accessibility, and Input Monitoring with their settings buttons, then refresh. Select the intended microphone in Preferences. Restart SpeakType after changing permissions if prompted.
 
 **Text is missing:** open **Dictation History** or use **Copy Last Dictation**, then paste the result into a focused editable field. Review the recorded insertion status before trying again.
 
-**Polishing or translation is skipped:** open Ollama, confirm the model under **Preferences > AI Models**, and use the install command shown by **Local Diagnostics**. Dictation remains available while the local LLM is unavailable.
+**Polishing or translation is skipped:** open **Setup**, start Ollama, and download the selected model or choose an installed model. Use the update button when the server requests a newer Ollama. **Use dictation only** disables both features.
+
+**A model download fails:** read the actual error shown in Setup, check the connection or Ollama service, and use **Retry download**. A damaged ASR cache provides **Redownload model**. Cancellation preserves official cache files for a later request.
 
 **A saved file is rejected:** use the reported format or field error to correct the corresponding JSON file before restarting. SpeakType preserves its contents. The log is `~/.speaktype/speaktype.log`.
 
@@ -155,13 +179,15 @@ Source use requires Python 3.10 on an Apple Silicon Mac. From the repository dir
 git clone https://github.com/Konoyo-014/SpeakType.git
 cd SpeakType
 python3.10 -m venv venv
+mkdir -p work/temporary
+export TMPDIR="$PWD/work/temporary/"
 ./venv/bin/python -m pip install -r requirements.txt
 ./venv/bin/python -m pip check
 ./venv/bin/python scripts/verify_runtime.py
 ./venv/bin/python main.py
 ```
 
-The setup window can download the ASR model. A source launch may require granting permissions to Terminal or your IDE. If you need a Hugging Face mirror, set `HF_ENDPOINT` to your chosen mirror before launching from the same Terminal.
+The setup window manages recognition and optional Ollama models. A source launch may require granting permissions to Terminal or your IDE. If you need a Hugging Face mirror, set `HF_ENDPOINT` to your chosen mirror before launching from the same Terminal.
 
 `./setup.sh` additionally prepares Ollama and downloads the default ASR and polishing models. It requires Homebrew for Ollama installation when Ollama is missing.
 
@@ -177,7 +203,7 @@ PYTHONPATH=. ./venv/bin/python scripts/validate_history_ui.py
 ./build_dmg.sh
 ```
 
-Install `requirements-build.txt` in the build environment. `SPEAKTYPE_PYTHON` selects an absolute path to a Python 3.10 interpreter built for macOS 14 or earlier, with a shared zlib extension. The release uses conda-forge Python 3.10.19 and the official macOS 14 MLX wheels pinned in `requirements-build.txt`. The build checks the interpreter before packaging. Builds write intermediate files and logs under `work/`, produce `dist/SpeakType.app` and `dist/SpeakType-2.3.0.dmg`, apply ad hoc code signing, verify strict bundle signatures, and execute embedded-runtime dependency checks. The DMG includes an Applications shortcut for installation.
+Install `requirements-build.txt` in the build environment. `SPEAKTYPE_PYTHON` selects an absolute path to a Python 3.10 interpreter built for macOS 14 or earlier, with a shared zlib extension. The release uses conda-forge Python 3.10.19 and the official macOS 14 MLX wheels pinned in `requirements-build.txt`. The build checks the interpreter before packaging. Builds write intermediate files and complete logs under `work/`, produce `dist/SpeakType.app` and `dist/SpeakType-3.0.0.dmg`, apply ad hoc code signing, verify strict bundle signatures, and execute embedded-runtime dependency checks. The DMG includes an Applications shortcut for installation.
 
 ### Python plugins
 
