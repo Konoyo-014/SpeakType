@@ -74,7 +74,10 @@ def test_pipeline():
 
     if audio_path:
         print("   Transcribing...")
-        text = asr.transcribe(audio_path)
+        try:
+            text = asr.transcribe(audio_path)
+        finally:
+            Path(audio_path).unlink(missing_ok=True)
         print(f"   Raw: {text}")
         if not text.strip():
             print("   ✗ Empty transcription (check microphone permissions, input level, and ambient noise)")

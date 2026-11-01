@@ -1,7 +1,10 @@
 """Model download with progress tracking for SpeakType."""
 
 import logging
+import json
 from pathlib import Path
+from huggingface_hub import try_to_load_from_cache
+from safetensors import safe_open
 
 logger = logging.getLogger("speaktype.model_download")
 
@@ -48,17 +51,61 @@ def is_model_cached(model_name: str) -> bool:
 
 
 def get_cached_model_path(model_name: str) -> Path | None:
-    """Return the local HuggingFace snapshot path when the model is cached."""
-    try:
-        from huggingface_hub import try_to_load_from_cache
-
-        result = try_to_load_from_cache(model_name, "config.json")
-        if not isinstance(result, str):
-            return None
-        path = Path(result).parent
-        return path if path.exists() else None
-    except Exception:
+    result = try_to_load_from_cache(model_name, "config.json")
+    if not isinstance(result, str):
         return None
+    path = Path(result).parent
+    return path if model_snapshot_is_complete(path) else None
+
+
+def model_snapshot_is_complete(path: Path) -> bool:
+    required = ("config.json", "tokenizer_config.json", "preprocessor_config.json")
+    if any(not (path / name).is_file() or not (path / name).stat().st_size for name in required):
+        return False
+    json_files = [path / name for name in required]
+    if (path / "tokenizer.json").is_file():
+        json_files.append(path / "tokenizer.json")
+    elif all((path / name).is_file() and (path / name).stat().st_size for name in ("vocab.json", "merges.txt")):
+        json_files.append(path / "vocab.json")
+    else:
+        return False
+    for json_file in json_files:
+        if not json_file.stat().st_size:
+            return False
+        contents = json.loads(json_file.read_text(encoding="utf-8"))
+        if not isinstance(contents, dict) or not contents:
+            raise ValueError(f"Model configuration must be a nonempty JSON object: {json_file}")
+    index_path = path / "model.safetensors.index.json"
+    expected_size = 0
+    if index_path.is_file():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(index, dict):
+            raise ValueError(f"Invalid model weight index: {index_path}")
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"Invalid model weight index: {index_path}")
+        if any(not isinstance(name, str) or Path(name).name != name for name in weight_map.values()):
+            raise ValueError(f"Invalid model shard paths: {index_path}")
+        names = set(weight_map.values())
+        expected_size = index.get("metadata", {}).get("total_size", 0)
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+            raise ValueError(f"Invalid model size in index: {index_path}")
+        shards = [path / name for name in names]
+    else:
+        shards = list(path.glob("*.safetensors"))
+    if not shards or any(not shard.is_file() or shard.stat().st_size == 0 for shard in shards):
+        return False
+    if sum(shard.stat().st_size for shard in shards) < expected_size:
+        return False
+    shard_keys = {}
+    for shard in shards:
+        with safe_open(shard, framework="np") as weights:
+            shard_keys[shard.name] = set(weights.keys())
+            if not shard_keys[shard.name]:
+                return False
+    if index_path.is_file() and any(tensor not in shard_keys[name] for tensor, name in weight_map.items()):
+        raise ValueError(f"Model weight index references missing tensors: {index_path}")
+    return True
 
 
 def download_model_with_progress(model_name: str, callback=None):
@@ -76,10 +123,12 @@ def download_model_with_progress(model_name: str, callback=None):
 
     logger.info(f"Downloading model: {model_name}")
     try:
-        snapshot_download(
+        path = snapshot_download(
             model_name,
             tqdm_class=make_progress_tqdm(callback),
         )
+        if not model_snapshot_is_complete(Path(path)):
+            raise RuntimeError("The model download is incomplete. Download the missing model files before continuing.")
         if callback:
             callback(100.0, "Done")
         logger.info(f"Model download complete: {model_name}")

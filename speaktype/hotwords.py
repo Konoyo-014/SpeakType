@@ -8,6 +8,7 @@ correction rules remain a separate layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import logging
@@ -161,25 +162,39 @@ class HotwordStore:
         if not self._path.exists():
             self._entries = []
             return
-        try:
-            with open(self._path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                self._entries = [self._normalize_entry(e) for e in data if isinstance(e, dict)]
-                self._entries = [e for e in self._entries if e.get("term")]
-            else:
-                self._entries = []
-        except (IOError, json.JSONDecodeError) as e:
-            logger.warning("Failed to load hotwords from %s: %s", self._path, e)
-            self._entries = []
+        with open(self._path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list) or any(not isinstance(entry, dict) for entry in data):
+            raise ValueError(f"Hotwords must be a list of objects: {self._path}")
+        self._entries = [self._normalize_entry(entry) for entry in data]
 
     def _save(self):
-        try:
-            write_json_file(self._path, self._entries)
-        except IOError as e:
-            logger.error("Failed to save hotwords: %s", e)
+        write_json_file(self._path, self._entries)
 
     def _normalize_entry(self, entry: dict) -> dict:
+        if not isinstance(entry.get("term"), str) or not entry["term"].strip():
+            raise ValueError("Hotword term must be a nonempty string")
+        observations = entry.get("observations", 0)
+        if isinstance(observations, bool) or not isinstance(observations, int) or observations < 0:
+            raise ValueError("Hotword observations must be a nonnegative integer")
+        aliases = entry.get("aliases", [])
+        if not isinstance(aliases, list) or any(not isinstance(alias, str) for alias in aliases):
+            raise ValueError("Hotword aliases must be a list of strings")
+        if not isinstance(entry.get("active", False), bool):
+            raise ValueError("Hotword active must be true or false")
+        confidence = entry.get("confidence", 0.5)
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
+            raise ValueError("Hotword confidence must be a finite number")
+        for field in ("apps", "scenes", "languages"):
+            counters = entry.get(field, {})
+            if not isinstance(counters, dict) or any(
+                not isinstance(key, str) or isinstance(count, bool)
+                or not isinstance(count, int) or count < 0 for key, count in counters.items()
+            ):
+                raise ValueError(f"Hotword {field} must contain nonnegative integer counts")
+        evidence = entry.get("evidence", [])
+        if not isinstance(evidence, list) or any(not isinstance(item, dict) for item in evidence):
+            raise ValueError("Hotword evidence must be a list of objects")
         term = _clean_text(entry.get("term", ""), MAX_TERM_CHARS)
         aliases = _clean_aliases(entry.get("aliases") or [], term)
         observations = max(0, int(entry.get("observations", 0) or 0))
@@ -204,7 +219,7 @@ class HotwordStore:
 
     def get_all(self) -> list[dict]:
         with self._lock:
-            return [dict(e) for e in self._entries]
+            return deepcopy(self._entries)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -284,9 +299,8 @@ class HotwordStore:
                 entry["evidence"] = entry["evidence"][-MAX_EVIDENCE_ITEMS:]
             if confidence >= active_confidence or entry["observations"] >= repeat_promotion_count:
                 entry["active"] = True
-            stored = dict(entry)
-
-        self._save()
+            stored = deepcopy(entry)
+            self._save()
         return stored
 
     def learn_from_payload(

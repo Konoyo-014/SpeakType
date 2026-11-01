@@ -11,6 +11,8 @@ import requests
 
 from .i18n import t
 from .permissions import get_permission_status
+from .permissions import microphone_is_authorized
+from .polish import ollama_model_is_available
 from .model_download import is_model_cached
 from .polish import NO_PROXY_FOR_LOCAL_OLLAMA
 from .inserter import inspect_focused_input
@@ -139,6 +141,9 @@ def check_permissions() -> DiagnosticItem:
 
 
 def check_microphone() -> DiagnosticItem:
+    if not microphone_is_authorized():
+        return _item("microphone", "fail", "diag_microphone_title",
+                     "diag_microphone_permission_missing", "diag_microphone_action")
     try:
         from .devices import list_input_devices
 
@@ -312,8 +317,7 @@ def check_ollama(config: dict) -> list[DiagnosticItem]:
     )
 
     names = [m.get("name", "") for m in models]
-    base = model.split(":")[0]
-    if any(base in name for name in names):
+    if ollama_model_is_available(model, names):
         items.append(
             _item(
                 "ollama_model",

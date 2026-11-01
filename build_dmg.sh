@@ -1,125 +1,86 @@
 #!/bin/bash
-# build_dmg.sh — Build SpeakType.app and package it as a DMG installer.
-#
-# Usage:
-#   ./build_dmg.sh          # Build .app + .dmg
-#   ./build_dmg.sh --app    # Build .app only (skip DMG)
-#   SPEAKTYPE_BUILD_VERSION=2.0.1d1 ./build_dmg.sh --app  # Build a uniquely versioned debug app
-#
-# Prerequisites:
-#   - Python 3.10 virtual environment at ./venv
-#   - py2app installed: pip install py2app
-#   - create-dmg (optional, for DMG): brew install create-dmg
-
+# 使用指定的 Python 环境构建独立应用，并验证签名和实际运行依赖。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-APP_NAME="SpeakType"
-BASE_VERSION="$(awk -F'"' '/__version__ =/ {print $2}' speaktype/__init__.py)"
-BUILD_VERSION="${SPEAKTYPE_BUILD_VERSION:-$BASE_VERSION}"
-DMG_NAME="${APP_NAME}-${BUILD_VERSION}"
-DIST_DIR="dist"
-APP_PATH="${DIST_DIR}/${APP_NAME}.app"
-SIGNING_IDENTITY_COUNT="$(security find-identity -v -p codesigning 2>/dev/null | awk '/valid identities found/{print $1}')"
-
-echo "=== Building ${APP_NAME} v${BUILD_VERSION} ==="
-
-if [ "${SIGNING_IDENTITY_COUNT:-0}" = "0" ]; then
-    echo "WARNING: No local code signing identity found."
-    echo "         py2app will produce an ad-hoc signed app, and macOS may require"
-    echo "         re-granting Accessibility/Input Monitoring after rebuilding."
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--app" ]; }; then
+    echo "Usage: ./build_dmg.sh [--app]" >&2
+    exit 2
 fi
 
-# --- Step 1: Activate venv ---
-if [ -f "./venv/bin/activate" ]; then
-    source ./venv/bin/activate
-    echo "[1/5] Virtual environment activated"
-else
-    echo "ERROR: venv not found. Run ./setup.sh first."
+PYTHON="${SPEAKTYPE_PYTHON:-${SCRIPT_DIR}/venv/bin/python}"
+if [[ "$PYTHON" != /* ]] || [ ! -x "$PYTHON" ]; then
+    echo "SPEAKTYPE_PYTHON must be an executable absolute Python path: ${PYTHON}" >&2
     exit 1
 fi
+"$PYTHON" -c 'import platform, sys; assert sys.version_info[:2] == (3, 10), "SpeakType builds require Python 3.10"; assert platform.system() == "Darwin" and platform.machine() == "arm64", "SpeakType builds require Apple Silicon macOS"'
 
-# --- Step 2: Clean previous build ---
-echo "[2/5] Cleaning previous build..."
-rm -rf build/ "${DIST_DIR}/"
-mkdir -p "${DIST_DIR}"
+mkdir -p "${SCRIPT_DIR}/work"
+BUILD_RUN_DIR="$(mktemp -d "${SCRIPT_DIR}/work/build.XXXXXX")"
+BUILD_LOG="${BUILD_RUN_DIR}/build.log"
+export TMPDIR="${BUILD_RUN_DIR}/temporary/"
+export PYTHONDONTWRITEBYTECODE=1
+mkdir -p "$TMPDIR"
+exec > >(tee -a "$BUILD_LOG") 2>&1
 
-# --- Step 3: Build standalone .app with py2app ---
-echo "[3/5] Building standalone ${APP_NAME}.app with py2app..."
-SPEAKTYPE_BUILD_VERSION="${BUILD_VERSION}" python3 setup.py py2app 2>&1 | tail -5
+finish_build() {
+    status=$?
+    trap - EXIT
+    if [ "$status" -ne 0 ]; then
+        echo "Build failed. Full log: ${BUILD_LOG}" >&2
+    else
+        rm -rf "${BUILD_RUN_DIR}/temporary" "${BUILD_RUN_DIR}/clean" "${BUILD_RUN_DIR}/installer"
+        echo "Full log: ${BUILD_LOG}"
+    fi
+    exit "$status"
+}
+trap finish_build EXIT
 
-# site.py circular import fix is handled automatically by setup.py's atexit hook
+BASE_VERSION="$("$PYTHON" -c 'from speaktype import __version__; print(__version__)')"
+BUILD_VERSION="${SPEAKTYPE_BUILD_VERSION:-$BASE_VERSION}"
+APP_PATH="${SCRIPT_DIR}/dist/SpeakType.app"
+DMG_PATH="${SCRIPT_DIR}/dist/SpeakType-${BUILD_VERSION}.dmg"
 
-echo "  Built: ${APP_PATH}"
+echo "Building SpeakType ${BUILD_VERSION} with ${PYTHON}"
+echo "Build log: ${BUILD_LOG}"
+"$PYTHON" -m pip check
+"$PYTHON" -c 'import py2app; print("py2app:", py2app.__version__)'
+"$PYTHON" scripts/verify_build_environment.py
+"$PYTHON" scripts/verify_runtime.py
+
+rm -rf "${SCRIPT_DIR}/build" "$APP_PATH"
+mkdir -p "${SCRIPT_DIR}/dist"
+echo "Building the standalone application. Detailed output: ${BUILD_LOG}"
+SPEAKTYPE_BUILD_VERSION="$BUILD_VERSION" "$PYTHON" setup.py py2app >>"$BUILD_LOG" 2>&1
+
+CLEAN_APP_PATH="${BUILD_RUN_DIR}/clean/SpeakType.app"
+mkdir -p "${BUILD_RUN_DIR}/clean"
+ditto --norsrc --noextattr --noqtn "$APP_PATH" "$CLEAN_APP_PATH"
+rm -rf "$APP_PATH"
+mv "$CLEAN_APP_PATH" "$APP_PATH"
+xattr -cr "$APP_PATH"
+codesign --force --deep --sign - "$APP_PATH"
+codesign --verify --deep --strict "$APP_PATH"
+SPEAKTYPE_VERIFY_BUNDLE=1 env -u PYTHONDONTWRITEBYTECODE "$APP_PATH/Contents/MacOS/verify_runtime"
+codesign --verify --deep --strict "$APP_PATH"
+"$PYTHON" scripts/verify_bundle.py "$APP_PATH" --version "$BASE_VERSION" --build-version "$BUILD_VERSION" --source "${SCRIPT_DIR}/speaktype"
+echo "Verified application: ${APP_PATH}"
 
 if [ "${1:-}" = "--app" ]; then
-    echo "=== Done (--app mode, skipping DMG) ==="
-    echo "  Note: ${APP_PATH} is the raw workspace build artifact."
-    echo "        For a distributable bundle with clean ad-hoc signing,"
-    echo "        use ./build_dmg.sh and ship the generated DMG."
     exit 0
 fi
 
-# --- Step 4: Prepare clean release bundle ---
-echo "[4/6] Preparing clean release bundle..."
+INSTALLER_DIR="${BUILD_RUN_DIR}/installer"
+mkdir -p "$INSTALLER_DIR"
+ditto --norsrc --noextattr --noqtn "$APP_PATH" "${INSTALLER_DIR}/SpeakType.app"
+ln -s /Applications "${INSTALLER_DIR}/Applications"
+codesign --verify --deep --strict "${INSTALLER_DIR}/SpeakType.app"
 
-RELEASE_STAGE_DIR=$(mktemp -d /tmp/speaktype-release.XXXXXX)
-RELEASE_APP_PATH="${RELEASE_STAGE_DIR}/${APP_NAME}.app"
-
-# Desktop/iCloud-backed workspaces can attach Finder/File Provider xattrs to the
-# bundle root, which breaks codesign verification. Build the release app from a
-# clean temporary copy outside the workspace, then ad-hoc re-sign after py2app's
-# post-build runtime-copy step has finished mutating the bundle.
-ditto --norsrc --noextattr --noqtn "${APP_PATH}" "${RELEASE_APP_PATH}"
-xattr -cr "${RELEASE_APP_PATH}" 2>/dev/null || true
-codesign --remove-signature "${RELEASE_APP_PATH}" 2>/dev/null || true
-codesign --force --deep --sign - "${RELEASE_APP_PATH}" >/dev/null
-codesign --verify --deep --strict --verbose=2 "${RELEASE_APP_PATH}" >/dev/null
-
-echo "  Prepared clean ad-hoc signed release bundle"
-
-# --- Step 5: Create DMG ---
-echo "[5/6] Creating DMG installer..."
-
-STAGING_DIR=$(mktemp -d)
-trap 'rm -rf "${STAGING_DIR}" "${RELEASE_STAGE_DIR}"' EXIT
-ditto --norsrc --noextattr --noqtn "${RELEASE_APP_PATH}" "${STAGING_DIR}/${APP_NAME}.app"
-ln -s /Applications "${STAGING_DIR}/Applications"
-
-if command -v create-dmg &>/dev/null; then
-    create-dmg \
-        --volname "${APP_NAME}" \
-        --volicon "resources/SpeakType.icns" \
-        --window-pos 200 120 \
-        --window-size 600 400 \
-        --icon-size 100 \
-        --icon "${APP_NAME}.app" 175 190 \
-        --hide-extension "${APP_NAME}.app" \
-        --app-drop-link 425 190 \
-        --no-internet-enable \
-        "${DIST_DIR}/${DMG_NAME}.dmg" \
-        "${STAGING_DIR}" \
-        2>&1 | tail -3
-else
-    # Fallback: use hdiutil directly
-    echo "  create-dmg not found, using hdiutil fallback..."
-    hdiutil create -volname "${APP_NAME}" \
-        -srcfolder "${STAGING_DIR}" \
-        -ov -format UDZO \
-        "${DIST_DIR}/${DMG_NAME}.dmg"
-fi
-
-rm -rf "${STAGING_DIR}"
-rm -rf "${RELEASE_STAGE_DIR}"
-trap - EXIT
-
-echo "  Created: ${DIST_DIR}/${DMG_NAME}.dmg"
-
-# --- Step 6: Summary ---
-echo ""
-echo "=== Build Complete ==="
-echo "  App:  ${APP_PATH}"
-echo "  DMG:  ${DIST_DIR}/${DMG_NAME}.dmg"
-ls -lh "${DIST_DIR}/${DMG_NAME}.dmg" 2>/dev/null || true
+BUILT_DMG_PATH="${BUILD_RUN_DIR}/SpeakType-${BUILD_VERSION}.dmg"
+hdiutil create -volname SpeakType -srcfolder "$INSTALLER_DIR" -format UDZO "$BUILT_DMG_PATH"
+hdiutil verify "$BUILT_DMG_PATH"
+mv -f "$BUILT_DMG_PATH" "$DMG_PATH"
+shasum -a 256 "$DMG_PATH"
+echo "Verified installer: ${DMG_PATH}"

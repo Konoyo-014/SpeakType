@@ -5,6 +5,8 @@ import logging
 import subprocess
 
 import Quartz
+from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+from AVFoundation import AVAuthorizationStatusAuthorized, AVAuthorizationStatusNotDetermined
 from ApplicationServices import (
     AXIsProcessTrusted,
     AXIsProcessTrustedWithOptions,
@@ -34,6 +36,15 @@ def get_permission_status() -> PermissionStatus:
         listen_event=_safe_bool(Quartz.CGPreflightListenEventAccess),
         post_event=_safe_bool(Quartz.CGPreflightPostEventAccess),
     )
+
+
+def microphone_is_authorized() -> bool:
+    return AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio) == AVAuthorizationStatusAuthorized
+
+
+def request_microphone_if_needed():
+    if AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio) == AVAuthorizationStatusNotDetermined:
+        AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, lambda granted: None)
 
 
 def request_missing_permissions(status: PermissionStatus | None = None):

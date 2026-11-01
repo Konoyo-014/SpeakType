@@ -2,357 +2,205 @@
 
 [中文文档](README_CN.md)
 
-**On-device voice input for macOS.** Hold a key, speak, and polished text appears at the cursor -- in any application.
+Hold Right Command, speak, and release to insert text at the cursor. SpeakType runs Qwen3-ASR on your Mac and uses a local Ollama model for optional polishing and translation.
 
-> Speech recognition via Qwen3-ASR on Apple Silicon, text polishing via Ollama. No cloud APIs, no data leaves your Mac.
+## Install
 
-## Features
+Requires **macOS 14 or later and an Apple Silicon Mac**. The DMG includes the Python runtime and application dependencies.
 
-- **Push-to-talk and toggle dictation** -- hold Right Command (configurable) to record; release to transcribe and insert
-- **AI text polishing** -- removes filler words, fixes grammar, preserves your tone (powered by local LLM via Ollama)
-- **Real-time streaming preview** -- floating overlay shows transcription as you speak
-- **Adaptive Whisper Mode** -- automatically detects very low-volume speech and boosts it locally during recording, without exposing a manual toggle
-- **Context-aware tone** -- automatically adjusts formality based on the active app (email vs Slack vs code editor)
-- **Post-transcription translation** -- translate output to English, Chinese, Japanese, Korean, Spanish, French, or German
-- **Adaptive hotwords** -- learns terminology from your immediate edits to SpeakType's own inserted text, then biases future local ASR and polishing
-- **Voice commands** -- say "new line", "period", "make it shorter", "fix grammar", "translate to Chinese", etc.
-- **Audio device selection** -- choose your preferred microphone from the menubar
-- **Custom dictionary and snippets** -- define words to always recognize correctly; trigger phrases for text expansion
-- **Plugin system** -- extend SpeakType with Python plugins (`~/.speaktype/plugins/`)
-- **Dictation history and statistics** -- track usage with a built-in analytics panel
-- **Native macOS menubar app** -- no Electron, no Dock icon
+1. Open the [latest GitHub release](https://github.com/Konoyo-014/SpeakType/releases/latest) and download the `SpeakType-*.dmg` attachment.
+2. Open the DMG, drag **SpeakType** into **Applications**, and launch it from Applications.
+3. Follow the setup window to prepare the speech recognition model. The first download requires an internet connection.
+4. In **System Settings > Privacy & Security**, allow SpeakType to use **Microphone**, **Accessibility**, and **Input Monitoring** when requested. Restart SpeakType if it prompts you after a permission change.
+5. Click an editable text field, hold **Right Command**, speak, and release.
 
-## What's New in v2.2.0
+SpeakType appears in the menu bar. Click its microphone icon to change settings or open **Local Diagnostics**. If macOS requests approval to open the downloaded app, use **System Settings > Privacy & Security > Open Anyway** for SpeakType.
 
-SpeakType v2.2.0 is the official adaptive-hotword release. It learns reusable terminology from the edits you make immediately after SpeakType inserts text, analyzes those edits with the local Ollama model, stores learned terms only on your Mac, and feeds a compact active context back into local Qwen3-ASR plus the polish/translation prompts. The local model proposes candidates, while deterministic gates reject deleted words, sentence rewrites, generic substitutions, and terms that are not present in the user's final edited text.
+### Optional polishing and translation
 
-This release also adds the native Adaptive Hotwords window, dedicated hotword controls in Preferences, hotword readiness checks in Local Diagnostics, safer Dictionary & Snippets editing, a rebuilt Statistics dashboard, a more readable first-launch setup wizard, localized Chinese UI details, wrapped recording HUD text, stronger Accessibility fallback for focused text fields, and duplicate-window prevention for repeated menubar actions. See [v2.2.0 release notes](docs/releases/v2.2.0.md) for the full bilingual feature list.
+Open your local Ollama app and install the model selected in **Preferences > AI Models**. The default model is:
 
-## Quick Start
+```bash
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
 
-### Prerequisites
+For a Homebrew installation, run `brew services start ollama` to keep the local service running in the background. `ollama serve` runs a foreground service that stops when its Terminal window closes. SpeakType connects to `http://localhost:11434` by default.
 
-- macOS 13+ (Ventura or later), Apple Silicon (M1/M2/M3/M4)
-- Python 3.10
-- Ollama (optional, for text polishing)
-- ~4 GB free disk space (for ASR + LLM models)
+When Ollama is unavailable, SpeakType inserts the transcription and displays a message explaining that polishing or translation was skipped. **Local Diagnostics** shows the configured model and the command needed to install it.
 
-### Installation
+Setup and diagnostics check the configured Ollama service and exact model tag. The ASR download is ready after its configuration, tokenizer, and weight files pass the cache check. Skipping an unavailable optional Ollama model disables polishing and translation in the saved settings.
 
-**1. Clone the repository**
+## Dictate and recover text
+
+| Action | How |
+|---|---|
+| Dictate while holding a key | Hold Right Command, speak, release |
+| Toggle recording | Select toggle mode in Preferences; press once to start and again to stop |
+| Change the hotkey or microphone | Use Preferences or the microphone submenu |
+| Copy the most recent result | Menu bar > Copy Last Dictation |
+| Insert the most recent result again | Focus the target text field, then choose Insert Last Dictation Again |
+| Find an earlier result | Menu bar > Dictation History |
+
+**Dictation History** searches original transcription, final text, app name, time, and insertion result. Select a row to read the complete original and final text, then use **Copy Original** or **Copy Final Text**. The window also offers refresh and export to TXT, Markdown, CSV, or JSON. Usage totals are available separately under **Dictation Statistics**.
+
+With **Save Dictation History** enabled, SpeakType saves the original transcription before local model processing and saves the final text before attempting insertion. History distinguishes these results:
+
+| Result | Meaning |
+|---|---|
+| Unconfirmed | Text is saved; insertion has not been confirmed |
+| Inserted | Accessibility reported the inserted text in the target field |
+| Sent, unverified | Input was sent, but the target did not expose enough information to verify it |
+| Failed | SpeakType could not complete insertion |
+
+For a failed insertion, copy the saved result from history or use **Copy Last Dictation**. For **Sent, unverified**, check the destination before inserting again to avoid duplicate text. When history is disabled, the most recent result remains available for copying or insertion during the current session.
+
+## Voice commands
+
+Enable **Voice Commands** in the menu to convert spoken punctuation and apply editing commands.
+
+| Spoken command | Output |
+|---|---|
+| `period`, `full stop`, `comma`, `question mark` | `.`, `.`, `,`, `?` |
+| `exclamation mark`, `colon`, `semicolon` | `!`, `:`, `;` |
+| `open quote` / `close quote` | Double quotes |
+| `open single quote` / `close single quote` | Single quotes |
+| `open parenthesis` / `close parenthesis` | Parentheses |
+| `open square bracket` / `close square bracket` | Square brackets |
+| `new line`, `new paragraph`, `tab` | Line break, paragraph break, tab |
+
+You can speak adjacent closing punctuation: `open quote hello close quote period` becomes `"hello".`; `hello open parenthesis world close parenthesis period` becomes `hello (world).` Chinese commands include `左引号` / `右引号`, `左括号` / `右括号`, `左书名号` / `右书名号`, `句号`, `换行`, and `新段落`.
+
+To edit a selection, select the text and dictate a complete command such as `make it shorter`, `make it more formal`, `fix grammar`, `translate to Chinese`, `summarize this`, or `create a reply`. Editing uses the local Ollama model.
+
+`undo that` and `scratch that` remove a verified insertion while the same input field, complete text, and cursor position remain unchanged. Undo selects the exact inserted span through Accessibility and verifies its removal, including text containing emoji. Moving the cursor, selecting other text, editing the document, switching documents, or using a target without readable Accessibility text leaves the current text unchanged.
+
+## Vocabulary and shortcuts
+
+**Adaptive Hotwords** learns reusable terms from immediate edits to text inserted by SpeakType. It observes the recently inserted span in the focused field for a short period. App changes end observation; password fields, unreadable inputs, unrelated typing, and simple appended text are excluded. The local Ollama model proposes terminology, and validation checks each proposal against the edited text before saving it in `~/.speaktype/hotwords.json`.
+
+Later dictations receive a compact set of relevant terms selected by app, scene, language, confidence, and recent use. Qwen3-ASR receives this context when its installed API supports it; local polishing and translation also receive the terms. Open **Adaptive Hotwords** to inspect learned terms and their active state.
+
+Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phrases that expand into saved text. Corrections preserve literal backslashes in replacement text and apply longer matching terms first. Snippets support `{date}`, `{time}`, `{datetime}`, `{clipboard}`, and `{env:NAME}`. Clipboard and environment placeholders expand only for exact trigger matches.
+
+## Other controls
+
+- **Polish Text** removes filler words, corrects grammar, and uses the current app to select a tone. Its prompts preserve the transcription's language, and retries retain the requested language. The feature requires the configured local Ollama model.
+- **Translate After Transcription** supports English, Chinese, Japanese, Korean, Spanish, French, and German.
+- **Streaming preview** shows recognition progress while recording. The final transcription supplies the inserted text.
+- **Adaptive low-volume recording** detects quiet speech and increases recording gain automatically.
+- **Local Diagnostics** checks input permissions, microphones, model availability, Ollama, hotwords, and focused-input readiness. It provides commands and local repair steps.
+- **Preferences** includes Chinese and English UI choices, push-to-talk or toggle recording, microphone selection, and a six-minute default recording limit.
+
+## What's new in v2.3.0
+
+- Searchable native dictation history with full original/final text, copy buttons, insertion results, refresh, and export.
+- Original transcription retained before polishing; final text saved before insertion; menu actions to copy or insert the latest result again.
+- Consecutive spoken quotation marks, brackets, and punctuation in English and Chinese.
+- Safe voice undo checks the input field, complete text, and UTF-16 cursor range before selecting and removing the verified insertion.
+- Language-preserving polishing, actual microphone authorization, exact Ollama model tags, and ASR-cache validation before download completion.
+- Clipboard restoration preserves content copied by the user between consecutive insertions.
+- Literal correction replacements and priority for longer correction terms, plus explicit validation of saved data files.
+- Standalone app builds verify ad hoc code signatures and embedded runtime dependencies, with a macOS 14 minimum target.
+
+See the [v2.3.0 release notes](docs/releases/v2.3.0.md) for feature details and completed validation.
+
+## Settings and local files
+
+Preferences saves settings in `~/.speaktype/config.json`. History, hotwords, corrections, snippets, and the custom dictionary also remain in `~/.speaktype/`. Invalid JSON or invalid stored field types produce an explicit error and leave the file intact.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `hotkey` | `"right_cmd"` | `right_cmd`, `left_cmd`, `fn`, `right_alt`, `right_ctrl`, `ctrl+shift+space`, `f5`, or `f6` |
+| `dictation_mode` | `"push_to_talk"` | Hold a key or use `"toggle"` |
+| `audio_device` | `null` | System default, device name, or device index |
+| `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | Local Qwen3-ASR model |
+| `language` | `"auto"` | Recognition language |
+| `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | Local Ollama model |
+| `ollama_url` | `"http://localhost:11434"` | Ollama service address |
+| `polish_enabled` | `true` | Text polishing |
+| `auto_punctuation` | `true` | Allow polishing to add punctuation |
+| `filler_removal` | `true` | Remove filler words during polishing |
+| `context_aware_tone` | `true` | Select polishing tone by app |
+| `translate_enabled` / `translate_target` | `false` / `"en"` | Translate the output |
+| `voice_commands_enabled` | `true` | Punctuation and editing commands |
+| `streaming_preview` | `true` | Display recognition progress |
+| `history_enabled` / `history_max_entries` | `true` / `1000` | Save and limit history |
+| `insert_method` | `"paste"` | Clipboard insertion or `"type"` for keyboard events |
+| `max_recording_seconds` | `360` | Recording duration limit |
+| `sound_feedback` | `true` | Recording start/stop sounds |
+| `hotword_learning_enabled` | `true` | Learn terms from immediate edits |
+| `hotword_context_enabled` | `true` | Include learned terms in recognition and polishing |
+| `hotword_auto_corrections_enabled` | `true` | Promote confident correction pairs |
+| `hotword_observation_seconds` | `18` | Edit-observation period |
+| `hotword_observation_stable_seconds` | `1.2` | Wait for an edit to stabilize |
+| `hotword_max_context_terms` | `30` | Maximum learned terms per request |
+| `plugins_enabled` | `false` | Enable local Python plugins |
+| `ui_language` | `"zh"` | `"zh"` or `"en"` |
+
+## Troubleshooting
+
+**Recording or hotkey failure:** open **Local Diagnostics**, check Microphone, Accessibility, and Input Monitoring in System Settings, and select the intended microphone. Restart SpeakType after changing permissions if prompted.
+
+**Text is missing:** open **Dictation History** or use **Copy Last Dictation**, then paste the result into a focused editable field. Review the recorded insertion status before trying again.
+
+**Polishing or translation is skipped:** open Ollama, confirm the model under **Preferences > AI Models**, and use the install command shown by **Local Diagnostics**. Dictation remains available while the local LLM is unavailable.
+
+**A saved file is rejected:** use the reported format or field error to correct the corresponding JSON file before restarting. SpeakType preserves its contents. The log is `~/.speaktype/speaktype.log`.
+
+## Run from source
+
+Source use requires Python 3.10 on an Apple Silicon Mac. From the repository directory:
 
 ```bash
 git clone https://github.com/Konoyo-014/SpeakType.git
 cd SpeakType
-```
-
-**2. Create a virtual environment and install dependencies**
-
-```bash
 python3.10 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+./venv/bin/python -m pip install -r requirements.txt
+./venv/bin/python -m pip check
+./venv/bin/python scripts/verify_runtime.py
+./venv/bin/python main.py
 ```
 
-**3. Install Ollama and pull the LLM model (optional, for text polishing)**
+The setup window can download the ASR model. A source launch may require granting permissions to Terminal or your IDE. If you need a Hugging Face mirror, set `HF_ENDPOINT` to your chosen mirror before launching from the same Terminal.
+
+`./setup.sh` additionally prepares Ollama and downloads the default ASR and polishing models. It requires Homebrew for Ollama installation when Ollama is missing.
+
+### Validate and build
 
 ```bash
-brew install ollama
-brew services start ollama
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
+PYTHONPATH=. ./venv/bin/python scripts/validate_core.py
+PYTHONPATH=. ./venv/bin/python scripts/validate_clipboard.py
+PYTHONPATH=. ./venv/bin/python scripts/validate_history_ui.py
+./venv/bin/python scripts/verify_runtime.py
 
-Text polishing is optional. Without it, SpeakType inserts raw transcriptions.
-
-Ollama must be running for SpeakType to polish or translate text. The easiest command-line setup is `brew services start ollama`, which starts Ollama as a macOS background service; you do not need to keep a Terminal window open after that. Check it with:
-
-```bash
-brew services list | grep ollama
-curl http://localhost:11434/api/tags
-```
-
-If you prefer the Ollama desktop app, install and open Ollama.app instead; SpeakType connects to the same local server at `http://localhost:11434`. If you only run `ollama serve` in a Terminal window, that is a temporary foreground server: closing that Terminal stops Ollama, and SpeakType will insert raw transcription until Ollama is started again.
-
-**4. Run SpeakType**
-
-```bash
-python main.py
-```
-
-On first launch, macOS will prompt for:
-- **Microphone access** -- for voice recording
-- **Accessibility access** -- for text insertion via keyboard simulation
-- **Input Monitoring** -- for the global push-to-talk hotkey
-
-Grant all three in **System Settings > Privacy & Security**. If you are running from source, macOS may ask you to authorize Terminal, iTerm, or your IDE instead of SpeakType.app.
-
-### About the ASR model
-
-The speech recognition model (`mlx-community/Qwen3-ASR-1.7B-8bit`) is downloaded automatically by mlx-audio from HuggingFace on the first run (~2 GB download).
-
-**Users in mainland China:** HuggingFace is not accessible. Set the mirror before launching:
-
-```bash
-export HF_ENDPOINT=https://hf-mirror.com
-python main.py
-```
-
-Add to `~/.zshrc` to persist:
-
-```bash
-echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.zshrc
-```
-
-### Build .app Bundle (optional)
-
-```bash
 ./build_dmg.sh --app
-```
-
-The standalone workspace bundle is created at `dist/SpeakType.app`. For a release-ready installer, run `./build_dmg.sh` and distribute the generated DMG instead. The DMG path uses a cleaned, re-signed temporary copy so Desktop/iCloud file-provider metadata does not invalidate the bundle signature.
-
-## Usage
-
-### Basic dictation
-
-| Action | How |
-|---|---|
-| Dictate (push-to-talk) | Hold Right Command, speak, release |
-| Dictate (toggle mode) | Press Right Command once to start, again to stop |
-| Change hotkey | Preferences > Hotkey |
-
-### Voice commands
-
-**Punctuation and structure** (spoken inline during dictation):
-
-| Command | Result |
-|---|---|
-| "period" / "full stop" | . |
-| "comma" | , |
-| "question mark" | ? |
-| "exclamation mark" | ! |
-| "colon" / "semicolon" | : / ; |
-| "new line" / "line break" | line break |
-| "new paragraph" | double line break |
-
-Chinese equivalents are also supported: "句号", "逗号", "问号", "换行", "新段落", etc.
-
-**Edit commands** (select text first, then speak the command):
-
-| Command | Effect |
-|---|---|
-| "make it shorter" | Condense the selected text |
-| "make it more formal" | Adjust tone to formal |
-| "make it more casual" | Adjust tone to casual |
-| "fix grammar" / "fix typos" | Correct errors |
-| "translate to [language]" | Translate the selection |
-| "summarize this" | Summarize the selection |
-| "create a reply" | Draft a reply to the selection |
-
-### Text polishing
-
-When Ollama is running with the LLM model, SpeakType automatically polishes transcriptions: removing filler words, fixing grammar, and adjusting tone based on the active application. Toggle this on/off from the menubar.
-
-### Local diagnostics
-
-Use **Local Diagnostics...** from the menubar when SpeakType records, transcribes, polishes, or inserts differently than expected. The report checks only local runtime state: macOS input permissions, microphone discovery, Qwen3-ASR cache/load state, Ollama installation, Ollama local service status, configured Ollama model availability, and whether the current focused app exposes a writable text field.
-
-The diagnostics window does not read dictated content and does not upload anything. Its purpose is to tell you whether the local chain is ready before another dictation attempt. If Ollama is missing or stopped, it will show the exact local startup path; if the polish model is missing, it will show the `ollama pull ...` command; if insertion cannot be verified, it will tell you to click an editable field or fix macOS input permissions.
-
-### Ollama startup options
-
-SpeakType never sends dictated audio, raw transcription, or polished text to external APIs. Ollama is used only as a local server on your Mac, normally at `http://localhost:11434`.
-
-For Homebrew installs, use `brew services start ollama` to keep Ollama running in the background after login. Use `brew services list | grep ollama` to verify the service state, and `brew services stop ollama` if you want to turn it off.
-
-For the desktop app install, open Ollama.app and leave it running in the menu bar. This is usually the simplest choice for non-terminal users.
-
-For temporary testing, `ollama serve` is fine, but it runs in the foreground. If you close that Terminal window, Ollama stops. SpeakType will keep dictation working, but text polishing and translation will be skipped and raw transcription will be inserted.
-
-After Ollama is running, install or verify the model:
-
-```bash
-ollama list
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
-
-### Translation
-
-Enable post-transcription translation from the menubar. Supported targets: English, Chinese, Japanese, Korean, Spanish, French, German. Technical terms are preserved during translation.
-
-### Snippets
-
-Define trigger phrases that expand into saved text. For example, say "my email" to insert your email address. Snippet bodies support `{date}`, `{time}`, `{datetime}`, `{clipboard}`, and `{env:NAME}`. Sensitive placeholders like `{clipboard}` and `{env:...}` only expand on exact trigger matches, so fuzzy matching cannot accidentally inject local secrets. Manage snippets from the menubar: Dictionary & Snippets.
-
-## Configuration
-
-All settings are stored in `~/.speaktype/config.json`. Edit via the Preferences window (Command+,) or directly.
-
-Key options:
-
-| Setting | Default | Description |
-|---|---|---|
-| `hotkey` | `"right_cmd"` | Push-to-talk key. Options: `right_cmd`, `left_cmd`, `fn`, `right_alt`, `right_ctrl`, `ctrl+shift+space`, `f5`, `f6` |
-| `dictation_mode` | `"push_to_talk"` | `"push_to_talk"` or `"toggle"` |
-| `asr_backend` | `"qwen"` | Legacy compatibility key. SpeakType always runs Qwen3-ASR and normalizes old Whisper configs back to `qwen` |
-| `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | HuggingFace model ID for Qwen ASR |
-| `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | Ollama model for text polishing |
-| `ollama_url` | `"http://localhost:11434"` | Ollama API endpoint |
-| `polish_enabled` | `true` | Enable/disable LLM text polishing |
-| `language` | `"auto"` | ASR language: `"auto"`, `"en"`, `"zh"`, `"ja"`, `"ko"` |
-| `translate_enabled` | `false` | Enable post-transcription translation |
-| `translate_target` | `"en"` | Translation target language |
-| `streaming_preview` | `true` | Show real-time transcription overlay |
-| `voice_commands_enabled` | `true` | Enable voice command processing |
-| `hotword_learning_enabled` | `true` | Learn reusable terms from immediate edits to SpeakType insertions |
-| `hotword_context_enabled` | `true` | Feed active learned hotwords into ASR and polish context |
-| `hotword_auto_corrections_enabled` | `true` | Add high-confidence learned wrong-to-right correction pairs |
-| `hotword_observation_seconds` | `18` | Maximum post-insert edit observation window |
-| `hotword_max_context_terms` | `30` | Maximum learned hotwords passed into one recognition turn |
-| `context_aware_tone` | `true` | Adjust polishing tone per-app |
-| `insert_method` | `"paste"` | `"paste"` (clipboard + Cmd+V) or `"type"` (key-by-key) |
-| `plugins_enabled` | `false` | Enable the plugin system |
-| `max_recording_seconds` | `360` | Maximum recording duration (6 min) |
-| `sound_feedback` | `true` | Play sounds on record start/stop |
-
-### Adaptive hotwords
-
-SpeakType learns hotwords locally from the edits you make immediately after a SpeakType insertion. It only watches the short-lived span it just inserted in the current focused input field; it does not observe unrelated typing, password fields, unreadable inputs, or other applications after focus changes. The local Ollama model classifies the edit and stores only reusable terminology facts in `~/.speaktype/hotwords.json`.
-
-Learned hotwords are context hints, not unconditional replacements. On later dictations, SpeakType selects a compact active set by app, scene, language, recency, and confidence, then passes those terms into local Qwen3-ASR when the installed mlx-audio path supports context. The same active terms are also passed to the local polish/translation prompt so exact spelling, capitalization, and hyphenation are preserved when the term is actually present.
-
-### Custom dictionary
-
-Add words that ASR should always recognize correctly. Stored at `~/.speaktype/custom_dictionary.json`. Manage via menubar: Dictionary & Snippets.
-
-## Plugin System
-
-Place `.py` files in `~/.speaktype/plugins/` and enable plugins in Preferences.
-
-### Available hooks
-
-| Hook | Signature | Purpose |
-|---|---|---|
-| `pre_transcribe` | `(audio_path) -> audio_path` | Modify audio before ASR |
-| `post_transcribe` | `(raw_text) -> text` | Modify text after ASR |
-| `pre_polish` | `(text, tone) -> (text, tone)` | Modify text/tone before LLM |
-| `post_polish` | `(polished_text) -> text` | Modify text after LLM |
-| `pre_insert` | `(text) -> text or None` | Modify or skip insertion |
-| `post_insert` | `(text) -> None` | Side effects after insertion |
-| `on_recording_start` | `() -> None` | Notification: recording started |
-| `on_recording_stop` | `() -> None` | Notification: recording stopped |
-
-### Example plugin
-
-```python
-# ~/.speaktype/plugins/filler_remover.py
-PLUGIN_NAME = "Filler Remover"
-PLUGIN_VERSION = "1.0"
-
-def post_transcribe(text):
-    """Remove filler words after ASR transcription."""
-    for filler in ["um", "uh", "like", "you know"]:
-        text = text.replace(f" {filler} ", " ")
-    return text
-```
-
-Plugins prefixed with `_` (e.g., `_example_plugin.py`) are ignored.
-
-## Architecture
-
-```
-Hotkey press
-  -> Record audio (sounddevice)
-  -> ASR: Qwen3-ASR via mlx-audio
-  -> Voice command detection / Snippet matching
-  -> LLM polish via Ollama (optional)
-  -> Translation (optional)
-  -> Insert at cursor (CGEvent + NSPasteboard)
-```
-
-All processing runs locally on-device. Audio files are deleted immediately after transcription.
-
-**Key components:**
-
-- **ASR**: `mlx-community/Qwen3-ASR-1.7B-8bit` via mlx-audio
-- **LLM**: `huihui_ai/qwen3.5-abliterated:9b-Claude` via Ollama (local inference)
-- **Text insertion**: CGEvent keyboard simulation + NSPasteboard clipboard
-- **UI**: rumps (NSStatusItem menubar), AppKit (native settings windows)
-
-## Troubleshooting
-
-### SpeakType does not appear in the menubar
-
-Make sure you granted both **Accessibility** and **Input Monitoring**. Go to **System Settings > Privacy & Security** and allow SpeakType (or Terminal / your IDE if running from source) in both sections.
-
-### Microphone not working
-
-1. Check **System Settings > Privacy & Security > Microphone** and ensure SpeakType (or Terminal) is allowed.
-2. Use "Test Microphone" from the menubar to verify the mic is capturing audio.
-3. Try selecting a specific audio device from the menubar instead of "System Default".
-
-### ASR model download fails
-
-The model is downloaded from HuggingFace. If you are behind a proxy, set `HTTP_PROXY` and `HTTPS_PROXY` environment variables before running.
-
-### Text polishing not working
-
-First verify that Ollama is running:
-
-```bash
-curl http://localhost:11434/api/tags
-```
-
-If that command cannot connect, start Ollama with one of these methods:
-
-```bash
-# Background service, recommended for Homebrew installs
-brew services start ollama
-
-# Temporary foreground server, stops when this Terminal closes
-ollama serve
-```
-
-Then verify the model is installed:
-
-```bash
-ollama list
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
-
-If SpeakType says polishing was skipped, dictation still worked locally; it inserted the raw transcription because Ollama was not available for the optional local LLM step.
-
-### Text not inserted into application
-
-Some apps block simulated keyboard input. Try switching `insert_method` to `"type"` in the config, or grant Accessibility permissions to the target application.
-
-### Log file
-
-Logs are written to `~/.speaktype/speaktype.log` on each run. Check this for detailed error messages.
-
-## Development
-
-```bash
-# Run with debug output
-source venv/bin/activate
-python main.py  # logs to ~/.speaktype/speaktype.log
-
-# Quick pipeline test (records 3s, transcribes, polishes)
-python main.py --test
-
-# Run tests
-python -m pytest tests/ -v
-
-# Build .app bundle
-./build_dmg.sh --app
-
-# Build the release DMG
 ./build_dmg.sh
 ```
 
-## Contributing
+Install `requirements-build.txt` in the build environment. `SPEAKTYPE_PYTHON` selects an absolute path to a Python 3.10 interpreter built for macOS 14 or earlier, with a shared zlib extension. The release uses conda-forge Python 3.10.19 and the official macOS 14 MLX wheels pinned in `requirements-build.txt`. The build checks the interpreter before packaging. Builds write intermediate files and logs under `work/`, produce `dist/SpeakType.app` and `dist/SpeakType-2.3.0.dmg`, apply ad hoc code signing, verify strict bundle signatures, and execute embedded-runtime dependency checks. The DMG includes an Applications shortcut for installation.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, the full plugin hook API, and development setup.
+### Python plugins
+
+Put plugin files in `~/.speaktype/plugins/` and enable them in Preferences. Files prefixed with `_` are ignored.
+
+| Hook | Signature |
+|---|---|
+| `pre_transcribe` | `(audio_path) -> audio_path` |
+| `post_transcribe` | `(raw_text) -> text` |
+| `pre_polish` | `(text, tone) -> (text, tone)` |
+| `post_polish` | `(polished_text) -> text` |
+| `pre_insert` | `(text) -> text or None` |
+| `post_insert` | `(text) -> None` |
+| `on_recording_start` | `() -> None` |
+| `on_recording_stop` | `() -> None` |
+
+```python
+PLUGIN_NAME = "Preferred Spelling"
+PLUGIN_VERSION = "1.0"
+
+def post_transcribe(text):
+    return text.replace("Speak Type", "SpeakType")
+```
 
 ## License
 

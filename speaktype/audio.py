@@ -7,6 +7,7 @@ import logging
 import numpy as np
 from .sounddevice_compat import prepare_sounddevice_import
 from .whisper_detect import WhisperDetector
+from .config import get_temp_dir
 
 prepare_sounddevice_import()
 import sounddevice as sd
@@ -238,7 +239,7 @@ class AudioRecorder:
         if audio_data is None:
             return None
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp = tempfile.NamedTemporaryFile(dir=get_temp_dir(), suffix=".wav", delete=False)
         sf.write(tmp.name, audio_data, self.sample_rate)
         tmp.close()
         return tmp.name

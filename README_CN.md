@@ -2,363 +2,206 @@
 
 [English](README.md)
 
-**macOS 本地语音输入法。** 按住快捷键，说话，润色后的文字即刻出现在光标处 -- 适用于任何应用程序。
+按住右 Command 说话，松开后把文字插入当前光标位置。SpeakType 在 Mac 本机运行 Qwen3-ASR，并通过本地 Ollama 模型提供可选的润色和翻译。
 
-> 语音识别基于 Apple Silicon 上的 Qwen3-ASR，文本润色基于 Ollama 本地推理。无云端 API，数据不离开你的 Mac。
+## 安装
 
-## 功能特性
+需要 **macOS 14 或更高版本，以及搭载 Apple Silicon 的 Mac**。DMG 已包含 Python 运行环境和应用依赖。
 
-- **按住说话与切换听写** -- 按住右 Command（可自定义）进行录音；松开即转写并插入文字
-- **AI 文本润色** -- 去除语气词、修正语法、保持语气风格（由本地 LLM 通过 Ollama 驱动）
-- **实时流式预览** -- 浮动窗口实时显示转写内容
-- **自适应低音量模式** -- 自动检测很轻的说话声并在本地录音链路里增益放大，不暴露手动开关
-- **上下文感知语气** -- 根据当前活跃应用自动调整正式程度（邮件 vs Slack vs 代码编辑器）
-- **转写后翻译** -- 支持翻译为英语、中文、日语、韩语、西班牙语、法语或德语
-- **自适应热词** -- 从你对 SpeakType 刚插入文本的即时修改中学习术语，并用于后续本地 ASR 与润色上下文
-- **语音指令** -- 说"换行"、"句号"、"缩短"、"修正语法"、"翻译成英文"等
-- **音频设备选择** -- 从菜单栏选择麦克风
-- **自定义词典与文本片段** -- 定义始终正确识别的词语；设置触发短语快速插入文本
-- **插件系统** -- 使用 Python 插件扩展功能（`~/.speaktype/plugins/`）
-- **听写历史与统计** -- 内置使用分析面板
-- **原生 macOS 菜单栏应用** -- 无 Electron，无 Dock 图标
+1. 打开 [GitHub 最新发布页面](https://github.com/Konoyo-014/SpeakType/releases/latest)，下载附件中的 `SpeakType-*.dmg`。
+2. 打开 DMG，把 **SpeakType** 拖动到 **Applications（应用程序）**，然后从应用程序文件夹启动。
+3. 按照设置窗口的提示准备语音识别模型。首次下载需要网络连接。
+4. 根据系统提示，在 **系统设置 > 隐私与安全性** 中授予 SpeakType **麦克风、辅助功能、输入监控** 权限。权限更改后，按照应用提示重新启动 SpeakType。
+5. 点击可编辑的文本输入框，按住 **右 Command** 说话，然后松开快捷键。
 
-## v2.2.0 新增内容
+SpeakType 会显示在菜单栏中。点击麦克风图标可以修改设置或打开 **本地自检**。如果 macOS 要求批准打开下载的应用，可以在 **系统设置 > 隐私与安全性 > 仍要打开** 中批准 SpeakType。
 
-SpeakType v2.2.0 是正式的自适应热词版本。它会从你对 SpeakType 刚插入文本的即时修改中学习可复用术语，用本地 Ollama 模型分析这些修改，只把学习结果保存在你的 Mac 上，并把一小组 active context 回传给本地 Qwen3-ASR 以及润色/翻译提示。本地模型负责提出候选项，确定性的学习门禁负责拒绝被用户删除的词、整句改写、泛化替换，以及没有出现在用户最终编辑文本里的词。
+### 启用润色与翻译
 
-这个版本还加入了原生 Adaptive Hotwords 窗口、偏好设置里的热词控制、本地自检里的热词 readiness、更加安全的词典与片段编辑器、重建后的统计面板、更可读的首次启动向导、补齐的中文 UI 细节、可换行的录音 HUD、更稳的 Accessibility 聚焦输入 fallback，以及重复点击菜单栏时的窗口复用。完整中英双语功能说明见 [v2.2.0 release notes](docs/releases/v2.2.0.md)。
+打开本机 Ollama 应用，并安装 **偏好设置 > AI 模型** 中选择的模型。默认模型的安装命令为：
 
-## 快速开始
+```bash
+ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
+```
 
-### 前置要求
+通过 Homebrew 安装 Ollama 时，可以运行 `brew services start ollama`，让本地服务在后台持续运行。`ollama serve` 会在当前终端中运行服务，关闭终端窗口后服务会停止。SpeakType 默认连接 `http://localhost:11434`。
 
-- macOS 13+（Ventura 或更高版本），Apple Silicon（M1/M2/M3/M4）
-- Python 3.10
-- Ollama（可选，用于文本润色）
-- 约 4 GB 磁盘空间（用于 ASR 和 LLM 模型）
+Ollama 暂时不可用时，SpeakType 会插入转写文本，并提示本次跳过了润色或翻译。**本地自检** 会显示当前模型以及安装模型所需的命令。
 
-### 安装步骤
+设置向导与本地自检会核对设置中的 Ollama 服务地址与完整模型标签。语音识别模型的配置、分词文件和权重通过缓存检查后，下载才会显示完成。跳过尚未安装的可选 Ollama 模型后，保存的设置会关闭润色与翻译。
 
-**1. 克隆仓库**
+## 听写与恢复文本
+
+| 操作 | 方法 |
+|---|---|
+| 按住快捷键听写 | 按住右 Command，说话，然后松开 |
+| 按键切换录音 | 在偏好设置中选择切换模式；按一次开始，再按一次停止 |
+| 修改快捷键或麦克风 | 使用偏好设置或菜单中的麦克风选项 |
+| 复制最近一次结果 | 菜单栏 > 复制最近听写 |
+| 再次插入最近一次结果 | 先点击目标输入框，再选择“再次插入最近听写” |
+| 查找以前的结果 | 菜单栏 > 听写历史 |
+
+**听写历史** 支持搜索原始转写、最终文本、应用名称、时间和插入结果。选择一条记录后，可以查看完整的原始转写与最终文本，再点击 **复制原始转写** 或 **复制最终文本**。窗口还提供刷新功能，以及 TXT、Markdown、CSV、JSON 导出功能。使用次数和时长可以在独立的 **听写统计** 中查看。
+
+开启 **保存听写历史** 后，SpeakType 会在本地模型处理前保存原始转写，并在尝试插入前保存最终文本。历史记录会显示以下状态：
+
+| 状态 | 含义 |
+|---|---|
+| 尚未确认 | 文本已经保存，插入操作尚未确认 |
+| 已插入 | 辅助功能接口已经在目标输入框中读取到插入文本 |
+| 已发送（未验证） | 输入事件已经发送，但目标应用提供的信息不足以验证插入结果 |
+| 插入失败 | SpeakType 没有完成插入操作 |
+
+插入失败时，可以从历史记录复制文本，也可以选择 **复制最近听写**。状态显示为 **已发送（未验证）** 时，请先查看目标输入框，再决定是否再次插入，避免出现重复内容。关闭历史记录后，当前会话仍然保留最近一次结果，可以复制或再次插入。
+
+## 语音指令
+
+在菜单中开启 **语音指令**，即可使用口述标点和编辑指令。
+
+| 口述内容 | 输出 |
+|---|---|
+| `句号`、`逗号`、`问号`、`感叹号` | `。`、`，`、`？`、`！` |
+| `冒号`、`分号` | `：`、`；` |
+| `左引号` / `右引号` | 双引号 |
+| `左单引号` / `右单引号` | 单引号 |
+| `左括号` / `右括号` | 圆括号 |
+| `左方括号` / `右方括号` | 方括号 |
+| `左书名号` / `右书名号` | 书名号 |
+| `换行`、`新段落`、`tab` | 换行、段落间空行、制表符 |
+
+可以连续口述引号、括号和结尾标点。例如，`他说左引号你好右引号句号` 会生成 `他说“你好”。`；`说明左括号补充右括号句号` 会生成 `说明（补充）。`。英文也支持连续指令：`open quote hello close quote period` 会生成 `"hello".`。
+
+编辑所选文本时，先选中内容，再说出完整指令，例如 `缩短`、`正式一点`、`修正语法`、`翻译成英文`、`总结一下` 或 `回复`。编辑功能使用本地 Ollama 模型。
+
+`撤销刚才`、`undo that` 和 `scratch that` 可以删除已验证的插入内容。执行时，输入框、完整正文和光标位置必须与插入完成时一致。程序通过辅助功能接口精确选择并删除对应内容，再验证删除后的正文；包含 emoji 的文本也使用正确的字符范围。移动光标、选择其他内容、修改正文、切换文档，或者目标无法提供可读取的辅助功能文本时，程序会保留当前正文。
+
+## 词语与快捷短语
+
+**自适应热词** 会从用户对 SpeakType 刚插入文本的即时修改中学习可重复使用的术语。应用只会在一段有限时间内观察当前输入框中刚插入的文本；切换应用后会停止观察。密码输入框、不可读取的输入框、无关输入以及单纯追加的内容不会用于学习。Ollama 本地模型提出术语后，程序会检查术语是否得到修改后文本的支持，再保存到 `~/.speaktype/hotwords.json`。
+
+后续听写会根据应用、场景、语言、置信度和最近使用情况选择一组相关词语。当前 Qwen3-ASR 接口支持上下文参数时，这些词语会传入语音识别；本地润色与翻译也会使用这些词语。可以打开菜单中的 **自学习热词** 查看已学习词语和当前启用情况。
+
+**词典与快捷短语** 可以管理自定义词语、纠错和固定文本。纠错会保留替换文本中的反斜杠，并优先匹配较长的词语。快捷短语支持 `{date}`、`{time}`、`{datetime}`、`{clipboard}` 和 `{env:NAME}`；剪贴板与环境变量内容只在触发词精确匹配时展开。
+
+## 其他设置
+
+- **文本润色** 可以去除语气词、修正语法，并根据当前应用选择语气。提示会要求保持原文语言，重试也会保留原来的语言要求。此功能需要设置中选择的本地 Ollama 模型。
+- **转写后翻译** 支持英语、中文、日语、韩语、西班牙语、法语和德语。
+- **实时预览** 会在录音过程中显示识别进度，最终转写结果用于插入文本。
+- **自动调整低音量录音** 会检测轻声说话，并自动提高录音增益。
+- **本地自检** 会检查输入权限、麦克风、模型、Ollama、热词和当前输入框，并提供具体的本地修复步骤。
+- **偏好设置** 提供中英文界面、按住说话或按键切换、麦克风选择等选项；默认单次录音上限为六分钟。
+
+## v2.3.0 的更新
+
+- 新增可搜索的原生听写历史窗口，可以查看和复制完整的原始转写与最终文本，查看插入结果，刷新和导出记录。
+- 在润色前保留原始转写，在插入前保存最终文本；菜单可以复制或再次插入最近一次结果。
+- 支持连续口述中英文引号、括号和标点。
+- 安全撤销会核对输入框、完整正文和 UTF-16 光标位置，再精确选择与删除已验证的插入内容。
+- 润色保持输入语言；权限检查读取真实麦克风授权；模型检查核对完整 Ollama 标签，并在确认语音模型缓存完整后显示下载完成。
+- 连续插入文本时，剪贴板恢复操作会保留用户新复制的内容。
+- 纠错保留反斜杠并优先处理较长词语；保存文件中的格式或字段错误会明确报告。
+- 独立应用构建会检查 ad hoc 代码签名和内置运行依赖，最低系统版本为 macOS 14。
+
+具体功能和已完成的验证见 [v2.3.0 发布说明](docs/releases/v2.3.0.md)。
+
+## 设置与本地文件
+
+偏好设置保存在 `~/.speaktype/config.json`。听写历史、热词、纠错、快捷短语和自定义词典也保存在 `~/.speaktype/`。JSON 格式或字段类型不符合要求时，程序会明确报告错误，并保留原文件。
+
+| 设置项 | 默认值 | 用途 |
+|---|---|---|
+| `hotkey` | `"right_cmd"` | 支持 `right_cmd`、`left_cmd`、`fn`、`right_alt`、`right_ctrl`、`ctrl+shift+space`、`f5`、`f6` |
+| `dictation_mode` | `"push_to_talk"` | 按住说话；`"toggle"` 表示按键切换 |
+| `audio_device` | `null` | 系统默认、设备名称或设备编号 |
+| `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | 本地 Qwen3-ASR 模型 |
+| `language` | `"auto"` | 语音识别语言 |
+| `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | 本地 Ollama 模型 |
+| `ollama_url` | `"http://localhost:11434"` | Ollama 服务地址 |
+| `polish_enabled` | `true` | 文本润色 |
+| `auto_punctuation` | `true` | 允许润色添加标点 |
+| `filler_removal` | `true` | 润色时去除语气词 |
+| `context_aware_tone` | `true` | 根据应用选择语气 |
+| `translate_enabled` / `translate_target` | `false` / `"en"` | 翻译输出文本 |
+| `voice_commands_enabled` | `true` | 标点与编辑指令 |
+| `streaming_preview` | `true` | 显示识别进度 |
+| `history_enabled` / `history_max_entries` | `true` / `1000` | 保存历史及数量上限 |
+| `insert_method` | `"paste"` | 通过剪贴板插入；`"type"` 表示发送键盘事件 |
+| `max_recording_seconds` | `360` | 单次录音时长上限 |
+| `sound_feedback` | `true` | 录音开始与停止时的提示音 |
+| `hotword_learning_enabled` | `true` | 从即时修改中学习术语 |
+| `hotword_context_enabled` | `true` | 在识别和润色中使用已学习词语 |
+| `hotword_auto_corrections_enabled` | `true` | 保存高置信度的纠错关系 |
+| `hotword_observation_seconds` | `18` | 观察修改的时长 |
+| `hotword_observation_stable_seconds` | `1.2` | 等待修改稳定的时长 |
+| `hotword_max_context_terms` | `30` | 单次请求使用的热词数量上限 |
+| `plugins_enabled` | `false` | 启用本地 Python 插件 |
+| `ui_language` | `"zh"` | `"zh"` 或 `"en"` |
+
+## 常见问题
+
+**录音或快捷键没有响应：** 打开 **本地自检**，检查系统设置中的麦克风、辅助功能和输入监控权限，并选择需要使用的麦克风。权限更改后，按照提示重新启动 SpeakType。
+
+**文字没有出现在输入框中：** 打开 **听写历史** 或选择 **复制最近听写**，然后把结果粘贴到可编辑输入框。再次插入前，先检查记录中的插入状态。
+
+**润色或翻译被跳过：** 打开 Ollama，确认 **偏好设置 > AI 模型** 中的模型已经安装，并使用 **本地自检** 显示的命令安装缺少的模型。本地语言模型暂时不可用时，听写仍然可以使用。
+
+**保存文件被拒绝读取：** 根据报告的格式或字段错误修正对应的 JSON 文件，然后重新启动应用。SpeakType 会保留文件内容。运行日志位于 `~/.speaktype/speaktype.log`。
+
+## 从源码运行
+
+源码运行需要 Apple Silicon Mac 和 Python 3.10。在仓库目录中执行：
 
 ```bash
 git clone https://github.com/Konoyo-014/SpeakType.git
 cd SpeakType
-```
-
-**2. 创建虚拟环境并安装依赖**
-
-```bash
 python3.10 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+./venv/bin/python -m pip install -r requirements.txt
+./venv/bin/python -m pip check
+./venv/bin/python scripts/verify_runtime.py
+./venv/bin/python main.py
 ```
 
-**3. 安装 Ollama 并拉取 LLM 模型（可选，用于文本润色）**
+设置窗口可以下载语音识别模型。从源码启动时，系统可能要求给终端或开发工具授予权限。需要 Hugging Face 镜像时，请在同一个终端中把 `HF_ENDPOINT` 设置为所用镜像地址，再启动应用。
+
+`./setup.sh` 还会准备 Ollama 并下载默认的语音识别与润色模型。Ollama 尚未安装时，该脚本需要通过 Homebrew 安装 Ollama。
+
+### 验证与构建
 
 ```bash
-brew install ollama
-brew services start ollama
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
+PYTHONPATH=. ./venv/bin/python scripts/validate_core.py
+PYTHONPATH=. ./venv/bin/python scripts/validate_clipboard.py
+PYTHONPATH=. ./venv/bin/python scripts/validate_history_ui.py
+./venv/bin/python scripts/verify_runtime.py
 
-文本润色是可选功能。不安装 Ollama 时，SpeakType 会直接插入原始转写文本。
-
-SpeakType 只有在 Ollama 正在运行时才会执行文本润色或翻译。命令行用户推荐用 `brew services start ollama`，这样 Ollama 会作为 macOS 后台服务运行，不需要一直保留终端窗口。可以用下面的命令确认状态：
-
-```bash
-brew services list | grep ollama
-curl http://localhost:11434/api/tags
-```
-
-如果你使用 Ollama 桌面应用，打开 Ollama.app 并让它在菜单栏后台运行即可；SpeakType 会连接同一个本地服务 `http://localhost:11434`。如果你只是在终端里直接运行 `ollama serve`，那只是临时前台服务：关闭这个终端窗口后 Ollama 会停止，SpeakType 会继续听写，但会跳过润色并插入原始转写文本。
-
-**4. 运行 SpeakType**
-
-```bash
-python main.py
-```
-
-首次启动时，macOS 会请求以下权限：
-- **麦克风权限** -- 用于语音录制
-- **辅助功能权限** -- 用于通过键盘模拟插入文字
-- **输入监控权限** -- 用于监听全局按键热键
-
-请在 **系统设置 > 隐私与安全性** 中授予这三项权限。如果你是从源码运行，macOS 可能要求你给终端、iTerm 或 IDE 授权，而不是 SpeakType.app。
-
-### 关于 ASR 模型
-
-语音识别模型（`mlx-community/Qwen3-ASR-1.7B-8bit`）会在首次运行时由 mlx-audio 从 HuggingFace 自动下载（约 2 GB）。
-
-**中国大陆用户：** HuggingFace 在大陆无法直接访问，请设置镜像后再启动：
-
-```bash
-export HF_ENDPOINT=https://hf-mirror.com
-python main.py
-```
-
-建议将此环境变量写入 `~/.zshrc` 以永久生效：
-
-```bash
-echo 'export HF_ENDPOINT=https://hf-mirror.com' >> ~/.zshrc
-source ~/.zshrc
-```
-
-Ollama 模型下载如遇网络问题，可尝试设置代理：
-
-```bash
-export HTTPS_PROXY=http://127.0.0.1:7890  # 替换为你的代理地址
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
-
-### 构建 .app 包（可选）
-
-```bash
 ./build_dmg.sh --app
-```
-
-开发态的工作区应用包会创建在 `dist/SpeakType.app`。如果要生成可分发的正式安装包，请运行 `./build_dmg.sh` 并使用生成的 DMG。DMG 构建流程会在工作区之外创建净化后的临时副本并重新签名，避免桌面或 iCloud File Provider 元数据破坏 bundle 签名。
-
-## 使用方法
-
-### 基本听写
-
-| 操作 | 方法 |
-|---|---|
-| 听写（按住说话） | 按住右 Command，说话，松开 |
-| 听写（切换模式） | 按一次右 Command 开始，再按一次停止 |
-| 更改快捷键 | 偏好设置 > 快捷键 |
-
-### 语音指令
-
-**标点与结构**（在听写过程中直接说出）：
-
-| 指令 | 结果 |
-|---|---|
-| "句号" / "period" | 。 / . |
-| "逗号" / "comma" | ， / , |
-| "问号" / "question mark" | ？ / ? |
-| "感叹号" / "exclamation mark" | ！ / ! |
-| "冒号" / "分号" | ： / ； |
-| "换行" / "新行" | 换行 |
-| "新段落" / "下一段" | 双换行 |
-
-**编辑指令**（先选中文本，再说出指令）：
-
-| 指令 | 效果 |
-|---|---|
-| "缩短" / "make it shorter" | 精简所选文本 |
-| "正式一点" / "make it more formal" | 调整为正式语气 |
-| "随意一点" / "make it more casual" | 调整为随意语气 |
-| "修正语法" / "fix grammar" | 修正语法错误 |
-| "翻译成[语言]" / "translate to [language]" | 翻译所选内容 |
-| "总结一下" / "summarize this" | 总结所选内容 |
-| "回复" / "create a reply" | 针对所选内容起草回复 |
-
-### 文本润色
-
-当 Ollama 运行并加载了 LLM 模型时，SpeakType 会自动润色转写结果：去除语气词、修正语法、根据当前应用调整语气。可从菜单栏开关此功能。
-
-### 本地自检
-
-当 SpeakType 的录音、转写、润色或插入表现不符合预期时，可以从菜单栏打开 **本地自检...**。自检报告只检查本机运行状态：macOS 输入权限、麦克风发现、Qwen3-ASR 缓存与加载状态、Ollama 是否安装、本地 Ollama 服务是否可达、配置的 Ollama 模型是否存在，以及当前聚焦应用是否暴露了可写文本框。
-
-自检窗口不会读取听写内容，也不会上传任何数据。它的作用是在下一次听写前告诉你本地链路是否已经准备好。如果 Ollama 缺失或没有运行，它会给出明确的本地启动方式；如果润色模型缺失，它会显示对应的 `ollama pull ...` 命令；如果无法验证文字插入，它会提示你点击可编辑输入框或修复 macOS 输入权限。
-
-### Ollama 启动方式
-
-SpeakType 不会把录音、原始转写或润色文本发送到外部 API。Ollama 只是运行在你 Mac 本机的本地服务，默认地址是 `http://localhost:11434`。
-
-如果通过 Homebrew 安装，推荐运行 `brew services start ollama`，让 Ollama 登录后作为后台服务运行。用 `brew services list | grep ollama` 检查状态；如果想关闭，用 `brew services stop ollama`。
-
-如果安装的是桌面版，直接打开 Ollama.app，并让它留在菜单栏后台运行。这对不想使用终端的用户最简单。
-
-如果只是临时测试，可以运行 `ollama serve`。但它是前台进程，关闭终端窗口后 Ollama 就会停止。SpeakType 仍然会正常听写，只是文本润色和翻译会被跳过，并插入原始转写。
-
-Ollama 运行后，再安装或确认模型：
-
-```bash
-ollama list
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
-
-### 翻译
-
-从菜单栏启用转写后翻译。支持的目标语言：英语、中文、日语、韩语、西班牙语、法语、德语。翻译过程中会保留专业术语。
-
-### 文本片段
-
-定义触发短语，说出即可展开为预设文本。例如，说"我的邮箱"即可插入你的邮箱地址。片段正文支持 `{date}`、`{time}`、`{datetime}`、`{clipboard}` 和 `{env:NAME}`。其中 `{clipboard}` 与 `{env:...}` 只有在 **精确匹配触发词** 时才会展开，避免模糊匹配误插入本地敏感内容。从菜单栏的"词典与片段"管理。
-
-## 配置
-
-所有设置存储在 `~/.speaktype/config.json`。可通过偏好设置窗口（Command+,）或直接编辑文件修改。
-
-主要配置项：
-
-| 设置项 | 默认值 | 说明 |
-|---|---|---|
-| `hotkey` | `"right_cmd"` | 按住说话快捷键。选项：`right_cmd`、`left_cmd`、`fn`、`right_alt`、`right_ctrl`、`ctrl+shift+space`、`f5`、`f6` |
-| `dictation_mode` | `"push_to_talk"` | `"push_to_talk"`（按住说话）或 `"toggle"`（按下切换） |
-| `asr_backend` | `"qwen"` | 向后兼容字段。SpeakType 固定使用 Qwen3-ASR，旧的 Whisper 配置会在读取/保存时归一化回 `qwen` |
-| `asr_model` | `"mlx-community/Qwen3-ASR-1.7B-8bit"` | Qwen ASR 的 HuggingFace 模型 ID |
-| `llm_model` | `"huihui_ai/qwen3.5-abliterated:9b-Claude"` | 用于文本润色的 Ollama 模型 |
-| `ollama_url` | `"http://localhost:11434"` | Ollama API 地址 |
-| `polish_enabled` | `true` | 启用/禁用 LLM 文本润色 |
-| `language` | `"auto"` | ASR 语言：`"auto"`、`"en"`、`"zh"`、`"ja"`、`"ko"` |
-| `translate_enabled` | `false` | 启用转写后翻译 |
-| `translate_target` | `"en"` | 翻译目标语言 |
-| `streaming_preview` | `true` | 显示实时转写浮动窗口 |
-| `voice_commands_enabled` | `true` | 启用语音指令处理 |
-| `hotword_learning_enabled` | `true` | 从 SpeakType 插入后的即时修改中学习可复用术语 |
-| `hotword_context_enabled` | `true` | 把已激活热词传入 ASR 和润色上下文 |
-| `hotword_auto_corrections_enabled` | `true` | 自动加入高置信度的“错法 -> 正确写法”纠错对 |
-| `hotword_observation_seconds` | `18` | 插入后的最长短期观察窗口 |
-| `hotword_max_context_terms` | `30` | 单次识别最多传入的已学习热词数量 |
-| `context_aware_tone` | `true` | 根据应用调整润色语气 |
-| `insert_method` | `"paste"` | `"paste"`（剪贴板 + Cmd+V）或 `"type"`（逐字输入） |
-| `plugins_enabled` | `false` | 启用插件系统 |
-| `max_recording_seconds` | `360` | 最长录音时间（6 分钟） |
-| `sound_feedback` | `true` | 录音开始/停止时播放提示音 |
-
-### 自适应热词
-
-SpeakType 会从你对刚插入文本的即时修改中本地学习热词。它只观察自己刚插入的那一小段文本，不观察无关输入、密码框、不可读取输入框，也不会在应用切换后继续观察。Ollama 本地模型负责判断这次修改是否代表可复用的术语、专名、缩写、代码标识符或大小写/连字符偏好；最终只把结构化学习结果写入 `~/.speaktype/hotwords.json`。
-
-已学习热词不是无条件替换。后续听写开始时，SpeakType 会根据当前应用、场景、语言、近期使用和置信度选出一小组 active hotwords，在当前 mlx-audio 路径支持 `context` 时传给本地 Qwen3-ASR；同一组热词也会传给本地润色/翻译提示，要求模型在确实提到这些术语时保留精确拼写、大小写和连字符。
-
-### 自定义词典
-
-添加 ASR 应始终正确识别的词语。存储在 `~/.speaktype/custom_dictionary.json`。通过菜单栏的"词典与片段"管理。
-
-## 插件系统
-
-将 `.py` 文件放入 `~/.speaktype/plugins/` 目录，并在偏好设置中启用插件。
-
-### 可用钩子
-
-| 钩子 | 签名 | 用途 |
-|---|---|---|
-| `pre_transcribe` | `(audio_path) -> audio_path` | 在 ASR 之前修改音频 |
-| `post_transcribe` | `(raw_text) -> text` | 在 ASR 之后修改文本 |
-| `pre_polish` | `(text, tone) -> (text, tone)` | 在 LLM 润色之前修改文本/语气 |
-| `post_polish` | `(polished_text) -> text` | 在 LLM 润色之后修改文本 |
-| `pre_insert` | `(text) -> text or None` | 修改或跳过插入（返回 None 跳过） |
-| `post_insert` | `(text) -> None` | 插入后的副作用操作 |
-| `on_recording_start` | `() -> None` | 通知：录音开始 |
-| `on_recording_stop` | `() -> None` | 通知：录音停止 |
-
-### 插件示例
-
-```python
-# ~/.speaktype/plugins/filler_remover.py
-PLUGIN_NAME = "Filler Remover"
-PLUGIN_VERSION = "1.0"
-
-def post_transcribe(text):
-    """在 ASR 转写后去除语气词。"""
-    for filler in ["um", "uh", "like", "you know"]:
-        text = text.replace(f" {filler} ", " ")
-    return text
-```
-
-以 `_` 开头的插件文件（如 `_example_plugin.py`）会被忽略。
-
-## 架构
-
-```
-按下快捷键
-  -> 录制音频 (sounddevice)
-  -> ASR: Qwen3-ASR via mlx-audio
-  -> 语音指令检测 / 片段匹配
-  -> LLM 润色 via Ollama（可选）
-  -> 翻译（可选）
-  -> 在光标处插入文字 (CGEvent + NSPasteboard)
-```
-
-所有处理均在本地设备上运行。音频文件在转写完成后立即删除。
-
-**核心组件：**
-
-- **ASR**：`mlx-community/Qwen3-ASR-1.7B-8bit`，通过 mlx-audio 运行
-- **LLM**：`huihui_ai/qwen3.5-abliterated:9b-Claude`，通过 Ollama 本地推理
-- **文字插入**：CGEvent 键盘模拟 + NSPasteboard 剪贴板
-- **界面**：rumps（NSStatusItem 菜单栏）、AppKit（原生设置窗口）
-
-## 常见问题
-
-### SpeakType 没有出现在菜单栏
-
-请确保已经授予 **辅助功能** 和 **输入监控**。前往 **系统设置 > 隐私与安全性**，在这两个分区里允许 SpeakType；如果从源码运行，则允许终端、iTerm 或你的 IDE。
-
-### 麦克风无法工作
-
-1. 检查 **系统设置 > 隐私与安全性 > 麦克风**，确保已允许 SpeakType（或终端）。
-2. 使用菜单栏中的"测试麦克风"功能验证麦克风是否在录制音频。
-3. 尝试从菜单栏选择特定音频设备，而不是使用"系统默认"。
-
-### ASR 模型下载失败
-
-模型从 HuggingFace 下载。如果你在代理后面，请在运行前设置 `HTTP_PROXY` 和 `HTTPS_PROXY` 环境变量。
-
-### 文本润色不工作
-
-先确认 Ollama 本地服务是否在运行：
-
-```bash
-curl http://localhost:11434/api/tags
-```
-
-如果无法连接，请用其中一种方式启动 Ollama：
-
-```bash
-# Homebrew 安装推荐，用后台服务方式运行
-brew services start ollama
-
-# 临时前台服务，关闭这个终端后会停止
-ollama serve
-```
-
-然后确认模型已经安装：
-
-```bash
-ollama list
-ollama pull huihui_ai/qwen3.5-abliterated:9b-Claude
-```
-
-如果 SpeakType 提示润色被跳过，说明听写本身已经成功；它只是因为 Ollama 暂时不可用而插入了原始转写。
-
-### 文字没有插入到应用中
-
-部分应用会阻止模拟键盘输入。尝试在配置中将 `insert_method` 改为 `"type"`，或为目标应用授予辅助功能权限。
-
-### 日志文件
-
-每次运行的日志写入 `~/.speaktype/speaktype.log`。查看此文件获取详细错误信息。
-
-## 开发
-
-```bash
-# 以调试模式运行
-source venv/bin/activate
-python main.py  # 日志输出到 ~/.speaktype/speaktype.log
-
-# 快速管道测试（录制 3 秒，转写，润色）
-python main.py --test
-
-# 运行测试
-python -m pytest tests/ -v
-
-# 构建 .app 包
-./build_dmg.sh --app
-
-# 构建发布用 DMG
 ./build_dmg.sh
 ```
 
-## 贡献
+构建环境需要安装 `requirements-build.txt`。通过 `SPEAKTYPE_PYTHON` 指定 Python 3.10 解释器的绝对路径；该解释器需要支持 macOS 14 或更早系统，并提供动态 zlib 扩展。本次发布使用 conda-forge Python 3.10.19，以及 `requirements-build.txt` 固定的官方 macOS 14 MLX wheel。构建脚本会先检查解释器。构建过程在 `work/` 中保存中间文件和日志，生成 `dist/SpeakType.app` 与 `dist/SpeakType-2.3.0.dmg`，使用 ad hoc 代码签名，检查完整应用包的签名，并执行内置运行环境的依赖检查。DMG 提供应用程序文件夹的快捷方式。
 
-请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解贡献指南、完整的插件钩子 API 和开发环境配置。
+### Python 插件
+
+把插件文件放入 `~/.speaktype/plugins/`，然后在偏好设置中启用。文件名以 `_` 开头的插件会被忽略。
+
+| 插件函数 | 参数与返回值 |
+|---|---|
+| `pre_transcribe` | `(audio_path) -> audio_path` |
+| `post_transcribe` | `(raw_text) -> text` |
+| `pre_polish` | `(text, tone) -> (text, tone)` |
+| `post_polish` | `(polished_text) -> text` |
+| `pre_insert` | `(text) -> text or None` |
+| `post_insert` | `(text) -> None` |
+| `on_recording_start` | `() -> None` |
+| `on_recording_stop` | `() -> None` |
+
+```python
+PLUGIN_NAME = "Preferred Spelling"
+PLUGIN_VERSION = "1.0"
+
+def post_transcribe(text):
+    return text.replace("Speak Type", "SpeakType")
+```
 
 ## 许可证
 

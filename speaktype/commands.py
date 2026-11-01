@@ -40,13 +40,74 @@ PUNCTUATION_COMMANDS = {
     "semicolon": ";",
     "open quote": '"',
     "close quote": '"',
+    "open double quote": '"',
+    "close double quote": '"',
+    "open single quote": "'",
+    "close single quote": "'",
+    "open parenthesis": "(",
+    "close parenthesis": ")",
+    "open parentheses": "(",
+    "close parentheses": ")",
+    "open bracket": "[",
+    "close bracket": "]",
+    "open square bracket": "[",
+    "close square bracket": "]",
     "句号": "。",
     "逗号": "，",
     "问号": "？",
     "感叹号": "！",
     "冒号": "：",
     "分号": "；",
+    "左引号": "“",
+    "右引号": "”",
+    "左双引号": "“",
+    "右双引号": "”",
+    "左单引号": "‘",
+    "右单引号": "’",
+    "左括号": "（",
+    "右括号": "）",
+    "左圆括号": "（",
+    "右圆括号": "）",
+    "左方括号": "[",
+    "右方括号": "]",
+    "左书名号": "《",
+    "右书名号": "》",
 }
+
+_DELIMITER_PAIRS = (
+    (("open quote", "open double quote"), ("close quote", "close double quote")),
+    (("open single quote",), ("close single quote",)),
+    (("open parenthesis", "open parentheses"), ("close parenthesis", "close parentheses")),
+    (("open bracket", "open square bracket"), ("close bracket", "close square bracket")),
+    (("左引号", "左双引号"), ("右引号", "右双引号")),
+    (("左单引号",), ("右单引号",)),
+    (("左括号", "左圆括号"), ("右括号", "右圆括号")),
+    (("左方括号",), ("右方括号",)),
+    (("左书名号",), ("右书名号",)),
+)
+_OPENING_COMMANDS = {command: index for index, (opening, _) in enumerate(_DELIMITER_PAIRS)
+                     for command in opening}
+_CLOSING_COMMANDS = {command: index for index, (_, closing) in enumerate(_DELIMITER_PAIRS)
+                     for command in closing}
+_HORIZONTAL_SPACE = " \r\f\v"
+
+
+def _command_pattern(command: str) -> str:
+    if command.isascii():
+        words = r"[^\S\n\t]+".join(re.escape(word) for word in command.split())
+        return r"(?<!\w)" + words + r"(?!\w)"
+    return re.escape(command)
+
+
+_PUNCTUATION_ALTERNATIVES = "|".join(
+    _command_pattern(command) for command in sorted(PUNCTUATION_COMMANDS, key=len, reverse=True)
+)
+_PUNCTUATION_TOKEN_RE = re.compile(_PUNCTUATION_ALTERNATIVES, re.IGNORECASE)
+_PUNCTUATION_CHAIN_RE = re.compile(
+    r"(?:" + _PUNCTUATION_ALTERNATIVES + r")(?:[^\S\n\t]*(?:"
+    + _PUNCTUATION_ALTERNATIVES + r"))*[^\S\n\t]*(?=$|\n|\t)",
+    re.IGNORECASE,
+)
 
 # Edit commands that trigger LLM processing on selected text
 EDIT_COMMAND_PATTERNS = [
@@ -99,37 +160,60 @@ EDIT_COMMAND_PATTERNS = [
 def process_punctuation_commands(text: str) -> str:
     """Replace spoken voice commands with their symbols.
 
-    Structural commands (new line, new paragraph) are replaced anywhere.
-    Punctuation commands are only replaced when they appear at the end of a
-    clause (followed by end-of-string, another punctuation command, or a
-    structural command) to avoid false positives like "period of time".
+    Structural commands become line breaks or tabs. A sequence of spoken
+    punctuation commands is converted at the end of a clause. Matching
+    opening quotes and brackets are also converted when their closing
+    command belongs to that sequence.
     """
     result = text
 
-    # 1. Replace structural commands (always safe - unambiguous)
+    # 清除结构命令周围的口述空格，保留换行和制表符。
     for cmd, symbol in sorted(STRUCTURAL_COMMANDS.items(), key=lambda x: -len(x[0])):
-        if cmd.isascii():
-            pattern = re.compile(r'\b' + re.escape(cmd) + r'\b', re.IGNORECASE)
-        else:
-            pattern = re.compile(re.escape(cmd))
+        pattern = re.compile(r"[^\S\n\t]*" + _command_pattern(cmd) + r"[^\S\n\t]*", re.IGNORECASE)
         result = pattern.sub(symbol, result)
 
-    # 2. Replace punctuation commands only at end of text or before structural breaks
-    for cmd, symbol in sorted(PUNCTUATION_COMMANDS.items(), key=lambda x: -len(x[0])):
-        if cmd.isascii():
-            # Match "word period" at end-of-string or before newline/tab
-            pattern = re.compile(
-                r'\b' + re.escape(cmd) + r'(?=\s*(?:$|\n|\t))',
-                re.IGNORECASE
-            )
-        else:
-            pattern = re.compile(re.escape(cmd) + r'(?=\s*(?:$|\n|\t))')
-        result = pattern.sub(symbol, result)
+    tokens = list(_PUNCTUATION_TOKEN_RE.finditer(result))
+    accepted = {
+        chain.start() + token.start()
+        for chain in _PUNCTUATION_CHAIN_RE.finditer(result)
+        for token in _PUNCTUATION_TOKEN_RE.finditer(chain.group())
+    }
+    opening_tokens = {index: [] for index in range(len(_DELIMITER_PAIRS))}
+    previous_end = 0
+    for token in tokens:
+        if "\n" in result[previous_end:token.start()] or "\t" in result[previous_end:token.start()]:
+            for pending in opening_tokens.values():
+                pending.clear()
+        command = " ".join(token.group().lower().split())
+        if command in _OPENING_COMMANDS:
+            opening_tokens[_OPENING_COMMANDS[command]].append(token.start())
+        elif command in _CLOSING_COMMANDS:
+            pending = opening_tokens[_CLOSING_COMMANDS[command]]
+            if pending:
+                opening_start = pending.pop()
+                if token.start() in accepted:
+                    accepted.add(opening_start)
+        previous_end = token.end()
 
-    # Clean up extra spaces around inserted punctuation
-    result = re.sub(r'\s+([.。,，?？!！:：;；])', r'\1', result)
-
-    return result
+    output = ""
+    cursor = 0
+    trim_next_space = False
+    for token in tokens:
+        if token.start() not in accepted:
+            continue
+        command = " ".join(token.group().lower().split())
+        between = result[cursor:token.start()]
+        if trim_next_space:
+            between = between.lstrip(_HORIZONTAL_SPACE)
+        output += between
+        opening = command in _OPENING_COMMANDS
+        if not opening or not command.isascii():
+            output = output.rstrip(_HORIZONTAL_SPACE)
+        output += PUNCTUATION_COMMANDS[command]
+        trim_next_space = opening
+        cursor = token.end()
+    remainder = result[cursor:]
+    return output + (remainder.lstrip(_HORIZONTAL_SPACE) if trim_next_space else remainder)
 
 
 def detect_edit_command(text: str) -> tuple[bool, str]:

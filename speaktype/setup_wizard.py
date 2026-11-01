@@ -14,7 +14,9 @@ from .i18n import t, localized_hotkey_display
 from .config import save_config
 from .applescript import run_osascript
 from .permissions import get_permission_status, request_missing_permissions
+from .permissions import microphone_is_authorized, request_microphone_if_needed
 from .polish import NO_PROXY_FOR_LOCAL_OLLAMA
+from .polish import ollama_model_is_available
 
 logger = logging.getLogger("speaktype.setup_wizard")
 
@@ -73,34 +75,19 @@ def setup_wizard_asr_state_label_height(text: str) -> int:
 
 
 def _check_mic_permission() -> bool:
-    """Check if microphone permission is granted by testing audio device access."""
-    try:
-        import sounddevice as sd
-        sd.query_devices(kind='input')
-        return True
-    except Exception:
-        return False
+    request_microphone_if_needed()
+    return microphone_is_authorized()
 
 
 def _check_accessibility_permission() -> bool:
     """Check if accessibility permission is granted."""
     status = get_permission_status()
-    if status.all_granted:
+    if status.accessibility and status.post_event:
         return True
 
     request_missing_permissions(status)
     refreshed = get_permission_status()
-    if refreshed.all_granted:
-        return True
-
-    try:
-        result = run_osascript(
-            'tell application "System Events" to return name of first process',
-            timeout=3,
-        )
-        return result.returncode == 0 and refreshed.post_event and refreshed.listen_event
-    except Exception:
-        return False
+    return refreshed.accessibility and refreshed.post_event
 
 
 def _find_ollama() -> str:
@@ -141,26 +128,15 @@ def _check_ollama_running(ollama_url: str = "http://localhost:11434") -> bool:
         return False
 
 
-def _check_ollama_model(model_name: str) -> bool:
+def _check_ollama_model(model_name: str, ollama_url: str = "http://localhost:11434") -> bool:
     """Check if a specific Ollama model is pulled."""
-    ollama = _find_ollama()
-    if not ollama:
-        return False
     try:
-        result = subprocess.run(
-            [ollama, "list"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-        )
-        if result.returncode == 0:
-            base = model_name.split(":")[0]
-            return base in result.stdout
-    except Exception:
-        pass
-    return False
+        response = requests.get(f"{ollama_url.rstrip('/')}/api/tags", timeout=3,
+                                proxies=NO_PROXY_FOR_LOCAL_OLLAMA)
+        response.raise_for_status()
+        return ollama_model_is_available(model_name, [model["name"] for model in response.json()["models"]])
+    except requests.RequestException:
+        return False
 
 
 class _WizardDelegate(NSObject):
@@ -286,6 +262,9 @@ class SetupWizardController:
             self._show_step()
 
     def _skip_step(self):
+        if self.STEPS[self._step_idx] == "llm":
+            self.config["polish_enabled"] = False
+            self.config["translate_enabled"] = False
         self._next_step()
 
     def _refresh_current(self):
@@ -441,7 +420,7 @@ class SetupWizardController:
         content = self.window.contentView()
         y = self.TOP_Y
         y = self._add_title(content, t("wizard_step_permissions"), y)
-        y = self._add_body(content, t("wizard_perm_body"), y, height=70)
+        y = self._add_body(content, t("wizard_perm_body"), y, height=90)
 
         mic_ok = _check_mic_permission()
         access_ok = _check_accessibility_permission()
@@ -449,6 +428,7 @@ class SetupWizardController:
         y -= 10
         y = self._add_status_row(content, t("wizard_mic_label"), mic_ok, y, key="mic")
         y = self._add_status_row(content, t("wizard_access_label"), access_ok, y, key="access")
+        y = self._add_status_row(content, t("wizard_listen_label"), get_permission_status().listen_event, y, key="listen")
 
         y -= 20
         self._add_button(content, t("wizard_btn_open_settings"), b"onOpenSettings:", 44, y, width=150)
@@ -466,7 +446,7 @@ class SetupWizardController:
         cached = is_model_cached(self.config.get("asr_model", "mlx-community/Qwen3-ASR-1.7B-8bit"))
 
         y -= 10
-        if cached or self._asr_download_state == "done":
+        if cached:
             # Already cached
             status_label = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(44, y, 480, 20))
             status_label.setStringValue_(t("wizard_asr_cached") if cached else t("wizard_asr_done"))
@@ -567,7 +547,6 @@ class SetupWizardController:
         try:
             from .model_download import download_model_with_progress
             download_model_with_progress(model_name, callback=on_progress)
-            on_progress(100.0, "Done")
         except Exception as e:
             logger.error(f"Download failed in wizard: {e}")
             self._progress_updater._pct = -1
@@ -585,18 +564,17 @@ class SetupWizardController:
             self._show_step()
             return
 
+        if pct >= 100 and str(status).lower() == "done":
+            self._asr_download_state = "done"
+            self._show_step()
+            return
+
         if self._progress_bar:
-            self._progress_bar.setDoubleValue_(pct)
+            self._progress_bar.setDoubleValue_(min(pct, 99))
         if self._progress_label:
-            if pct >= 100:
-                self._asr_download_state = "done"
-                self._progress_label.setStringValue_(t("wizard_asr_done"))
-                self._progress_label.setTextColor_(AppKit.NSColor.systemGreenColor())
-                self._add_button(self.window.contentView(), t("wizard_btn_next"), b"onNext:", self._right_x(), self.BUTTON_Y, key_equiv="\r")
-            else:
-                self._progress_label.setStringValue_(
-                    t("wizard_asr_downloading", pct=pct, size=setup_wizard_download_status_text(status))
-                )
+            self._progress_label.setStringValue_(
+                t("wizard_asr_downloading", pct=min(pct, 99), size=setup_wizard_download_status_text(status))
+            )
 
     def _build_llm(self):
         content = self.window.contentView()
@@ -608,7 +586,7 @@ class SetupWizardController:
         ollama_url = self.config.get("ollama_url", "http://localhost:11434")
         ollama_running = _check_ollama_running(ollama_url) if ollama_ok else False
         model_name = self.config.get("llm_model", "huihui_ai/qwen3.5-abliterated:9b-Claude")
-        model_ok = _check_ollama_model(model_name) if ollama_ok else False
+        model_ok = _check_ollama_model(model_name, self.config.get("ollama_url", "http://localhost:11434")) if ollama_ok else False
         labels = setup_wizard_llm_labels()
 
         y -= 10

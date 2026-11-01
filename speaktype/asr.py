@@ -5,6 +5,7 @@ import logging
 import tempfile
 import threading
 import inspect
+from .config import get_temp_dir
 
 logger = logging.getLogger("speaktype.asr")
 
@@ -19,7 +20,7 @@ TRANSCRIPT_OUTPUT_EXTENSIONS = (".txt", ".srt", ".vtt", ".json")
 
 def _make_temp_transcript_output_path() -> str:
     """Return a temporary output stem for mlx-audio's mandatory save step."""
-    fd, path = tempfile.mkstemp(prefix="speaktype-transcript-", suffix="")
+    fd, path = tempfile.mkstemp(dir=get_temp_dir(), prefix="speaktype-transcript-", suffix="")
     os.close(fd)
     try:
         os.unlink(path)
@@ -191,25 +192,18 @@ class ASREngine:
 
     def transcribe(self, audio_input, language: str = "auto", hotword_context: str = "") -> str:
         """Transcribe an audio file path or in-memory audio buffer to text."""
+        if isinstance(audio_input, os.PathLike):
+            audio_input = os.fspath(audio_input)
         if not self._loaded:
             self.load()
 
-        should_cleanup = isinstance(audio_input, (str, os.PathLike))
         self.acquire_inference(blocking=True)
         try:
-            try:
-                if self.backend == "whisper":
-                    return self._transcribe_whisper(audio_input, language, hotword_context)
-                else:
-                    return self._transcribe_qwen(audio_input, language, hotword_context)
-            finally:
-                self.release_inference()
+            if self.backend == "whisper":
+                return self._transcribe_whisper(audio_input, language, hotword_context)
+            return self._transcribe_qwen(audio_input, language, hotword_context)
         finally:
-            if should_cleanup:
-                try:
-                    os.unlink(audio_input)
-                except OSError:
-                    pass
+            self.release_inference()
 
     def warmup_async(self):
         """Run a tiny background inference to warm MLX/Metal kernels."""

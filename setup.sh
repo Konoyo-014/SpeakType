@@ -1,104 +1,62 @@
 #!/bin/bash
-# SpeakType Setup Script
-set -e
+# 安装 SpeakType 的本地运行依赖和模型。
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+mkdir -p "${SCRIPT_DIR}/work/setup/temporary"
+export TMPDIR="${SCRIPT_DIR}/work/setup/temporary/"
 
-echo "╔══════════════════════════════════════╗"
-echo "║     SpeakType Setup                  ║"
-echo "║     AI Voice Input for Mac           ║"
-echo "╚══════════════════════════════════════╝"
-echo ""
-
-# 1. Python venv (prefer 3.10-3.12 for MLX compatibility)
-echo "▶ Setting up Python environment..."
-PYTHON=""
-for ver in python3.12 python3.11 python3.10; do
-    if command -v "/opt/homebrew/bin/$ver" &>/dev/null; then
-        PYTHON="/opt/homebrew/bin/$ver"
-        break
-    fi
-done
-[ -z "$PYTHON" ] && PYTHON="$(command -v python3)"
-echo "  Using: $($PYTHON --version)"
-
-if [ ! -d "venv" ]; then
-    $PYTHON -m venv --clear venv
-fi
-echo "  ✓ Virtual environment ready"
-
-# 2. Install deps
-echo ""
-echo "▶ Installing dependencies..."
-./venv/bin/pip install --upgrade pip -q
-./venv/bin/pip install -r requirements.txt -q 2>&1 | tail -3
-echo "  ✓ Dependencies installed"
-
-# 3. Ollama
-echo ""
-echo "▶ Setting up Ollama..."
-OLLAMA_BIN="/opt/homebrew/opt/ollama/bin/ollama"
-if [ ! -f "$OLLAMA_BIN" ]; then
-    if command -v ollama &>/dev/null; then
-        OLLAMA_BIN="ollama"
-    elif command -v brew &>/dev/null; then
-        echo "  Installing Ollama..."
-        brew install ollama 2>&1 | tail -3
-    else
-        echo "  ✗ Install Ollama: https://ollama.ai"
-        exit 1
-    fi
-fi
-
-# Start Ollama if needed
-if ! curl -s http://localhost:11434/api/tags &>/dev/null; then
-    echo "  Starting Ollama service..."
-    OLLAMA_FLASH_ATTENTION="1" OLLAMA_KV_CACHE_TYPE="q8_0" $OLLAMA_BIN serve &>/dev/null &
-    sleep 3
-fi
-
-# Pull LLM model
-LLM_MODEL="huihui_ai/qwen3.5-abliterated:9b-Claude"
-echo "  Pulling $LLM_MODEL..."
-if $OLLAMA_BIN list 2>/dev/null | grep -q "$LLM_MODEL"; then
-    echo "  ✓ LLM model ready"
+if [ -n "${SPEAKTYPE_PYTHON:-}" ]; then
+    PYTHON="$SPEAKTYPE_PYTHON"
 else
-    $OLLAMA_BIN pull "$LLM_MODEL"
-    echo "  ✓ LLM model downloaded"
+    PYTHON="${SCRIPT_DIR}/venv/bin/python"
+    if [ ! -x "$PYTHON" ]; then
+        BASE_PYTHON="$(command -v python3.10)"
+        "$BASE_PYTHON" -m venv "${SCRIPT_DIR}/venv"
+    fi
 fi
 
-# 4. ASR model
-echo ""
-echo "▶ Downloading ASR model (Qwen3-ASR-1.7B-8bit)..."
-./venv/bin/python -c "
-from huggingface_hub import snapshot_download
-try:
-    snapshot_download('mlx-community/Qwen3-ASR-1.7B-8bit')
-    print('  ✓ ASR model ready (1.7B)')
-except:
-    try:
-        snapshot_download('mlx-community/Qwen3-ASR-0.6B-4bit')
-        print('  ✓ ASR model ready (0.6B fallback)')
-    except Exception as e:
-        print(f'  ⚠ Will download on first run: {e}')
-"
+if [[ "$PYTHON" != /* ]] || [ ! -x "$PYTHON" ]; then
+    echo "SPEAKTYPE_PYTHON must be an executable absolute Python path: ${PYTHON}" >&2
+    exit 1
+fi
+"$PYTHON" -c 'import platform, sys; assert sys.version_info[:2] == (3, 10), "SpeakType requires Python 3.10"; assert platform.system() == "Darwin" and platform.machine() == "arm64", "SpeakType requires Apple Silicon macOS"'
+echo "Installing dependencies with ${PYTHON}"
+"$PYTHON" -m pip install --upgrade pip
+"$PYTHON" -m pip install -r requirements.txt
+"$PYTHON" -m pip check
+"$PYTHON" scripts/verify_runtime.py
 
-# 5. Done
-echo ""
-echo "╔══════════════════════════════════════════════════╗"
-echo "║  Setup Complete!                                 ║"
-echo "╠══════════════════════════════════════════════════╣"
-echo "║                                                  ║"
-echo "║  REQUIRED macOS permissions:                     ║"
-echo "║  System Settings → Privacy & Security →          ║"
-echo "║    ✓ Microphone   (for Terminal/iTerm)           ║"
-echo "║    ✓ Accessibility (for Terminal/iTerm)          ║"
-echo "║    ✓ Input Monitoring (for Terminal/iTerm)       ║"
-echo "║                                                  ║"
-echo "║  To start:  ./start.sh                           ║"
-echo "║  To test:   ./start.sh --test                    ║"
-echo "║                                                  ║"
-echo "║  Push-to-talk: Hold Right ⌘ key, speak, release  ║"
-echo "║                                                  ║"
-echo "╚══════════════════════════════════════════════════╝"
+if command -v ollama >/dev/null 2>&1; then
+    OLLAMA_BIN="$(command -v ollama)"
+elif [ -x /opt/homebrew/opt/ollama/bin/ollama ]; then
+    OLLAMA_BIN=/opt/homebrew/opt/ollama/bin/ollama
+else
+    brew install ollama
+    OLLAMA_BIN="$(command -v ollama)"
+fi
+
+if ! curl --fail --silent --connect-timeout 2 --max-time 5 http://localhost:11434/api/tags >/dev/null; then
+    if [ -d /Applications/Ollama.app ]; then
+        open -gj /Applications/Ollama.app
+    elif command -v brew >/dev/null 2>&1 && brew list --formula ollama >/dev/null 2>&1; then
+        brew services start ollama
+    else
+        nohup "$OLLAMA_BIN" serve >"${SCRIPT_DIR}/work/setup/ollama.log" 2>&1 </dev/null &
+    fi
+    for attempt in {1..15}; do
+        if curl --fail --silent --connect-timeout 2 --max-time 5 http://localhost:11434/api/tags >/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    curl --fail --silent --connect-timeout 2 --max-time 5 http://localhost:11434/api/tags >/dev/null
+fi
+
+"$OLLAMA_BIN" pull huihui_ai/qwen3.5-abliterated:9b-Claude
+"$PYTHON" -c 'from huggingface_hub import snapshot_download; snapshot_download("mlx-community/Qwen3-ASR-1.7B-8bit")'
+
+echo "SpeakType dependencies and models are ready."
+echo "Grant Microphone, Accessibility, and Input Monitoring permissions in System Settings > Privacy & Security."
+echo "Run SpeakType: ${PYTHON} ${SCRIPT_DIR}/main.py"

@@ -2,6 +2,64 @@
 
 All notable changes to SpeakType will be documented in this file.
 
+## [2.3.0] - 2026-11-01
+
+### Added
+
+- Added a searchable native Dictation History window with time, app, insertion result, complete original/final text, separate copy buttons, refresh, empty states, and TXT/Markdown/CSV/JSON export.
+- Added Copy Last Dictation and Insert Last Dictation Again to the menu. The latest result remains available during the current session when history is disabled.
+- Retained original transcription before local polishing and saved final text before insertion. History records unconfirmed, verified insertion, sent-but-unverified, and failed insertion states.
+- Added consecutive spoken punctuation, quotation marks, parentheses, square brackets, and Chinese book-title marks, including nested quoted and parenthesized content.
+- Voice undo captures the verified insertion's Accessibility element, complete text, and UTF-16 cursor range. It removes the exact inserted span only while the element, text, and cursor still match.
+
+### Changed
+
+- Clipboard restoration preserves content copied by the user between consecutive insertions and during a pending restore.
+- Correction replacements preserve literal backslashes and apply longer terms before shorter overlapping terms.
+- Saved configuration, dictionary, corrections, snippets, hotwords, and history validate JSON structure and field types. Invalid files raise explicit errors and retain their original contents.
+- History uses stable record identifiers, synchronous atomic updates, deep-copy snapshots, and thread-safe export reads.
+- Existing history without an insertion outcome is displayed as sent but unverified.
+- Polish-only processing preserves the transcription's language. Language-drift checks cover short English text, and retries retain the requested language for Japanese and Korean input.
+- Setup and diagnostics read actual microphone authorization, check the configured Ollama model's exact tag and service address, and verify model configuration, tokenizer files, weight files, and indexed tensors before reporting a complete ASR cache. Download progress completes after the model check.
+- Skipping an unavailable optional Ollama model disables polishing and translation while preserving dictation.
+- The first correction or snippet saved to an empty library takes effect immediately. The hotword window refreshes newly learned terms from the application's active store.
+- Standalone application builds use ad hoc code signing, strict signature checks, embedded-runtime execution checks, Mach-O dependency checks, and a macOS 14 minimum deployment target. Build logs and intermediate files are stored under `work/`.
+- Installation instructions start with the release DMG, Applications installation, macOS permissions, and daily dictation/recovery controls.
+
+### Validation
+
+- Functional checks ran on an Apple Silicon Mac running macOS 26.6.2. The macOS 14 minimum was checked against binary deployment metadata and linked dependencies.
+- Bundled checks ran through the embedded `verify_runtime` entry point and confirmed that the Python prefix and product modules resolved inside the app. Strict code-signature verification passed after execution.
+- `scripts/validate_core.py`: six source groups passed using isolated real files and production functions, including concurrent persistence, all four history export formats, invalid-data rejection, and literal text handling.
+- `scripts/validate_clipboard.py`: actual NSPasteboard checks passed in source and bundled runtimes for repeated insertion and new user copies during delayed restoration.
+- `scripts/validate_history_ui.py`: actual AppKit controls passed in source and bundled runtimes for search, selection, original/final copying, empty state, refresh, resizing, close/reopen, and Chinese/English checks.
+- `scripts/verify_runtime.py`: source and bundled runtime imports, WAV codec round trip, MLX execution, and Qwen3-ASR feature extraction passed.
+- `scripts/validate_audio.py`: source and bundled runtimes loaded the default Qwen3-ASR 1.7B model, recognized English and Chinese from files and in-memory audio, preserved input files, and returned empty text for silence. Source microphone capture recorded 51,200 samples of speaker playback and recognized the test sentence.
+- Real Ollama `qwen3-vl:2b-instruct` requests passed English polishing, Chinese translation, and Japanese/Korean language preservation in source and bundled runtimes. Bundled short-English cases retained English after filler removal.
+- `scripts/validate_delivery.py`: source and bundled TextEdit checks passed complete ASR-to-insertion processing, retained text after a read-only target rejected insertion, copying, retrying the same history record, and session recovery with history disabled.
+- Bundled TextEdit delivery also passed ASR followed by real `qwen3-vl:2b-instruct` polishing, and ASR followed by combined polishing and Chinese translation. Both results were verified in TextEdit, and history retained the original English transcription.
+- `scripts/validate_native_app.py`: source and bundled checks passed reuse of six native windows, preservation and isolated persistence of settings across every section, first-save correction/snippet availability, and hotword refresh after the first learned term.
+- `scripts/validate_setup_wizard.py`: source and bundled checks passed all five steps with the installed `qwen3-vl:2b-instruct` model or by skipping a missing optional model. Cached-model completion showed one Next button, and skipping persisted completion with polishing and translation disabled.
+- `scripts/validate_streaming.py`: source and bundled checks passed English and Chinese partial transcription, simultaneous final-transcription requests, Unicode display, and callback termination after stopping.
+- `scripts/validate_undo.py`: eight checks passed in each of the source and bundled runtimes, covering exact ASCII/Unicode removal and preservation of text after cursor movement, selection changes, document edits, document switching, unavailable Accessibility text ranges, and an unverified insertion state.
+
+### 中文
+
+- 新增可搜索的原生听写历史窗口，显示时间、应用和插入结果，可以查看与复制完整的原始转写和最终文本，并提供刷新、空状态和四种格式的导出功能。
+- 菜单新增复制最近听写与再次插入最近听写。关闭历史记录时，当前会话仍保留最近一次结果。
+- 在本地润色前保留原始转写，在插入前保存最终文本；历史记录区分尚未确认、已插入、已发送但未验证和插入失败。
+- 支持连续口述引号、圆括号、方括号、书名号和结尾标点，包括引号与括号嵌套的内容。
+- 语音撤销会保存已验证插入的辅助功能元素、完整正文与 UTF-16 光标位置，只有这些内容仍然一致时，才会精确选中并删除对应的听写内容。
+- 剪贴板恢复保留用户新复制的内容；纠错保留反斜杠，并优先处理较长的词语。
+- 本地保存文件会验证 JSON 结构与字段类型，错误会明确报告，原文件得到保留。
+- 旧历史缺少插入结果时，会显示为已发送但未验证。润色会保持原文语言，短英文误译检查与日文、韩文重试也遵守语言要求。
+- 设置向导与本地自检会读取真实麦克风授权，核对配置中的 Ollama 服务与完整模型标签，并检查语音模型的配置、分词文件和权重。完成模型检查后，下载进度才会显示完成。
+- 跳过尚未安装的可选 Ollama 模型后，会关闭润色和翻译。空词库首次保存的纠错与快捷短语立即生效，热词窗口刷新后可以显示新增词语。
+- 源码与应用包已通过默认 1.7B 中英文识别、输入文件保留、静音处理、TextEdit 插入与恢复、六种原生窗口、设置保存、向导、流式预览和八项安全撤销检查。向导使用已安装的 `qwen3-vl:2b-instruct` 模型或跳过缺少的可选模型；源码还通过真实麦克风录音验证。
+- 应用包还通过完整的识别、真实 2b 模型润色与 TextEdit 插入流程，以及识别后组合润色、中文翻译与插入流程。两种最终文本都在 TextEdit 中验证成功，历史记录保留原始英文转写。
+- 功能检查使用 macOS 26.6.2 的 Apple Silicon Mac；macOS 14 最低要求通过二进制最低系统声明和依赖检查确认。应用包从内置入口执行验证，运行后严格代码签名检查通过。
+- 独立应用构建检查 ad hoc 代码签名、内置运行环境和二进制依赖，最低系统版本为 macOS 14；安装说明优先介绍 DMG、应用程序文件夹、权限和日常使用。
+
 ## [2.2.0] - 2026-05-08
 
 ### Official public release

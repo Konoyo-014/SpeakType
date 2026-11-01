@@ -6,6 +6,7 @@ import time
 import threading
 import logging
 import subprocess
+from pathlib import Path
 import rumps
 import AppKit
 import objc
@@ -26,8 +27,8 @@ from .asr import ASREngine
 from .polish import PolishEngine
 from .inserter import (
     insert_text,
-    replace_selection,
-    delete_chars,
+    capture_verified_insertion,
+    undo_verified_insertion,
     get_last_insert_diagnostic,
     reset_last_insert_diagnostic,
 )
@@ -191,6 +192,9 @@ class SpeakTypeApp(rumps.App):
             ollama_url=self.config["ollama_url"],
         )
         self.history = DictationHistory(max_entries=self.config["history_max_entries"])
+        recent = self.history.get_recent(1)
+        self._latest_dictation = recent[-1] if recent and self.config["history_enabled"] else None
+        self._dictation_lock = threading.Lock()
         self.snippets = SnippetLibrary()
         self.corrections = CorrectionStore()
         self.hotwords = HotwordStore()
@@ -201,6 +205,7 @@ class SpeakTypeApp(rumps.App):
         self._first_launch = not self.config.get("setup_completed", False)
         self._settings_controller = None
         self._stats_controller = None
+        self._history_controller = None
         self._dict_controller = None
         self._diagnostics_controller = None
 
@@ -216,6 +221,7 @@ class SpeakTypeApp(rumps.App):
         # "Undo last dictation" support — what we inserted on the most
         # recent successful pass, and into which app.
         self._last_insertion_text: str | None = None
+        self._last_insertion_snapshot = None
         self._last_insertion_app: str | None = None
         self._last_insertion_bundle_id: str | None = None
         self._recording_stop_lock = threading.Lock()
@@ -307,6 +313,9 @@ class SpeakTypeApp(rumps.App):
         self._dict_item = rumps.MenuItem(t("menu_dict_snippets"), callback=self._open_dict)
         self._hotwords_item = rumps.MenuItem(self._hotword_status_title(), callback=self._open_hotwords_window)
         self._stats_item = rumps.MenuItem(t("menu_history_stats"), callback=self._show_stats)
+        self._history_item = rumps.MenuItem(t("menu_dictation_history"), callback=self._show_history)
+        self._copy_last_item = rumps.MenuItem(t("menu_copy_last_dictation"), callback=self._copy_last_dictation)
+        self._insert_last_item = rumps.MenuItem(t("menu_insert_last_dictation"), callback=self._insert_last_dictation)
         self._diagnostics_item = rumps.MenuItem(t("menu_diagnostics"), callback=self._show_diagnostics)
         self._mic_item = rumps.MenuItem(t("menu_test_mic"), callback=self._test_mic)
         self._config_item = rumps.MenuItem(t("menu_open_config"), callback=self._open_config)
@@ -334,6 +343,9 @@ class SpeakTypeApp(rumps.App):
             self._dict_item,
             self._hotwords_item,
             self._stats_item,
+            self._history_item,
+            self._copy_last_item,
+            self._insert_last_item,
             self._diagnostics_item,
             self._mic_item,
             None,
@@ -366,6 +378,9 @@ class SpeakTypeApp(rumps.App):
         self._dict_item.title = t("menu_dict_snippets")
         self._update_hotword_menu_title()
         self._stats_item.title = t("menu_history_stats")
+        self._history_item.title = t("menu_dictation_history")
+        self._copy_last_item.title = t("menu_copy_last_dictation")
+        self._insert_last_item.title = t("menu_insert_last_dictation")
         self._diagnostics_item.title = t("menu_diagnostics")
         self._mic_item.title = t("menu_test_mic")
         self._config_item.title = t("menu_open_config")
@@ -490,12 +505,10 @@ class SpeakTypeApp(rumps.App):
         self._do_setup()
 
     def _on_wizard_complete(self):
-        """Called when setup wizard finishes. Relaunch the app for clean startup."""
-        import os
-        app_path = "/Applications/SpeakType.app"
-        if os.path.exists(app_path):
-            subprocess.Popen(["open", app_path])
-        rumps.quit_application()
+        if get_running_bundle_path():
+            self._relaunch_app()
+        else:
+            self._check_permissions_and_setup()
 
     def _set_status(self, text):
         """Thread-safe: update status menu item title from any thread."""
@@ -711,7 +724,7 @@ class SpeakTypeApp(rumps.App):
             _delta("transcribed", "polished"),
             _delta("polished", "translated"),
             _delta("translated", "inserted"),
-            _delta("inserted", "history_enqueued"),
+            _delta("inserted", "history_saved"),
         )
 
     def _llm_unavailable_kind(self, error: str | None = None) -> str:
@@ -1027,10 +1040,13 @@ class SpeakTypeApp(rumps.App):
             self._relaunch_app()
 
     def _relaunch_app(self):
-        app_path = get_running_bundle_path() or "/Applications/SpeakType.app"
+        bundle_path = get_running_bundle_path()
+        command = ["open", bundle_path] if bundle_path else [
+            sys.executable, str(Path(__file__).resolve().parents[1] / "main.py")
+        ]
         try:
             subprocess.Popen(
-                ["/bin/sh", "-c", 'sleep 0.4; open "$1"', "speaktype-restart", app_path],
+                ["/bin/sh", "-c", 'sleep 0.4; exec "$@"', "speaktype-restart", *command],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1484,6 +1500,7 @@ class SpeakTypeApp(rumps.App):
     def _process_audio(self, audio_input, duration: float, preview_snapshot=None):
         marks = {"start": time.perf_counter()}
         llm_fallback_used = False
+        recording_path = audio_input if isinstance(audio_input, (str, os.PathLike)) else None
         try:
             app_info = get_active_app()
             tone = get_tone_for_app(app_info) if self.config["context_aware_tone"] else "neutral"
@@ -1514,6 +1531,7 @@ class SpeakTypeApp(rumps.App):
                 return
 
             logger.info(f"Raw: {raw_text}")
+            original_transcription = raw_text
 
             # Plugin: post_transcribe
             if self.config.get("plugins_enabled"):
@@ -1540,6 +1558,7 @@ class SpeakTypeApp(rumps.App):
             if snippet_text:
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
                 self._status_overlay.show_done(snippet_text)
+                entry = self._retain_dictation(original_transcription, snippet_text, app_info, duration)
                 reset_last_insert_diagnostic()
                 inserted_ok = insert_text(
                     snippet_text,
@@ -1547,6 +1566,7 @@ class SpeakTypeApp(rumps.App):
                     app_name=app_info.get("name", ""),
                     bundle_id=app_info.get("bundle_id", ""),
                 )
+                self._finish_dictation_delivery(entry, inserted_ok)
                 if not inserted_ok:
                     self._notify_insert_failed(app_info)
                     return
@@ -1577,6 +1597,7 @@ class SpeakTypeApp(rumps.App):
                     text = result
 
             combined_llm_path = self.config["polish_enabled"] and self.config.get("translate_enabled", False) and not self.config.get("plugins_enabled")
+            entry = self._retain_dictation(original_transcription, text, app_info, duration)
 
             # Polish with LLM
             if combined_llm_path:
@@ -1654,6 +1675,9 @@ class SpeakTypeApp(rumps.App):
                     return
 
             # Show the final text in the overlay before inserting
+            entry["polished"] = polished
+            if entry.get("id"):
+                self.history.update_text(entry["id"], polished)
             self._status_overlay.show_done(polished)
 
             # Insert text at cursor
@@ -1669,6 +1693,7 @@ class SpeakTypeApp(rumps.App):
                 app_name=app_info.get("name", ""),
                 bundle_id=app_info.get("bundle_id", ""),
             )
+            self._finish_dictation_delivery(entry, inserted_ok)
             if not inserted_ok:
                 self._notify_insert_failed(app_info)
                 return
@@ -1686,15 +1711,7 @@ class SpeakTypeApp(rumps.App):
             if self.config.get("plugins_enabled"):
                 self._plugin_manager.run_hook("post_insert", polished)
 
-            # Save history
-            if self.config["history_enabled"]:
-                self.history.add_async(
-                    raw_text=raw_text,
-                    polished_text=polished,
-                    app_name=app_info.get("name", ""),
-                    duration_sec=duration,
-                )
-            marks["history_enqueued"] = time.perf_counter()
+            marks["history_saved"] = time.perf_counter()
         except Exception as e:
             logger.error(f"Processing failed: {e}")
             self._show_overlay_error(t("overlay_processing_failed"), auto_hide_after=3.0)
@@ -1703,14 +1720,92 @@ class SpeakTypeApp(rumps.App):
             marks["end"] = time.perf_counter()
             self._log_pipeline_latency(marks)
             self._is_processing = False
+            if recording_path is not None:
+                Path(recording_path).unlink(missing_ok=True)
+
+    def _retain_dictation(self, raw_text, final_text, app_info, duration=0):
+        entry = {"raw": raw_text, "polished": final_text, "outcome": "pending"}
+        with self._dictation_lock:
+            self._latest_dictation = entry
+        if self.config.get("history_enabled", True):
+            entry["id"] = self.history.add(
+                raw_text=raw_text,
+                polished_text=final_text,
+                app_name=app_info.get("name", ""),
+                duration_sec=duration,
+                outcome="pending",
+            )
+        return entry
+
+    def _finish_dictation_delivery(self, entry, inserted):
+        diagnostic = get_last_insert_diagnostic()
+        outcome = "failed"
+        if inserted:
+            outcome = "inserted" if diagnostic and diagnostic.verified else "sent"
+        entry["outcome"] = outcome
+        with self._dictation_lock:
+            if self._latest_dictation and self._latest_dictation.get("id") == entry.get("id"):
+                self._latest_dictation["outcome"] = outcome
+        if entry.get("id"):
+            self.history.set_outcome(entry["id"], outcome)
+
+    def _copy_last_dictation(self, _):
+        with self._dictation_lock:
+            entry = dict(self._latest_dictation or {})
+        text = entry.get("polished") or entry.get("raw", "")
+        if not text:
+            self._show_overlay_notice(t("notif_no_recent_dictation"))
+            return
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        if not pb.setString_forType_(text, AppKit.NSPasteboardTypeString):
+            raise RuntimeError("Unable to copy dictation to the clipboard")
+        self._show_overlay_notice(t("notif_text_copied"))
+
+    def _insert_last_dictation(self, _):
+        if self.recorder.is_recording or self._is_processing:
+            return
+        with self._dictation_lock:
+            entry = dict(self._latest_dictation or {})
+        text = entry.get("polished") or entry.get("raw", "")
+        if not text:
+            self._show_overlay_notice(t("notif_no_recent_dictation"))
+            return
+        app_info = get_active_app()
+        self._is_processing = True
+        self._cancel_edit_observation()
+
+        def deliver():
+            try:
+                inserted = insert_text(text, method=self.config["insert_method"],
+                                       app_name=app_info.get("name", ""),
+                                       bundle_id=app_info.get("bundle_id", ""))
+                self._finish_dictation_delivery(entry, inserted)
+                if inserted:
+                    self._remember_last_insertion(text, app_info)
+                    self._show_successful_insert_feedback(app_info, text)
+                    self._show_overlay_done(text)
+                else:
+                    self._notify_insert_failed(app_info)
+            finally:
+                self._is_processing = False
+
+        self._processing_thread = threading.Thread(target=deliver, daemon=True, name="SpeakTypeRetryInsert")
+        self._processing_thread.start()
 
     def _remember_last_insertion(self, text: str, app_info: dict | None = None):
+        snapshot = capture_verified_insertion(text)
+        if snapshot is None:
+            self._clear_last_insertion()
+            return
+        self._last_insertion_snapshot = snapshot
         self._last_insertion_text = text or None
         self._last_insertion_app = (app_info or {}).get("name", "") or None
         self._last_insertion_bundle_id = (app_info or {}).get("bundle_id", "") or None
 
     def _clear_last_insertion(self):
         self._last_insertion_text = None
+        self._last_insertion_snapshot = None
         self._last_insertion_app = None
         self._last_insertion_bundle_id = None
 
@@ -1756,12 +1851,10 @@ class SpeakTypeApp(rumps.App):
                 _play_sound("Basso")
             return False
 
-        char_count = len(self._last_insertion_text)
-        logger.info(f"Undoing last insertion ({char_count} chars)")
-        try:
-            delete_chars(char_count)
-        except Exception as e:
-            logger.error(f"Undo delete failed: {e}")
+        if not undo_verified_insertion(self._last_insertion_snapshot):
+            logger.info("Undo skipped because the focused text or cursor no longer matches the verified insertion")
+            if self.config["sound_feedback"]:
+                _play_sound("Basso")
             return False
 
         self._clear_last_insertion()
@@ -1778,9 +1871,17 @@ class SpeakTypeApp(rumps.App):
             logger.info(f"Edit command: '{command}' on: '{selected[:50]}...'")
             result = self.polish_engine.edit_text(command, selected, tone)
             self._observe_llm_status()
-            replace_selection(result)
-            self._remember_last_insertion(result, app_info or get_active_app())
-            return True
+            target = app_info or get_active_app()
+            entry = self._retain_dictation(selected, result, target)
+            inserted = insert_text(result, method=self.config["insert_method"],
+                                   app_name=target.get("name", ""),
+                                   bundle_id=target.get("bundle_id", ""))
+            self._finish_dictation_delivery(entry, inserted)
+            if inserted:
+                self._remember_last_insertion(result, target)
+            else:
+                self._notify_insert_failed(target)
+            return inserted
         except Exception as e:
             logger.error(f"Edit command failed: {e}")
             return False
@@ -1819,6 +1920,7 @@ class SpeakTypeApp(rumps.App):
 
         self.config.update(new_config)
         save_config(self.config)
+        self.history.max_entries = self.config["history_max_entries"]
 
         # Update UI language if changed
         new_ui_lang = new_config.get("ui_language", old_ui_lang)
@@ -1907,6 +2009,13 @@ class SpeakTypeApp(rumps.App):
             lambda: StatsWindowController(self.history),
         )
 
+    def _show_history(self, _):
+        from .history_window import HistoryWindowController
+        self._history_controller = _show_or_create_window_controller(
+            self._history_controller,
+            lambda: HistoryWindowController(self.history),
+        )
+
     def _show_diagnostics(self, _):
         from .diagnostics_window import DiagnosticsWindowController
         self._diagnostics_controller = _show_or_create_window_controller(
@@ -1916,14 +2025,6 @@ class SpeakTypeApp(rumps.App):
                 asr_engine=self.asr,
             ),
         )
-
-    def _show_diagnostics(self, _):
-        from .diagnostics_window import DiagnosticsWindowController
-        self._diagnostics_controller = DiagnosticsWindowController(
-            config=self.config,
-            asr_engine=self.asr,
-        )
-        self._diagnostics_controller.show()
 
     def _test_mic(self, _):
         def _do_test():

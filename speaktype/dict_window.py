@@ -130,7 +130,7 @@ class DictWindowController:
 
     def __init__(self, snippets: SnippetLibrary, corrections: CorrectionStore | None = None):
         self.snippets = snippets
-        self.corrections = corrections or CorrectionStore()
+        self.corrections = corrections if corrections is not None else CorrectionStore()
         self.window = None
         self._delegate = None
         self._word_list_view = None

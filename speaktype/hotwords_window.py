@@ -175,7 +175,7 @@ class HotwordsWindowController:
     ROW_WIDTH = 652
 
     def __init__(self, hotwords: HotwordStore | None = None):
-        self.hotwords = hotwords or HotwordStore()
+        self.hotwords = hotwords if hotwords is not None else HotwordStore()
         self.window = None
         self._delegate = None
         self._rows_view = None

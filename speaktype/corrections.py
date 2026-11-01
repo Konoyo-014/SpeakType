@@ -55,27 +55,18 @@ class CorrectionStore:
             self._entries = []
             self._rebuild_compiled()
             return
-        try:
-            with open(self._path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                self._entries = [
-                    {"wrong": str(e.get("wrong", "")), "right": str(e.get("right", ""))}
-                    for e in data
-                    if e and e.get("wrong")
-                ]
-            else:
-                self._entries = []
-        except (IOError, json.JSONDecodeError) as e:
-            logger.warning(f"Failed to load corrections from {self._path}: {e}")
-            self._entries = []
+        with open(self._path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"Corrections must be a JSON list: {self._path}")
+        if any(not isinstance(e, dict) or not isinstance(e.get("wrong"), str)
+               or not isinstance(e.get("right"), str) for e in data):
+            raise ValueError(f"Invalid correction entries in {self._path}")
+        self._entries = [{"wrong": e["wrong"], "right": e["right"]} for e in data if e["wrong"]]
         self._rebuild_compiled()
 
     def _save(self):
-        try:
-            write_json_file(self._path, self._entries)
-        except IOError as e:
-            logger.error(f"Failed to save corrections: {e}")
+        write_json_file(self._path, self._entries)
 
     # ------------------------------------------------------------------ #
     # Mutations                                                          #
@@ -95,7 +86,7 @@ class CorrectionStore:
             else:
                 self._entries.append({"wrong": wrong, "right": right})
             self._rebuild_compiled()
-        self._save()
+            self._save()
 
     def remove(self, wrong: str):
         wrong = (wrong or "").strip().lower()
@@ -106,13 +97,13 @@ class CorrectionStore:
             ]
             if len(self._entries) != before:
                 self._rebuild_compiled()
-        self._save()
+            self._save()
 
     def clear(self):
         with self._lock:
             self._entries = []
             self._compiled = []
-        self._save()
+            self._save()
 
     def replace_all(self, entries: Iterable[dict]):
         """Wholesale replacement, used when saving the dict editor."""
@@ -126,7 +117,7 @@ class CorrectionStore:
         with self._lock:
             self._entries = cleaned
             self._rebuild_compiled()
-        self._save()
+            self._save()
 
     # ------------------------------------------------------------------ #
     # Lookup                                                              #
@@ -147,15 +138,12 @@ class CorrectionStore:
             compiled = list(self._compiled)
         result = text
         for pattern, replacement in compiled:
-            try:
-                result = pattern.sub(replacement, result)
-            except Exception as e:
-                logger.debug(f"Correction sub failed: {e}")
+            result = pattern.sub(lambda match: replacement, result)
         return result
 
     def _rebuild_compiled(self):
         compiled: list[tuple[re.Pattern, str]] = []
-        for entry in self._entries:
+        for entry in sorted(self._entries, key=lambda item: len(item.get("wrong", "")), reverse=True):
             wrong = entry.get("wrong", "")
             right = entry.get("right", "")
             if not wrong:

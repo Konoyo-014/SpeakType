@@ -11,12 +11,6 @@ import requests
 logger = logging.getLogger("speaktype.polish")
 
 
-FALLBACK_MODELS = [
-    "huihui_ai/qwen3.5-abliterated:9b-Claude",
-    "qwen3.5:4b",
-    "qwen3.5:9b",
-]
-
 OLLAMA_KEEP_ALIVE = "15m"
 OLLAMA_PREWARM_MIN_INTERVAL = 30.0
 OLLAMA_RECHECK_INTERVAL = 10.0
@@ -33,6 +27,13 @@ LANGUAGE_NAMES = {
     "pt": "Portuguese",
     "ar": "Arabic",
 }
+
+
+def ollama_model_is_available(model: str, names: list[str]) -> bool:
+    requested = model if ":" in model.rsplit("/", 1)[-1] else f"{model}:latest"
+    return requested in {
+        name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest" for name in names
+    }
 
 
 def _response_error_detail(resp) -> str:
@@ -371,7 +372,7 @@ def _build_polish_messages(
             "只返回清理后的文本，不要返回任何额外内容",
         ])
         if retry_after_translation_drift:
-            rules.insert(0, "上一轮输出错误地变成了英文；这次必须输出中文润色结果")
+            rules.insert(0, "上一轮输出改变了原文语言；这次必须严格遵守输出语言要求，保留原始含义")
         rules_text = "\n".join(f"- {r}" for r in rules)
 
         resolved_scene_text = ""
@@ -461,12 +462,10 @@ def _build_polish_messages(
             "Rules:\n"
             f"{rules_text}\n\n"
             "Examples:\n"
-            "Input: <transcription>嗯那个帮我写一个邮件</transcription>\n"
-            "Output: 帮我写一个邮件\n\n"
-            "Input: <transcription>呃就是今天下午三点开会</transcription>\n"
-            "Output: 今天下午三点开会\n\n"
-            "Input: <transcription>用中文回答我</transcription>\n"
-            "Output: 用中文回答我\n\n"
+            "Input: <transcription>um please send the meeting notes tomorrow</transcription>\n"
+            "Output: Please send the meeting notes tomorrow.\n\n"
+            "Input: <transcription>answer me in Chinese</transcription>\n"
+            "Output: Answer me in Chinese.\n\n"
             "Input: <transcription>hey um can you like tell me the time</transcription>\n"
             "Output: Hey, can you tell me the time?"
         )
@@ -478,13 +477,14 @@ def _build_polish_messages(
 
 
 def _reject_accidental_translation(source_text: str, candidate_text: str, language: str) -> bool:
-    """Reject obvious CJK-to-English drift when polish is not a translate request."""
+    source_cjk = _cjk_count(source_text)
+    candidate_cjk = _cjk_count(candidate_text)
+    if source_cjk == 0 and re.search(r"[A-Za-z]", source_text):
+        return candidate_cjk > 0
     if language and language not in {"auto", "zh", "ja", "ko"}:
         return False
-    source_cjk = _cjk_count(source_text)
     if source_cjk < 2:
         return False
-    candidate_cjk = _cjk_count(candidate_text)
     if candidate_cjk > 0:
         return False
     source_chars = [ch for ch in source_text if not ch.isspace()]
@@ -522,23 +522,12 @@ class PolishEngine:
                 model_names = [m.get("name", "") for m in models]
 
                 # Check if configured model is available
-                base_name = self.model.split(":")[0]
-                if any(base_name in name for name in model_names):
+                if ollama_model_is_available(self.model, model_names):
                     self._available = True
                     self.last_error = ""
                     return True
 
-                # Try fallback models
-                for fallback in FALLBACK_MODELS:
-                    fb_base = fallback.split(":")[0]
-                    if any(fb_base in name for name in model_names):
-                        logger.info(f"Model {self.model} not found, using fallback: {fallback}")
-                        self.model = fallback
-                        self._available = True
-                        self.last_error = ""
-                        return True
-
-                self.last_error = f"No Ollama LLM model is available. Available models: {model_names}"
+                self.last_error = f"Configured Ollama model {self.model} is not available. Available models: {model_names}"
                 logger.warning(self.last_error)
                 self._available = False
                 return False
@@ -795,21 +784,21 @@ class PolishEngine:
                 model_input_text,
                 result,
             )
-            if prompt_language == "zh":
+            if prompt_language in {"zh", "en"}:
                 retry_messages = _build_polish_messages(
                     model_input_text,
                     tone=tone,
-                    language="zh",
+                    language=language,
                     auto_punctuation=auto_punctuation,
                     filler_removal=filler_removal,
                     scene=scene,
                     scene_template=scene_template,
-                    prompt_language="zh",
+                    prompt_language=prompt_language,
                     hotwords=hotwords,
                     retry_after_translation_drift=True,
                 )
                 retry = self._chat(retry_messages, max_tokens=_polish_token_budget(raw_text))
-                if retry and not _reject_accidental_translation(model_input_text, retry, "zh"):
+                if retry and not _reject_accidental_translation(model_input_text, retry, language):
                     return retry
             return model_input_text
         return result if result else raw_text

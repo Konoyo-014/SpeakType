@@ -151,20 +151,23 @@ class SnippetLibrary:
     def _load(self):
         ensure_config_dir()
         if SNIPPETS_FILE.exists():
-            try:
-                with open(SNIPPETS_FILE, encoding="utf-8") as f:
-                    self._snippets = json.load(f)
-                return
-            except (json.JSONDecodeError, IOError):
-                pass
-        self._snippets = list(DEFAULT_SNIPPETS)
+            with open(SNIPPETS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("trigger"), str)
+                or not isinstance(item.get("text"), str)
+                or not isinstance(item.get("description", ""), str)
+                for item in data
+            ):
+                raise ValueError(f"Invalid snippet entries in {SNIPPETS_FILE}")
+            self._snippets = data
+            return
+        self._snippets = [dict(item) for item in DEFAULT_SNIPPETS]
         self._save()
 
     def _save(self):
-        try:
-            write_json_file(SNIPPETS_FILE, self._snippets)
-        except IOError as e:
-            logger.error(f"Failed to save snippets: {e}")
+        write_json_file(SNIPPETS_FILE, self._snippets)
 
     # ------------------------------------------------------------------ #
     # Matching                                                            #
@@ -229,7 +232,7 @@ class SnippetLibrary:
     # ------------------------------------------------------------------ #
 
     def get_all(self) -> list:
-        return list(self._snippets)
+        return [dict(item) for item in self._snippets]
 
     def add(self, trigger: str, text: str, description: str = ""):
         self._snippets.append({

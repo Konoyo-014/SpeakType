@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import math
 from pathlib import Path
 
 DEFAULT_CONFIG = {
@@ -48,7 +49,7 @@ DEFAULT_CONFIG = {
     "hotword_max_context_terms": 30,  # Max active hotwords passed to one recognition turn
 }
 
-CONFIG_DIR = Path.home() / ".speaktype"
+CONFIG_DIR = Path(os.environ.get("SPEAKTYPE_CONFIG_DIR", Path.home() / ".speaktype")).expanduser().resolve()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_FILE = CONFIG_DIR / "history.json"
 CUSTOM_DICT_FILE = CONFIG_DIR / "custom_dictionary.json"
@@ -56,7 +57,38 @@ CUSTOM_DICT_FILE = CONFIG_DIR / "custom_dictionary.json"
 
 def _normalize_config(config: dict) -> dict:
     """Clamp legacy config values to the v2.1 product contract."""
+    if not isinstance(config, dict):
+        raise ValueError("SpeakType configuration must be a JSON object")
     normalized = dict(config)
+    for key, default in DEFAULT_CONFIG.items():
+        value = normalized.get(key, default)
+        if isinstance(default, bool) and not isinstance(value, bool):
+            raise ValueError(f"Configuration '{key}' must be true or false")
+        if isinstance(default, str) and not isinstance(value, str):
+            raise ValueError(f"Configuration '{key}' must be a string")
+        if isinstance(default, dict) and not isinstance(value, dict):
+            raise ValueError(f"Configuration '{key}' must be an object")
+    for key in ("sample_rate", "history_max_entries", "hotword_max_context_terms"):
+        value = normalized.get(key, DEFAULT_CONFIG[key])
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"Configuration '{key}' must be a positive integer")
+    for key in ("hotword_observation_seconds", "hotword_observation_stable_seconds", "max_recording_seconds"):
+        value = normalized.get(key, DEFAULT_CONFIG[key])
+        if key == "max_recording_seconds" and value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"Configuration '{key}' must be a finite nonnegative number")
+    device = normalized.get("audio_device")
+    if device is not None and (isinstance(device, bool) or not isinstance(device, (int, str))
+                               or isinstance(device, int) and device < 0):
+        raise ValueError("Configuration 'audio_device' must be a device name, index, or null")
+    for key, allowed in (("dictation_mode", ("push_to_talk", "toggle")),
+                         ("insert_method", ("paste", "type")), ("ui_language", ("zh", "en"))):
+        if normalized.get(key, DEFAULT_CONFIG[key]) not in allowed:
+            raise ValueError(f"Unsupported configuration '{key}'")
+    prompts = normalized.get("scene_prompts", {})
+    if any(not isinstance(key, str) or not isinstance(value, str) for key, value in prompts.items()):
+        raise ValueError("Configuration 'scene_prompts' must map scene names to strings")
     normalized["asr_backend"] = "qwen"
     if not normalized.get("asr_model"):
         normalized["asr_model"] = DEFAULT_CONFIG["asr_model"]
@@ -67,6 +99,12 @@ def _normalize_config(config: dict) -> dict:
 
 def ensure_config_dir():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_temp_dir() -> Path:
+    directory = CONFIG_DIR / "temp"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory
 
 
 def write_json_file(path: Path, data):
@@ -94,13 +132,12 @@ def write_json_file(path: Path, data):
 def load_config() -> dict:
     ensure_config_dir()
     if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                saved = json.load(f)
-            config = {**DEFAULT_CONFIG, **saved}
-            return _normalize_config(config)
-        except (json.JSONDecodeError, IOError):
-            pass
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        if not isinstance(saved, dict):
+            raise ValueError(f"Configuration must be a JSON object: {CONFIG_FILE}")
+        config = {**DEFAULT_CONFIG, **saved}
+        return _normalize_config(config)
     return _normalize_config(DEFAULT_CONFIG)
 
 
@@ -110,13 +147,15 @@ def save_config(config: dict):
 
 def load_custom_dictionary() -> list:
     if CUSTOM_DICT_FILE.exists():
-        try:
-            with open(CUSTOM_DICT_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
+        with open(CUSTOM_DICT_FILE, encoding="utf-8") as f:
+            words = json.load(f)
+        if not isinstance(words, list) or any(not isinstance(word, str) for word in words):
+            raise ValueError(f"Custom dictionary must be a list of strings: {CUSTOM_DICT_FILE}")
+        return words
     return []
 
 
 def save_custom_dictionary(words: list):
+    if not isinstance(words, list) or any(not isinstance(word, str) for word in words):
+        raise ValueError("Custom dictionary must be a list of strings")
     write_json_file(CUSTOM_DICT_FILE, words)

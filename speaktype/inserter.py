@@ -6,15 +6,22 @@ import threading
 import time
 import AppKit
 import Quartz
+from CoreFoundation import CFEqual, CFRangeMake, CFStringCreateWithSubstring, CFStringGetLength
 from .applescript import run_osascript
 from ApplicationServices import (
     AXUIElementCopyAttributeValue,
     AXUIElementCreateSystemWide,
     AXUIElementCreateApplication,
     AXUIElementSetAttributeValue,
+    AXValueCreate,
+    AXValueRef,
+    AXValueGetType,
+    AXValueGetValue,
+    kAXValueCFRangeType,
     kAXFocusedUIElementAttribute,
     kAXRoleAttribute,
     kAXSelectedTextAttribute,
+    kAXSelectedTextRangeAttribute,
 )
 
 logger = logging.getLogger("speaktype.inserter")
@@ -53,6 +60,8 @@ PASTE_FIRST_APP_MARKERS = (
 _clipboard_restore_lock = threading.Lock()
 _clipboard_restore_token = 0
 _clipboard_restore_data = None
+_clipboard_restore_text = None
+_clipboard_restore_change_count = None
 _last_insert_diagnostic = None
 _manual_accessibility_enabled_pids = set()
 
@@ -91,6 +100,91 @@ class FocusedTextSnapshot:
     role: str = ""
     value: str | None = None
     selected_text: str | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedInsertionSnapshot:
+    element: object
+    value: str
+    selected_range: tuple[int, int]
+    inserted_text: str
+
+
+def _selected_utf16_range(element) -> tuple[int, int] | None:
+    value = _copy_ax_attribute(element, kAXSelectedTextRangeAttribute)
+    if not isinstance(value, AXValueRef) or AXValueGetType(value) != kAXValueCFRangeType:
+        return None
+    valid, selected_range = AXValueGetValue(value, kAXValueCFRangeType, None)
+    if not valid:
+        return None
+    location, length = selected_range
+    if location < 0 or length < 0:
+        return None
+    return int(location), int(length)
+
+
+def _text_before_caret_matches(value: str, selected_range: tuple[int, int], text: str) -> bool:
+    location, length = selected_range
+    text_length = CFStringGetLength(text)
+    if length != 0 or not text_length or location < text_length or location > CFStringGetLength(value):
+        return False
+    return CFStringCreateWithSubstring(None, value, CFRangeMake(location - text_length, text_length)) == text
+
+
+def capture_verified_insertion(text: str) -> VerifiedInsertionSnapshot | None:
+    diagnostic = get_last_insert_diagnostic()
+    if not text or diagnostic is None or not diagnostic.success or not diagnostic.verified:
+        return None
+    element = _get_focused_element()
+    if element is None:
+        return None
+    value = _copy_ax_attribute(element, "AXValue")
+    selected_range = _selected_utf16_range(element)
+    if not isinstance(value, str) or selected_range is None:
+        return None
+    if not _text_before_caret_matches(value, selected_range, text):
+        return None
+    return VerifiedInsertionSnapshot(element, value, selected_range, text)
+
+
+def _snapshot_is_current(snapshot: VerifiedInsertionSnapshot, selected_range=None) -> bool:
+    element = _get_focused_element()
+    if element is None or not CFEqual(element, snapshot.element):
+        return False
+    return (
+        _copy_ax_attribute(element, "AXValue") == snapshot.value
+        and _selected_utf16_range(element) == (selected_range or snapshot.selected_range)
+    )
+
+
+def undo_verified_insertion(snapshot: VerifiedInsertionSnapshot | None) -> bool:
+    if snapshot is None or not _snapshot_is_current(snapshot):
+        return False
+    if not _text_before_caret_matches(snapshot.value, snapshot.selected_range, snapshot.inserted_text):
+        return False
+    location = snapshot.selected_range[0]
+    text_length = CFStringGetLength(snapshot.inserted_text)
+    start = location - text_length
+    deletion_range = (start, text_length)
+    prefix = CFStringCreateWithSubstring(None, snapshot.value, CFRangeMake(0, start))
+    suffix_length = CFStringGetLength(snapshot.value) - location
+    suffix = CFStringCreateWithSubstring(None, snapshot.value, CFRangeMake(location, suffix_length))
+    expected = prefix + suffix
+
+    # 通过 AX 选中确切的听写范围，随后再次检查焦点、正文和选区。
+    selected = AXValueCreate(kAXValueCFRangeType, CFRangeMake(*deletion_range))
+    if _set_ax_attribute(snapshot.element, kAXSelectedTextRangeAttribute, selected) != 0:
+        return False
+    if not _snapshot_is_current(snapshot, deletion_range):
+        return False
+    if _set_ax_attribute(snapshot.element, kAXSelectedTextAttribute, "") != 0:
+        return False
+    for attempt in range(PASTE_VERIFY_ATTEMPTS):
+        if _copy_ax_attribute(snapshot.element, "AXValue") == expected:
+            return True
+        if attempt < PASTE_VERIFY_ATTEMPTS - 1:
+            time.sleep(PASTE_VERIFY_INTERVAL)
+    return False
 
 
 def reset_last_insert_diagnostic():
@@ -556,9 +650,15 @@ def _get_pasteboard():
 
 
 def _snapshot_restore_data(pb):
+    global _clipboard_restore_data, _clipboard_restore_token
     with _clipboard_restore_lock:
         if _clipboard_restore_data is not None:
-            return dict(_clipboard_restore_data)
+            if _pasteboard_still_has_temporary_text(
+                pb, _clipboard_restore_text, _clipboard_restore_change_count
+            ):
+                return dict(_clipboard_restore_data)
+            _clipboard_restore_token += 1
+            _clipboard_restore_data = None
     return _snapshot_pasteboard(pb)
 
 
@@ -621,11 +721,14 @@ def _cancel_pending_pasteboard_restore(fallback_old_data):
 
 def _schedule_pasteboard_restore(old_data, temporary_text: str, expected_change_count=None, delay: float = CLIPBOARD_RESTORE_DELAY):
     global _clipboard_restore_data, _clipboard_restore_token
+    global _clipboard_restore_text, _clipboard_restore_change_count
     with _clipboard_restore_lock:
         _clipboard_restore_token += 1
         token = _clipboard_restore_token
         if _clipboard_restore_data is None:
             _clipboard_restore_data = old_data
+        _clipboard_restore_text = temporary_text
+        _clipboard_restore_change_count = expected_change_count
         restore_data = dict(_clipboard_restore_data)
 
     thread = threading.Thread(
