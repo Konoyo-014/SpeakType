@@ -53,6 +53,7 @@ LABELS = {
         "characters": "{count} 个字符", "manage": "管理词库", "output": "文本输出",
         "view": "查看",
         "ready_summary": "听写已就绪", "needs_summary": "需要准备", "setup_entry": "权限与模型",
+        "microphone_needs_check": "麦克风需要检查",
         "empty_title": "把想法说出来。", "empty_detail": "点击开始听写，或在其他应用中使用全局快捷键。",
         "listening_empty": "正在聆听…", "history_nav": "历史记录",
         "more": "更多", "navigation": "听写导航",
@@ -94,6 +95,7 @@ LABELS = {
         "characters": "{count} characters", "manage": "Manage vocabulary", "output": "Text output",
         "view": "View",
         "ready_summary": "Ready to dictate", "needs_summary": "Setup needed", "setup_entry": "Permissions & models",
+        "microphone_needs_check": "Check microphone",
         "empty_title": "Make room for a thought.", "empty_detail": "Start dictation, or use your global shortcut in another app.",
         "listening_empty": "Listening…", "history_nav": "History",
         "more": "More", "navigation": "Dictation navigation",
@@ -795,8 +797,12 @@ class MainWindowController:
             if key == "llm":
                 self._llm_ready = status == "ready"
         tooltip = "\n".join(f"{item['title']} · {item['status_label']}\n{item['detail']}" for item in self._readiness_details)
-        summary = self.labels["ready_summary" if self._snapshot.get("ready") else "needs_summary"]
+        microphone_error = any(item["key"] == "microphone" and item["status"] == "error"
+                               for item in self._readiness_details)
+        summary = (self.labels["microphone_needs_check"] if microphone_error else
+                   self.labels["ready_summary" if self._snapshot.get("ready") else "needs_summary"])
         self._readiness_summary.setStringValue_(summary)
+        self._readiness_summary.setTextColor_(AppKit.NSColor.systemOrangeColor() if microphone_error else color("muted"))
         self._readiness_summary.setToolTip_(tooltip)
         self._readiness_summary.setAccessibilityLabel_(summary + "\n" + tooltip)
         self._setup_button.setToolTip_(tooltip)

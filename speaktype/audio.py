@@ -184,8 +184,13 @@ class AudioRecorder:
                 if session is self._capture_session:
                     self._last_start_error = error
                     self._last_capture_error = error
+                    self._last_stop_reason = "device_start_failed"
+                    self._last_stop_message = str(error)
                     self.is_recording = False
                     self._capture_session = None
+                    self._max_recording_seconds = None
+                    self._on_max_duration_reached = None
+                    self._start_monotonic = 0.0
             self._cleanup_capture(session, terminate=True)
             logger.error("Microphone device failed to start: %s", error)
             return False

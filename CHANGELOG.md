@@ -13,7 +13,7 @@
 - Manage existing dictionary words in the vocabulary editor, retain deletion exclusions through learning, and approve learned misspellings individually.
 - Commit vocabulary and correction changes to memory after successful file writes; keep memory and saved data consistent when writes fail.
 - Share saved correction rules and their execution order between dictation and text tests.
-- Keep the window responsive during microphone startup, support cancellation and immediate retry, and report device startup timeouts.
+- Keep the window responsive during microphone startup, support cancellation and immediate retry, and retain device errors in readiness details without disabling retry.
 
 ## [3.0.0] - 2026-11-01
 

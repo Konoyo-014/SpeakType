@@ -127,7 +127,13 @@ def open_device(label):
     before_workers = set(startup_workers())
     requested = time.monotonic()
     returned = native_action(controller._record_button, label + " start")
-    wait_until(lambda: application.recorder._capture_session is not None or controller._snapshot["phase"] == "error",
+
+    def session_or_current_error():
+        with application._operation_lock:
+            return (application.recorder._capture_session is not None
+                    or application._operation_id > previous_operation and application._main_state["phase"] == "error")
+
+    wait_until(session_or_current_error,
                3, label + " did not create a microphone session")
     session = application.recorder._capture_session
     assert session is not None, str(controller._snapshot.get("status"))
@@ -190,6 +196,9 @@ def cancel_device(session, item):
     assert application._starting_operation_id is None
     assert controller._snapshot["phase"] == "cancelled" and not controller._snapshot["busy"]
     assert controller._record_button.isEnabled()
+    assert next(row for row in controller._readiness_details if row["key"] == "microphone")["status"] != "error"
+    assert controller._readiness_summary.stringValue() == controller.labels["ready_summary"]
+    item["summary_after_cancel"] = str(controller._readiness_summary.stringValue())
 
 
 def session_finished(session, item):
@@ -273,14 +282,44 @@ def execute():
         assert not application.recorder.is_recording and application.recorder._capture_session is None
         assert not controller._snapshot["busy"] and controller._record_button.isEnabled()
         assert controller._status_label.stringValue() == message and not controller._status_label.isHidden()
+        microphone_row = next(row for row in controller._readiness_details if row["key"] == "microphone")
+        assert microphone_row["status"] == "error", microphone_row
+        assert str(error) in microphone_row["detail"] or message in microphone_row["detail"], microphone_row
+        assert controller._snapshot["ready"] and controller._record_button.isEnabled()
+        assert controller._readiness_summary.stringValue() == controller.labels["microphone_needs_check"]
+        assert str(error) in controller._readiness_summary.toolTip() or message in controller._readiness_summary.toolTip()
+        application._refresh_main_readiness()
+        wait_until(lambda: application._readiness_thread is None or not application._readiness_thread.is_alive(),
+                   20, "Background readiness refresh did not finish after the actual device timeout")
+        advance()
+        application._refresh_main_window_main()
+        refreshed_row = next(row for row in controller._readiness_details if row["key"] == "microphone")
+        assert refreshed_row["status"] == "error", refreshed_row
+        assert controller._readiness_summary.stringValue() == controller.labels["microphone_needs_check"]
+        assert controller._snapshot["ready"] and controller._record_button.isEnabled()
+        source_permission_row = next(row for row in application._main_state["readiness"] if row["key"] == "microphone")
+        assert source_permission_row["status"] == "ready", source_permission_row
         report["normal_start"] = {**public_item(probe_item), "outcome": "normal_start_timeout",
                                   "normal_start_timeout_observed": True, "elapsed_seconds": elapsed,
                                   "error": message, "raw_error": str(error), "error_type": type(error).__name__,
                                   "phase": controller._snapshot["phase"],
+                                  "after_background_refresh": {"summary": str(controller._readiness_summary.stringValue()),
+                                                               "microphone": refreshed_row,
+                                                               "source_permission_status": source_permission_row["status"],
+                                                               "retry_enabled": bool(controller._record_button.isEnabled()),
+                                                               "ready": bool(controller._snapshot["ready"])},
                                   "response_after_error": probe_responsiveness("after microphone timeout")}
         report["checks"].append("The blocked real device reaches its normal eight-second start timeout, displays the specific device error and leaves the window usable; this is an error-handling check, not recording success")
     wait_until(lambda: session_finished(probe, probe_item), 7, "The normal-start helper or worker did not finish")
     report["normal_start"]["child_return_code"] = probe.process.poll()
+    if report["normal_start"]["normal_start_timeout_observed"]:
+        retry, retry_item = open_device("retry after device error")
+        retry_item["responsiveness"] = probe_responsiveness("retry after device error")
+        cancel_device(retry, retry_item)
+        wait_until(lambda: session_finished(retry, retry_item), 7, "The retry helper or start worker did not finish")
+        retry_item["child_return_code"] = retry.process.poll()
+        report["retry_after_device_error"] = public_item(retry_item)
+        report["checks"].append("The real device timeout appears as a microphone error in the visible summary and details across an actual background permission refresh; ready and retry stay enabled, and cancelling the subsequent real retry restores the normal summary")
     marker = "取消和设备错误之后，窗口仍可编辑：🙂 café。"
     controller.window.makeFirstResponder_(controller._final_view)
     controller._final_view.insertText_replacementRange_(marker, controller._final_view.selectedRange())

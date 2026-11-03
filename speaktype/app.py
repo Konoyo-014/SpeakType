@@ -652,6 +652,17 @@ class SpeakTypeApp(rumps.App):
             return
         with self._main_state_lock:
             snapshot = dict(self._main_state)
+        device_error = self.recorder.last_error
+        if device_error is not None and self.recorder.last_stop_reason in {
+            "device_start_failed", "device_error", "device_stop_failed",
+        }:
+            snapshot["readiness"] = [
+                {**item, "status": "error",
+                 "detail": self._desktop_text(f"录音设备错误：{device_error}",
+                                               f"Recording device error: {device_error}")}
+                if item.get("key") == "microphone" else dict(item)
+                for item in snapshot.get("readiness", [])
+            ]
         snapshot.update(recent=self.history.get_recent(8), hotkey=self._hotkey_display(),
                         target_name=self._last_external_app.get("name", ""),
                         target_pid=self._last_external_app.get("pid"),
