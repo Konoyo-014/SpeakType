@@ -46,7 +46,7 @@ def test_hotword_context_filters_and_prioritizes_by_app(tmp_path):
     )
 
     assert context.terms == ["PyObjC"]
-    assert context.context == "PyObjC"
+    assert context.context == "Vocabulary: PyObjC."
 
 
 def test_learn_from_payload_persists_hotwords(tmp_path):
@@ -65,7 +65,7 @@ def test_learn_from_payload_persists_hotwords(tmp_path):
     learned = store.learn_from_payload(payload, scene="code", raw_text="em el ex audio", edited_text="mlx-audio")
 
     assert [entry["term"] for entry in learned] == ["mlx-audio"]
-    assert store.active_context(scene="code").context == "mlx-audio"
+    assert store.active_context(scene="code").context == "Vocabulary: mlx-audio."
 
 
 def test_learn_from_payload_rejects_term_absent_from_user_edit(tmp_path):

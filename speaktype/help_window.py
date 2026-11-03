@@ -1,5 +1,6 @@
 import AppKit
 from Foundation import NSMakeRect, NSMakeSize
+from .design import apply_window, color
 
 
 class HelpWindowController:
@@ -16,6 +17,7 @@ class HelpWindowController:
                 AppKit.NSBackingStoreBuffered, False)
             self.window.setReleasedWhenClosed_(False)
             self.window.setTitle_("SpeakType 使用说明" if self.language == "zh" else "Using SpeakType")
+            apply_window(self.window)
             self.window.center()
             scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(24, 24, 652, 542))
             scroll.setHasVerticalScroller_(True)
@@ -24,6 +26,8 @@ class HelpWindowController:
             text.setEditable_(False)
             text.setSelectable_(True)
             text.setFont_(AppKit.NSFont.systemFontOfSize_(14))
+            text.setTextColor_(color("text"))
+            text.setBackgroundColor_(color("surface"))
             text.setTextContainerInset_(NSMakeSize(12, 14))
             text.setHorizontallyResizable_(False)
             text.setVerticallyResizable_(True)
@@ -45,6 +49,12 @@ class HelpWindowController:
                     "撤销刚才的听写\n\n"
                     "说“撤销刚才”可以删除已验证的上一段听写。输入框、正文和光标必须保持插入后的状态。"
                     "移动光标或切换文档后，应用会保留当前文字。\n\n"
+                    "让专名保持正确写法\n\n"
+                    "打开“热词词典”，添加正确写法，并把常见误识别写法分别填写在独立行。"
+                    "可以限制词条只用于某个应用，启用或停用词条，并用示例文本检查替换结果。"
+                    "主窗口显示本次使用的热词提示和实际纠错；选中最终文本中的术语，可以直接保存词条。"
+                    "词汇提示帮助识别专名，明确的错误写法会在识别后进行替换。"
+                    "词条、错误写法和学习结果保存在本机。自动学习与历史保存分别由偏好设置控制。\n\n"
                     "历史与设置\n\n"
                     "最近记录位于主窗口，完整历史可以搜索、复制和导出。"
                     "偏好设置可以更改快捷键、录音模式、麦克风、语言和功能开关。"
@@ -62,6 +72,11 @@ class HelpWindowController:
                     "If insertion fails, text remains available in the main window and enabled history. Copy it or choose another target.\n\n"
                     "Undo a dictation\n\nSay undo that or scratch that to remove the last verified insertion while its field, text, and caret remain unchanged. "
                     "Moving the caret or switching documents preserves the current text.\n\n"
+                    "Keep names spelled correctly\n\nOpen Vocabulary to add a preferred spelling and one common misspelling per line. "
+                    "Limit an entry to an app, enable or pause it, and check replacement behavior with your own text. "
+                    "The main window shows vocabulary hints and applied corrections. Select a term in the final text to save it. "
+                    "Hints help recognition; explicit misspellings are replaced after recognition. "
+                    "Entries and learning results stay on this Mac. Automatic learning and history have separate switches in Preferences.\n\n"
                     "History and settings\n\nRecent dictations appear in the main window. Full history supports search, copy, and export. "
                     "Preferences controls the shortcut, recording mode, microphone, languages, and optional features."
                 )

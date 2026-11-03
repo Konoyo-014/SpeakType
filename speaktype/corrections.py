@@ -1,24 +1,3 @@
-"""User-defined ASR correction store.
-
-A small JSON-backed dictionary mapping a frequently-misheard ASR phrase
-to the user's preferred replacement. The first iteration is intentionally
-*manual* — users add corrections through the Dictionary & Snippets editor.
-A future iteration will infer corrections by watching the user edit text
-right after dictation, but the runtime hook for that lives in app.py and
-already calls into this module for the actual lookup/replace logic.
-
-Format on disk (``~/.speaktype/corrections.json``)::
-
-    [
-        {"wrong": "PI thon", "right": "Python"},
-        {"wrong": "我 sql", "right": "MySQL"}
-    ]
-
-Lookup is case-insensitive and applied to whole-word matches so editing a
-correction for "PI thon" never accidentally rewrites the substring inside
-"PI thoner" or similar.
-"""
-
 from __future__ import annotations
 
 import json
@@ -42,7 +21,8 @@ class CorrectionStore:
         self._path = path or CORRECTIONS_FILE
         self._entries: list[dict] = []
         self._lock = threading.Lock()
-        self._compiled: list[tuple[re.Pattern, str]] = []
+        self._compiled: re.Pattern | None = None
+        self._replacements: dict[str, str] = {}
         self._load()
 
     # ------------------------------------------------------------------ #
@@ -65,8 +45,10 @@ class CorrectionStore:
         self._entries = [{"wrong": e["wrong"], "right": e["right"]} for e in data if e["wrong"]]
         self._rebuild_compiled()
 
-    def _save(self):
-        write_json_file(self._path, self._entries)
+    def _commit_entries(self, entries):
+        write_json_file(self._path, entries)
+        self._entries = entries
+        self._rebuild_compiled()
 
     # ------------------------------------------------------------------ #
     # Mutations                                                          #
@@ -78,32 +60,26 @@ class CorrectionStore:
         if not wrong:
             return
         with self._lock:
-            # Update if the same wrong already exists
-            for entry in self._entries:
+            entries = [dict(entry) for entry in self._entries]
+            for entry in entries:
                 if entry.get("wrong", "").lower() == wrong.lower():
                     entry["right"] = right
                     break
             else:
-                self._entries.append({"wrong": wrong, "right": right})
-            self._rebuild_compiled()
-            self._save()
+                entries.append({"wrong": wrong, "right": right})
+            self._commit_entries(entries)
 
     def remove(self, wrong: str):
         wrong = (wrong or "").strip().lower()
         with self._lock:
-            before = len(self._entries)
-            self._entries = [
+            entries = [
                 e for e in self._entries if e.get("wrong", "").lower() != wrong
             ]
-            if len(self._entries) != before:
-                self._rebuild_compiled()
-            self._save()
+            self._commit_entries(entries)
 
     def clear(self):
         with self._lock:
-            self._entries = []
-            self._compiled = []
-            self._save()
+            self._commit_entries([])
 
     def replace_all(self, entries: Iterable[dict]):
         """Wholesale replacement, used when saving the dict editor."""
@@ -115,9 +91,7 @@ class CorrectionStore:
                 continue
             cleaned.append({"wrong": wrong, "right": right})
         with self._lock:
-            self._entries = cleaned
-            self._rebuild_compiled()
-            self._save()
+            self._commit_entries(cleaned)
 
     # ------------------------------------------------------------------ #
     # Lookup                                                              #
@@ -131,31 +105,43 @@ class CorrectionStore:
         return len(self._entries)
 
     def apply(self, text: str) -> str:
-        """Return ``text`` with every known correction applied."""
+        return self.apply_with_changes(text)[0]
+
+    def apply_with_changes(self, text: str) -> tuple[str, list[dict]]:
         if not text:
-            return text
+            return text, []
         with self._lock:
-            compiled = list(self._compiled)
-        result = text
-        for pattern, replacement in compiled:
-            result = pattern.sub(lambda match: replacement, result)
-        return result
+            compiled = self._compiled
+            replacements = dict(self._replacements)
+        if compiled is None:
+            return text, []
+        changes = []
+
+        def replace(match):
+            original = match.group(0)
+            replacement = replacements[match.lastgroup]
+            if original != replacement:
+                changes.append({"original": original, "replacement": replacement})
+            return replacement
+
+        return compiled.sub(replace, text), changes
 
     def _rebuild_compiled(self):
-        compiled: list[tuple[re.Pattern, str]] = []
+        expressions: list[str] = []
+        replacements: dict[str, str] = {}
+        seen = set()
         for entry in sorted(self._entries, key=lambda item: len(item.get("wrong", "")), reverse=True):
             wrong = entry.get("wrong", "")
             right = entry.get("right", "")
-            if not wrong:
+            if not wrong or wrong.casefold() in seen:
                 continue
-            try:
-                # Whole-word, case-insensitive match. Wrap in lookarounds
-                # so we don't eat punctuation around the match.
-                pattern = re.compile(
-                    r"(?<![\w])" + re.escape(wrong) + r"(?![\w])",
-                    re.IGNORECASE,
-                )
-                compiled.append((pattern, right))
-            except re.error as e:
-                logger.debug(f"Failed to compile correction {wrong!r}: {e}")
-        self._compiled = compiled
+            seen.add(wrong.casefold())
+            pattern = re.escape(wrong)
+            if re.search(r"[A-Za-z0-9]", wrong):
+                pattern = (r"(?<![A-Za-z0-9_])" + pattern + r"(?![A-Za-z0-9_])"
+                           r"(?!['’](?:t|re|ve|ll|d|m)(?![A-Za-z0-9_]))")
+            group = f"c{len(expressions)}"
+            expressions.append(f"(?P<{group}>{pattern})")
+            replacements[group] = right
+        self._compiled = re.compile("|".join(expressions), re.IGNORECASE) if expressions else None
+        self._replacements = replacements

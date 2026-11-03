@@ -120,7 +120,7 @@ if "--capture-stop" in sys.argv:
     recording._recording_operation_id = operation_id
     recording._recording_start_time = time.time()
     recording._recording_preview_only = True
-    assert recording.recorder.start(), recording.recorder.last_start_error
+    assert recording.recorder.start(cancel_event=recording._operation_cancel), recording.recorder.last_start_error
     recording._update_operation_state(operation_id, phase="recording", busy=True)
     time.sleep(0.35)
     with ThreadPoolExecutor(max_workers=1) as executor:

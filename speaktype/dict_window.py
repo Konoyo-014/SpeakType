@@ -5,6 +5,7 @@ import AppKit
 import objc
 from Foundation import NSObject, NSMakeRect, NSMakeSize
 from .config import load_custom_dictionary, save_custom_dictionary
+from .design import apply_window, style_button
 from .corrections import CorrectionStore
 from .snippets import SnippetLibrary
 from .i18n import t
@@ -128,9 +129,10 @@ class DictWindowController:
     CONTENT_X = 192
     CONTENT_WIDTH = 500
 
-    def __init__(self, snippets: SnippetLibrary, corrections: CorrectionStore | None = None):
+    def __init__(self, snippets: SnippetLibrary, corrections: CorrectionStore | None = None, *, on_save=None):
         self.snippets = snippets
         self.corrections = corrections if corrections is not None else CorrectionStore()
+        self._on_save = on_save
         self.window = None
         self._delegate = None
         self._word_list_view = None
@@ -174,6 +176,7 @@ class DictWindowController:
         )
         self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(t("dict_title"))
+        apply_window(self.window)
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -224,6 +227,7 @@ class DictWindowController:
         save_btn.setKeyEquivalent_("\r")
         save_btn.setTarget_(self._delegate)
         save_btn.setAction_(b"onSave:")
+        style_button(save_btn, primary=True)
         save_btn.setAutoresizingMask_(AppKit.NSViewMinXMargin | AppKit.NSViewMaxYMargin)
         root.addSubview_(save_btn)
 
@@ -233,6 +237,7 @@ class DictWindowController:
         close_btn.setKeyEquivalent_("\x1b")
         close_btn.setTarget_(self._delegate)
         close_btn.setAction_(b"onClose:")
+        style_button(close_btn)
         close_btn.setAutoresizingMask_(AppKit.NSViewMinXMargin | AppKit.NSViewMaxYMargin)
         root.addSubview_(close_btn)
         self._show_section("words")
@@ -393,6 +398,7 @@ class DictWindowController:
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)
         button.setTarget_(self._delegate)
         button.setAction_(action)
+        style_button(button)
         view.addSubview_(button)
         return button
 
@@ -604,6 +610,8 @@ class DictWindowController:
         self.snippets._save()
         # Update correction store
         self.corrections.replace_all(self._correction_data)
+        if self._on_save is not None:
+            self._on_save()
         self._set_status(
             t(
                 "dict_status_saved",

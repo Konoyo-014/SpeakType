@@ -31,13 +31,8 @@ import unicodedata
 
 import AppKit
 import objc
+import Quartz
 from Foundation import NSMakeRect, NSMakePoint, NSMakeSize, NSObject, NSTimer
-
-try:
-    import Quartz
-    _QUARTZ_OK = True
-except Exception:  # pragma: no cover — Quartz ships with macOS
-    _QUARTZ_OK = False
 
 logger = logging.getLogger("speaktype.status_overlay")
 
@@ -258,13 +253,6 @@ class _WaveformView(AppKit.NSView):
 
 
 class _SpinnerView(AppKit.NSView):
-    """A rotating 3/4 arc implemented with CAShapeLayer.
-
-    Falls back to a static drawn arc when Quartz is unavailable — which
-    shouldn't happen on real macOS, but keeps the code importable in
-    test environments that stub PyObjC.
-    """
-
     def initWithFrame_(self, frame):
         self = objc.super(_SpinnerView, self).initWithFrame_(frame)
         if self is None:
@@ -272,89 +260,47 @@ class _SpinnerView(AppKit.NSView):
         self._tint = AppKit.NSColor.systemOrangeColor()
         self._arc_layer = None
         self.setWantsLayer_(True)
-        if _QUARTZ_OK:
-            self._build_layer(frame)
+        self._build_layer(frame)
         return self
 
     def _build_layer(self, frame):
-        try:
-            size = frame.size.width
-            radius = size / 2.0 - 2.5
-            arc = Quartz.CAShapeLayer.layer()
-            arc.setBounds_(NSMakeRect(0, 0, size, size))
-            arc.setPosition_(NSMakePoint(size / 2.0, size / 2.0))
-            arc.setAnchorPoint_(NSMakePoint(0.5, 0.5))
-
-            # Path in local coordinates, centered at (size/2, size/2).
-            path = Quartz.CGPathCreateMutable()
-            Quartz.CGPathAddArc(
-                path, None, size / 2.0, size / 2.0, radius,
-                -math.pi / 2, math.pi, False,
-            )
-            arc.setPath_(path)
-            arc.setFillColor_(AppKit.NSColor.clearColor().CGColor())
-            cg = _safe_cgcolor(self._tint)
-            if cg is not None:
-                arc.setStrokeColor_(cg)
-            arc.setLineWidth_(2.2)
-            arc.setLineCap_("round")
-
-            host = self.layer()
-            if host is not None:
-                host.addSublayer_(arc)
-                self._arc_layer = arc
-        except Exception as e:
-            logger.debug(f"Spinner layer init failed: {e}")
-            self._arc_layer = None
+        size = frame.size.width
+        radius = size / 2.0 - 2.5
+        arc = Quartz.CAShapeLayer.layer()
+        arc.setBounds_(NSMakeRect(0, 0, size, size))
+        arc.setPosition_(NSMakePoint(size / 2.0, size / 2.0))
+        arc.setAnchorPoint_(NSMakePoint(0.5, 0.5))
+        path = Quartz.CGPathCreateMutable()
+        Quartz.CGPathAddArc(
+            path, None, size / 2.0, size / 2.0, radius,
+            -math.pi / 2, math.pi, False,
+        )
+        arc.setPath_(path)
+        arc.setFillColor_(AppKit.NSColor.clearColor().CGColor())
+        arc.setStrokeColor_(self._tint.CGColor())
+        arc.setLineWidth_(2.2)
+        arc.setLineCap_("round")
+        self.layer().addSublayer_(arc)
+        self._arc_layer = arc
 
     def set_tint(self, color):
         if color is None:
             return
         self._tint = color
-        if self._arc_layer is not None:
-            cg = _safe_cgcolor(color)
-            if cg is not None:
-                self._arc_layer.setStrokeColor_(cg)
-        else:
-            self.setNeedsDisplay_(True)
+        self._arc_layer.setStrokeColor_(color.CGColor())
 
     def start_animating(self):
-        if self._arc_layer is None or not _QUARTZ_OK:
-            return
-        try:
-            rotation = Quartz.CABasicAnimation.animationWithKeyPath_(
-                "transform.rotation.z"
-            )
-            rotation.setFromValue_(0.0)
-            rotation.setToValue_(-2 * math.pi)
-            rotation.setDuration_(1.0)
-            rotation.setRepeatCount_(1e9)
-            self._arc_layer.addAnimation_forKey_(rotation, "rotation")
-        except Exception as e:
-            logger.debug(f"Spinner start_animating failed: {e}")
+        rotation = Quartz.CABasicAnimation.animationWithKeyPath_(
+            "transform.rotation.z"
+        )
+        rotation.setFromValue_(0.0)
+        rotation.setToValue_(-2 * math.pi)
+        rotation.setDuration_(1.0)
+        rotation.setRepeatCount_(1e9)
+        self._arc_layer.addAnimation_forKey_(rotation, "rotation")
 
     def stop_animating(self):
-        if self._arc_layer is not None:
-            try:
-                self._arc_layer.removeAnimationForKey_("rotation")
-            except Exception:
-                pass
-
-    def drawRect_(self, rect):
-        # Fallback when CAShapeLayer is unavailable — draw a static arc.
-        if self._arc_layer is not None:
-            return
-        bounds = self.bounds()
-        cx = bounds.size.width / 2.0
-        cy = bounds.size.height / 2.0
-        radius = min(bounds.size.width, bounds.size.height) / 2.0 - 2.5
-        path = AppKit.NSBezierPath.bezierPath()
-        path.setLineWidth_(2.2)
-        path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
-            NSMakePoint(cx, cy), radius, 90.0, 360.0
-        )
-        self._tint.set()
-        path.stroke()
+        self._arc_layer.removeAnimationForKey_("rotation")
 
 
 class _StateIndicatorView(AppKit.NSView):
@@ -1096,14 +1042,10 @@ class StatusOverlay:
         if animated:
             AppKit.NSAnimationContext.beginGrouping()
             AppKit.NSAnimationContext.currentContext().setDuration_(RESIZE_DURATION)
-            if _QUARTZ_OK:
-                try:
-                    timing = Quartz.CAMediaTimingFunction.functionWithName_(
-                        Quartz.kCAMediaTimingFunctionEaseInEaseOut
-                    )
-                    AppKit.NSAnimationContext.currentContext().setTimingFunction_(timing)
-                except Exception:
-                    pass
+            timing = Quartz.CAMediaTimingFunction.functionWithName_(
+                Quartz.kCAMediaTimingFunctionEaseInEaseOut
+            )
+            AppKit.NSAnimationContext.currentContext().setTimingFunction_(timing)
             self._window.animator().setFrame_display_(new_frame, True)
             AppKit.NSAnimationContext.endGrouping()
         else:

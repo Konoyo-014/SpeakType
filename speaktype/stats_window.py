@@ -11,6 +11,7 @@ import objc
 from Foundation import NSObject, NSMakePoint, NSMakeRect, NSMakeSize
 
 from .i18n import get_language, t
+from .design import apply_window, style_button
 
 logger = logging.getLogger("speaktype.stats_window")
 
@@ -141,6 +142,7 @@ class StatsWindowController:
         )
         self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(t("stats_title"))
+        apply_window(self.window)
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -326,6 +328,7 @@ class StatsWindowController:
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)
         button.setTarget_(self._delegate)
         button.setAction_(action)
+        style_button(button)
         view.addSubview_(button)
 
     def _count_by_day(self, entries, days):

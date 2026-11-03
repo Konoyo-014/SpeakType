@@ -5,7 +5,8 @@ import objc
 from Foundation import NSIndexSet, NSObject, NSMakeRect, NSMakeSize
 
 from .history import DictationHistory, INSERTION_OUTCOMES
-from .i18n import t
+from .i18n import get_language, t
+from .design import apply_window, color, material_view, style_button
 
 
 def history_outcome_text(outcome: str) -> str:
@@ -66,13 +67,20 @@ class _HistoryDelegate(NSObject):
     def onClose_(self, sender):
         self._controller.close()
 
+    def onOpen_(self, sender):
+        self._controller.open_selected()
+
+    def onVocabulary_(self, sender):
+        self._controller.show_vocabulary_details()
+
 
 class HistoryWindowController:
     WIDTH = 900
-    HEIGHT = 700
+    HEIGHT = 640
 
-    def __init__(self, history: DictationHistory):
+    def __init__(self, history: DictationHistory, *, on_open=None):
         self.history = history
+        self._on_open = on_open
         self.window = None
         self._delegate = None
         self._entries = []
@@ -111,38 +119,36 @@ class HistoryWindowController:
         self.window.setMinSize_(NSMakeSize(self.WIDTH, self.HEIGHT))
         self.window.setReleasedWhenClosed_(False)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
+        apply_window(self.window)
         self.window.center()
         self._delegate = _HistoryDelegate.alloc().initWithController_(self)
         content = self.window.contentView()
         top_mask = AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
 
-        title = self._label(content, t("history_heading"), 22, 656, 856, 28, bold=True)
-        title.setFont_(AppKit.NSFont.boldSystemFontOfSize_(19))
-        title.setAutoresizingMask_(top_mask)
-        subtitle = self._label(content, t("history_subtitle"), 22, 631, 856, 20)
-        subtitle.setTextColor_(AppKit.NSColor.secondaryLabelColor())
-        subtitle.setAutoresizingMask_(top_mask)
-
-        self._search = AppKit.NSSearchField.alloc().initWithFrame_(NSMakeRect(22, 590, 724, 28))
+        toolbar = material_view(NSMakeRect(0, 582, 900, 58), "content")
+        toolbar.setAutoresizingMask_(top_mask)
+        content.addSubview_(toolbar)
+        self._search = AppKit.NSSearchField.alloc().initWithFrame_(NSMakeRect(20, 596, 722, 28))
         self._search.setPlaceholderString_(t("history_search_placeholder"))
         self._search.setDelegate_(self._delegate)
         self._search.setAutoresizingMask_(top_mask)
         self._search.cell().setSendsSearchStringImmediately_(True)
         content.addSubview_(self._search)
-        refresh = self._button(content, t("history_refresh"), b"onRefresh:", 760, 587, 118)
+        refresh = self._button(content, t("history_refresh"), b"onRefresh:", 758, 593, 122)
         refresh.setAutoresizingMask_(AppKit.NSViewMinXMargin | AppKit.NSViewMinYMargin)
 
-        scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(22, 356, 856, 222))
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 330, 900, 252))
         scroll.setHasVerticalScroller_(True)
         scroll.setHasHorizontalScroller_(False)
-        scroll.setBorderType_(AppKit.NSBezelBorder)
+        scroll.setBorderType_(AppKit.NSNoBorder)
         scroll.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
         content.addSubview_(scroll)
         self._table = AppKit.NSTableView.alloc().initWithFrame_(scroll.bounds())
         self._table.setUsesAlternatingRowBackgroundColors_(True)
         self._table.setAllowsMultipleSelection_(False)
         self._table.setAllowsEmptySelection_(True)
-        self._table.setRowHeight_(28)
+        self._table.setRowHeight_(30)
+        self._table.setStyle_(AppKit.NSTableViewStyleFullWidth)
         self._table.setColumnAutoresizingStyle_(AppKit.NSTableViewLastColumnOnlyAutoresizingStyle)
         for identifier, label, width in (
             ("time_label", "history_column_time", 164),
@@ -161,23 +167,40 @@ class HistoryWindowController:
         self._table.setDelegate_(self._delegate)
         scroll.setDocumentView_(self._table)
 
-        self._summary = self._label(content, "", 22, 331, 856, 20)
+        self._summary = self._label(content, "", 20, 301, 650, 20)
         self._summary.setTextColor_(AppKit.NSColor.secondaryLabelColor())
         self._summary.setAutoresizingMask_(AppKit.NSViewWidthSizable)
-        self._label(content, t("history_final_text"), 22, 306, 700, 22, bold=True)
-        self._copy_final_button = self._button(content, t("history_copy_final"), b"onCopyFinal:", 740, 299, 138)
+        self._vocabulary_button = self._button(content, "热词详情" if get_language() == "zh" else "Vocabulary details",
+                                               b"onVocabulary:", 700, 295, 180)
+        self._vocabulary_button.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        comparison = AppKit.NSSplitView.alloc().initWithFrame_(NSMakeRect(20, 64, 860, 228))
+        comparison.setVertical_(True)
+        comparison.setDividerStyle_(AppKit.NSSplitViewDividerStyleThin)
+        comparison.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        content.addSubview_(comparison)
+        final_panel = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 228))
+        raw_panel = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(421, 0, 439, 228))
+        comparison.addArrangedSubview_(final_panel)
+        comparison.addArrangedSubview_(raw_panel)
+        self._label(final_panel, t("history_final_text"), 0, 202, 240, 22, bold=True)
+        self._copy_final_button = self._button(final_panel, t("history_copy_final"), b"onCopyFinal:", 272, 196, 138)
         self._copy_final_button.setAutoresizingMask_(AppKit.NSViewMinXMargin)
-        self._final_view = self._text_view(content, 22, 180, 856, 118)
-        self._label(content, t("history_raw_text"), 22, 155, 700, 22, bold=True)
-        self._copy_raw_button = self._button(content, t("history_copy_raw"), b"onCopyRaw:", 740, 148, 138)
+        self._final_view = self._text_view(final_panel, 0, 0, 410, 194)
+        self._label(raw_panel, t("history_raw_text"), 10, 202, 240, 22, bold=True)
+        self._copy_raw_button = self._button(raw_panel, t("history_copy_raw"), b"onCopyRaw:", 301, 196, 138)
         self._copy_raw_button.setAutoresizingMask_(AppKit.NSViewMinXMargin)
-        self._raw_view = self._text_view(content, 22, 66, 856, 82)
-        self._feedback = self._label(content, "", 22, 25, 560, 22)
+        self._raw_view = self._text_view(raw_panel, 10, 0, 429, 194)
+        comparison.adjustSubviews()
+        self._feedback = self._label(content, "", 20, 21, 370, 22)
         self._feedback.setTextColor_(AppKit.NSColor.secondaryLabelColor())
         self._feedback.setAutoresizingMask_(AppKit.NSViewWidthSizable)
-        export = self._button(content, t("stats_btn_export"), b"onExport:", 595, 20, 150)
+        self._open_button = self._button(content, "打开并编辑" if get_language() == "zh" else "Open in editor",
+                                         b"onOpen:", 420, 15, 160)
+        style_button(self._open_button, primary=True)
+        self._open_button.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        export = self._button(content, t("stats_btn_export"), b"onExport:", 594, 15, 150)
         export.setAutoresizingMask_(AppKit.NSViewMinXMargin)
-        close = self._button(content, t("stats_btn_close"), b"onClose:", 760, 20, 118)
+        close = self._button(content, t("stats_btn_close"), b"onClose:", 758, 15, 122)
         close.setAutoresizingMask_(AppKit.NSViewMinXMargin)
         close.setKeyEquivalent_("\x1b")
 
@@ -188,7 +211,8 @@ class HistoryWindowController:
         label.setDrawsBackground_(False)
         label.setEditable_(False)
         label.setSelectable_(True)
-        label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(13) if bold else AppKit.NSFont.systemFontOfSize_(12))
+        label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(14) if bold else AppKit.NSFont.systemFontOfSize_(13))
+        label.setTextColor_(color("text"))
         label.cell().setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
         parent.addSubview_(label)
         return label
@@ -199,6 +223,7 @@ class HistoryWindowController:
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)
         button.setTarget_(self._delegate)
         button.setAction_(action)
+        style_button(button)
         parent.addSubview_(button)
         return button
 
@@ -206,14 +231,16 @@ class HistoryWindowController:
         scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(x, y, width, height))
         scroll.setHasVerticalScroller_(True)
         scroll.setHasHorizontalScroller_(False)
-        scroll.setBorderType_(AppKit.NSBezelBorder)
+        scroll.setBorderType_(AppKit.NSNoBorder)
         scroll.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         parent.addSubview_(scroll)
         view = AppKit.NSTextView.alloc().initWithFrame_(scroll.contentView().bounds())
         view.setEditable_(False)
         view.setSelectable_(True)
         view.setRichText_(False)
-        view.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+        view.setFont_(AppKit.NSFont.systemFontOfSize_(15))
+        view.setTextColor_(color("text"))
+        view.setBackgroundColor_(color("surface"))
         view.setTextContainerInset_(NSMakeSize(8, 7))
         view.setVerticallyResizable_(True)
         view.setHorizontallyResizable_(False)
@@ -259,10 +286,51 @@ class HistoryWindowController:
         self._raw_view.setString_(raw_text)
         self._copy_final_button.setEnabled_(bool(final_text))
         self._copy_raw_button.setEnabled_(bool(raw_text))
+        self._open_button.setEnabled_(entry is not None and self._on_open is not None)
+        self._vocabulary_button.setEnabled_(bool(entry and (entry.get("hotword_terms") or entry.get("hotword_changes"))))
         self._summary.setStringValue_(
             t("history_selection", time=entry["time_label"], app=entry["app_label"], outcome=entry["outcome_label"])
             if entry else t("history_select_record")
         )
+
+    def open_selected(self):
+        entry = self._selected_entry()
+        if entry is None or self._on_open is None:
+            return False
+        opened = self._on_open(entry["id"])
+        if opened:
+            self.close()
+        return bool(opened)
+
+    def show_vocabulary_details(self):
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        chinese = get_language() == "zh"
+        terms = entry.get("hotword_terms") or []
+        changes = entry.get("hotword_changes") or []
+        lines = ["识别提示" if chinese else "Recognition hints", ", ".join(terms) or ("没有记录" if chinese else "No recorded hints"), "",
+                 "实际纠错" if chinese else "Applied corrections"]
+        lines.extend(f"{change['original']} → {change['replacement']}" for change in changes)
+        if not changes:
+            lines.append("没有文字替换记录" if chinese else "No recorded replacements")
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("这次听写的热词" if chinese else "Vocabulary for this dictation")
+        alert.setInformativeText_(entry["time_label"])
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 500, 230))
+        scroll.setHasVerticalScroller_(True)
+        view = AppKit.NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 230))
+        view.setEditable_(False)
+        view.setSelectable_(True)
+        view.setFont_(AppKit.NSFont.systemFontOfSize_(14))
+        view.setString_("\n".join(lines))
+        view.setVerticallyResizable_(True)
+        view.setHorizontallyResizable_(False)
+        view.textContainer().setWidthTracksTextView_(True)
+        scroll.setDocumentView_(view)
+        alert.setAccessoryView_(scroll)
+        alert.addButtonWithTitle_("关闭" if chinese else "Close")
+        alert.runModal()
 
     def copy_selected(self, field="polished") -> bool:
         entry = self._selected_entry()

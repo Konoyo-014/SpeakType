@@ -14,6 +14,16 @@ def advance_ui():
     NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.08))
 
 
+def render(controller, name, appearance):
+    controller.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(appearance))
+    advance_ui()
+    view = controller.window.contentView()
+    representation = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
+    view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), representation)
+    data = representation.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})
+    assert data.writeToFile_atomically_(str(work_dir / name), True)
+
+
 AppKit.NSApplication.sharedApplication()
 work_dir = Path(__file__).resolve().parents[1] / "work"
 work_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +68,9 @@ try:
         assert pasteboard.stringForType_(AppKit.NSPasteboardTypeString) == controller._raw_view.string()
         assert not controller._final_view.isEditable()
         assert controller._final_view.isSelectable()
+        render(controller, "history-v301-light.png", AppKit.NSAppearanceNameAqua)
+        render(controller, "history-v301-dark.png", AppKit.NSAppearanceNameDarkAqua)
+        controller.window.setAppearance_(None)
         initial_text_width = controller._final_view.frame().size.width
         controller.window.setContentSize_(NSMakeSize(1100, 800))
         advance_ui()

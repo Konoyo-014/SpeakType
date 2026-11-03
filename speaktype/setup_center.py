@@ -26,6 +26,7 @@ from .permissions import (
     request_microphone_if_needed,
 )
 from .polish import ollama_model_is_available
+from .design import apply_window, style_button
 
 
 LABELS = {
@@ -326,8 +327,7 @@ class SetupCenterController:
         self.window.setTitle_(self._text("title"))
         self.window.setReleasedWhenClosed_(False)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
-        self.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua))
-        self.window.setBackgroundColor_(AppKit.NSColor.whiteColor())
+        apply_window(self.window)
         self.window.center()
         self._delegate = _SetupCenterDelegate.alloc().initWithController_(self)
         self.window.setDelegate_(self._delegate)
@@ -416,6 +416,7 @@ class SetupCenterController:
         button.setTarget_(self._delegate)
         button.setAction_(action)
         button.setIdentifier_(f"setup.{name}")
+        style_button(button)
         root.addSubview_(button)
         self._controls[name] = button
         self._localized.append((button, key, "setTitle_"))

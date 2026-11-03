@@ -18,6 +18,22 @@ EXPORT_FORMATS = ("txt", "md", "csv", "json")
 INSERTION_OUTCOMES = ("pending", "saved", "inserted", "sent", "failed", "cancelled")
 
 
+def _validate_hotword_changes(changes):
+    if not isinstance(changes, list) or any(
+        not isinstance(change, dict)
+        or any(not isinstance(change.get(key), str) for key in ("original", "replacement", "term"))
+        for change in changes
+    ):
+        raise ValueError("History hotword changes must contain original, replacement and term strings")
+    return deepcopy(changes)
+
+
+def _validate_hotword_terms(terms):
+    if terms is not None and (not isinstance(terms, list) or any(not isinstance(term, str) for term in terms)):
+        raise ValueError("History hotword terms must be a list of strings or null")
+    return deepcopy(terms)
+
+
 def _validate_duration(value) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError("History duration must be a finite nonnegative number")
@@ -40,6 +56,8 @@ def _validate_entry(entry: dict, index: int) -> dict:
     if not isinstance(result["id"], str) or not result["id"]:
         raise ValueError(f"History record {index} must have a nonempty string id")
     result.setdefault("outcome", "sent")
+    result["hotword_changes"] = _validate_hotword_changes(result.get("hotword_changes", []))
+    result["hotword_terms"] = _validate_hotword_terms(result.get("hotword_terms"))
     if result["outcome"] not in INSERTION_OUTCOMES:
         raise ValueError(f"History record {index} has an unsupported insertion outcome")
     return result
@@ -78,6 +96,8 @@ class DictationHistory:
         app_name: str = "",
         duration_sec: float = 0,
         outcome: str = "inserted",
+        hotword_changes: list[dict] | None = None,
+        hotword_terms: list[str] | None = None,
     ) -> str:
         if outcome not in INSERTION_OUTCOMES:
             raise ValueError(f"Unsupported insertion outcome: {outcome}")
@@ -92,6 +112,8 @@ class DictationHistory:
             "app": app_name,
             "duration": round(duration, 1),
             "outcome": outcome,
+            "hotword_changes": _validate_hotword_changes([] if hotword_changes is None else hotword_changes),
+            "hotword_terms": _validate_hotword_terms(hotword_terms),
         }
         with self._lock:
             self._entries.append(entry)

@@ -22,7 +22,7 @@ BUILD_VERSION = os.environ.get("SPEAKTYPE_BUILD_VERSION", BASE_VERSION)
 if not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:d|a|b|fc)\d+)?", BUILD_VERSION):
     raise SystemExit(
         "Invalid SPEAKTYPE_BUILD_VERSION. Use a macOS build version such as "
-        "'3.0.0', '3.0.0d1', or '3.0.0b3'."
+        "'3.0.1', '3.0.1d1', or '3.0.1b3'."
     )
 
 
@@ -171,7 +171,8 @@ OPTIONS = {
     "includes": sorted(set(MODULES) | {"AppKit", "Quartz", "objc"}),
     "frameworks": FRAMEWORKS,
     "excludes": ["sitecustomize"],
-    "extra_scripts": ["scripts/verify_runtime.py", "speaktype/model_download_worker.py"],
+    "extra_scripts": ["scripts/verify_runtime.py", "speaktype/model_download_worker.py",
+                      "speaktype/audio_capture_worker.py"],
     "resources": ["resources/verify_error.sh"],
 }
 

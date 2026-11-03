@@ -1,9 +1,15 @@
 """Tests for the StreamingTranscriber callback plumbing."""
 
 import builtins
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -439,3 +445,24 @@ def test_run_chunked_releases_inference_slot(tmp_path, monkeypatch):
 
     assert asr.acquired == 1
     assert asr.released == 1
+
+
+def test_real_hotword_streaming_pipeline():
+    root = Path(__file__).resolve().parents[1]
+    run_dir = root / "work" / "pytest-hotword-streaming" / uuid4().hex
+    temporary = run_dir / "temporary"
+    temporary.mkdir(parents=True)
+    report_path = run_dir / "report.json"
+    environment = {**os.environ, "SPEAKTYPE_CONFIG_DIR": str(run_dir / "config"),
+                   "TMPDIR": str(temporary), "PYTHONDONTWRITEBYTECODE": "1"}
+    subprocess.run([sys.executable, str(root / "scripts" / "validate_hotword_pipeline.py"),
+                    "--asr", "--report", str(report_path)], cwd=root, env=environment,
+                   check=True, capture_output=True, text=True, timeout=240)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["runtime"] == "source"
+    assert report["prompt"]["parameter"] == "system_prompt"
+    assert report["prompt"]["unsupported_method_rejected"]
+    assert report["prompt"]["transcript_outputs_cleaned"]
+    preview = next(case for case in report["asr"] if case["name"] == "actual_chunked_preview")
+    assert preview["inference_lock_released"]
+    assert "SpeakType" in preview["output"] and "OmniEcho" in preview["output"]

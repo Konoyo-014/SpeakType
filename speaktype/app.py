@@ -6,6 +6,7 @@ import time
 import threading
 import logging
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 from weakref import WeakSet
 import rumps
@@ -45,7 +46,7 @@ from .plugins import PluginManager
 from .streaming import StreamingTranscriber
 from .corrections import CorrectionStore
 from .edit_observer import EditObservation, PostInsertEditObserver
-from .hotwords import ActiveHotwordContext, HotwordStore, extract_confident_corrections
+from .hotwords import ActiveHotwordContext, HotwordApplication, HotwordChange, HotwordStore, extract_confident_corrections
 from .applescript import run_osascript
 from .permissions import (
     get_permission_status,
@@ -157,20 +158,21 @@ class _MainThreadBridge(NSObject):
         """Called by NSTimer to start setup after wizard closes."""
         self._app._do_setup()
 
-    def startLevelMonitor_(self, _):
-        self._app._start_level_monitor_main()
+    def startLevelMonitor_(self, operation_id):
+        self._app._start_level_monitor_main(operation_id)
 
-    def stopLevelMonitor_(self, _):
-        self._app._stop_level_monitor_main()
+    def stopLevelMonitor_(self, operation_id):
+        self._app._stop_level_monitor_main(operation_id)
 
-    def handleMaxDurationReached_(self, _):
-        self._app._handle_max_duration_reached_main()
+    def handleMaxDurationReached_(self, operation_id):
+        self._app._handle_max_duration_reached_main(operation_id)
 
     def showPermissionRestartAlert_(self, _):
         self._app._show_permission_restart_alert_main()
 
     def refreshHotwordMenu_(self, _):
         self._app._update_hotword_menu_title()
+        self._app._refresh_main_window_main()
 
 
 class SpeakTypeApp(rumps.App):
@@ -216,6 +218,7 @@ class SpeakTypeApp(rumps.App):
         self._recording_operation_id = None
         self._starting_operation_id = None
         self._stopping_operation_id = None
+        self._recording_request_cancel = None
         self._recording_target = {}
         self._recording_field = None
         self._recording_preview_only = False
@@ -228,10 +231,13 @@ class SpeakTypeApp(rumps.App):
         self._pending_trial = False
         self._main_state = {"phase": "idle", "status": "", "raw": "", "final": "",
                             "partial": "", "level": 0.0, "elapsed": 0.0,
-                            "target_name": "", "ready": False, "readiness": [], "busy": False}
+                            "target_name": "", "ready": False, "readiness": [], "busy": False,
+                            "hotword_changes": [], "hotword_terms": None}
         if self._latest_dictation:
             self._main_state.update(raw=self._latest_dictation.get("raw", ""),
-                                    final=self._latest_dictation.get("polished", ""))
+                                    final=self._latest_dictation.get("polished", ""),
+                                    hotword_terms=self._latest_dictation.get("hotword_terms"),
+                                    hotword_changes=self._latest_dictation.get("hotword_changes", []))
         self.snippets = SnippetLibrary()
         self.corrections = CorrectionStore()
         self.hotwords = HotwordStore()
@@ -489,14 +495,9 @@ class SpeakTypeApp(rumps.App):
         return localized_hotkey_display(self.config["hotkey"])
 
     def _hotword_status_title(self) -> str:
-        total = 0
-        active = 0
-        try:
-            entries = self.hotwords.get_all()
-            total = len(entries)
-            active = sum(1 for entry in entries if entry.get("active"))
-        except Exception:
-            pass
+        entries = self.hotwords.get_all(dictionary=load_custom_dictionary())
+        total = len(entries)
+        active = sum(1 for entry in entries if entry.get("active"))
         return t("menu_hotwords_status", active=active, total=total)
 
     def _update_hotword_menu_title(self):
@@ -662,6 +663,9 @@ class SpeakTypeApp(rumps.App):
                                      if app.activationPolicy() == AppKit.NSApplicationActivationPolicyRegular
                                      and app.processIdentifier() != os.getpid()
                                      and app.bundleIdentifier() != BUNDLE_IDENTIFIER])
+        if snapshot.get("hotword_terms") is None:
+            snapshot["hotword_terms"] = self._hotword_context_for_app(self._last_external_app).terms
+        snapshot["hotword_count"] = len(snapshot["hotword_terms"])
         self._main_controller.update_state(snapshot)
         if self._quitting:
             return
@@ -695,6 +699,8 @@ class SpeakTypeApp(rumps.App):
                 on_recent=self._main_select_recent, language=self.config.get("ui_language", "zh"),
                 on_target=self._main_select_target, on_translate_language=self._main_set_translate_language,
                 on_edit=self._main_edit,
+                on_hotwords=lambda: self._open_hotwords_window(None),
+                on_learn_hotword=self._main_learn_hotword,
             )
         self._main_controller.show()
         self._refresh_main_window_main()
@@ -805,19 +811,22 @@ class SpeakTypeApp(rumps.App):
                 if self._delivery_operation_id == self._operation_id or self._main_state.get("phase") == "delivering":
                     return
             cancelled_operation_id = self._operation_id
-            self._operation_cancel.set()
-        if self.recorder.is_recording:
+            cancellation = self._operation_cancel
+            cancellation.set()
+            if self._recording_request_cancel is not None:
+                self._recording_request_cancel.set()
+            if self._starting_operation_id == cancelled_operation_id:
+                self._starting_operation_id = None
+            if self._stopping_operation_id == cancelled_operation_id:
+                self._stopping_operation_id = None
             self.recorder.set_stream_callback(None)
-            self.recorder.stop_audio()
-        if self._streaming_transcriber:
-            self._streaming_transcriber.stop(wait=False)
-            self._streaming_transcriber = None
-        self._release_guard_stop.set()
-        self._stop_level_monitor()
-        self._reset_hotkey_recording_state()
-        with self._operation_lock:
-            if cancelled_operation_id != self._operation_id:
-                return
+            self.recorder.cancel_start(cancel_event=cancellation)
+            if self._streaming_transcriber:
+                self._streaming_transcriber.stop(wait=False)
+                self._streaming_transcriber = None
+            self._release_guard_stop.set()
+            self._stop_level_monitor(cancelled_operation_id)
+            self._reset_hotkey_recording_state()
             self._is_processing = False
             with self._dictation_lock:
                 entry = dict(self._latest_dictation or {})
@@ -826,6 +835,8 @@ class SpeakTypeApp(rumps.App):
             self._status_overlay.hide()
             self._update_main_state(phase="cancelled", busy=False, level=0,
                                     raw=entry.get("raw", ""), final=entry.get("polished", ""),
+                                    hotword_terms=entry.get("hotword_terms"),
+                                    hotword_changes=entry.get("hotword_changes", []),
                                     status=self._desktop_text("已取消，现有文本已保留。", "Cancelled. Available text has been kept."))
 
     def _update_latest_final_text(self, text):
@@ -853,6 +864,43 @@ class SpeakTypeApp(rumps.App):
 
     def _main_edit(self, text):
         self._update_latest_final_text(text)
+
+    def _main_learn_hotword(self, original, preferred):
+        existing = next((item for item in self.hotwords.get_all()
+                         if item["term"].strip().casefold() == preferred.strip().casefold()), {})
+        aliases = list(existing.get("aliases", []))
+        if (original.strip() and original.strip().casefold() != preferred.strip().casefold()
+                and original.strip().casefold() not in {alias.casefold() for alias in aliases}):
+            aliases.append(original.strip())
+        entry = self.hotwords.upsert_manual(preferred, aliases,
+                                            scope_app=existing.get("scope_app", ""),
+                                            scope_scene=existing.get("scope_scene", ""))
+        self._vocabulary_changed()
+        self._update_main_state(status=self._desktop_text(
+            f"已记住 {entry['term']}，从下次听写开始使用。",
+            f"Saved {entry['term']} for your next dictation."))
+
+    def _vocabulary_changed(self):
+        self._update_hotword_menu_title()
+        self._refresh_main_window_main()
+
+    def _apply_vocabulary_corrections(self, text, app_info=None, scene=""):
+        text, existing_changes = self.corrections.apply_with_changes(text)
+        changes = [HotwordChange(**change, term=change["replacement"]) for change in existing_changes]
+        if not self.config.get("hotword_context_enabled", True):
+            return HotwordApplication(text=text, changes=changes)
+        result = self.hotwords.apply(
+            text, app_info=app_info, scene=scene, dictionary=load_custom_dictionary(),
+            learned_corrections_enabled=self.config.get("hotword_auto_corrections_enabled", True),
+        )
+        return HotwordApplication(text=result.text, changes=changes + result.changes)
+
+    def _vocabulary_test_status(self):
+        if not self.config.get("hotword_context_enabled", True):
+            return self._desktop_text("热词功能已关闭，测试仍包含原有纠错规则。", "Vocabulary is off. Saved correction rules still apply in this test.")
+        if not self.config.get("hotword_auto_corrections_enabled", True):
+            return self._desktop_text("使用当前设置：仅应用手动添加或已确认的纠错。", "Current settings apply manual or confirmed corrections only.")
+        return self._desktop_text("使用当前听写设置和已保存词语进行测试。", "Testing with the current dictation settings and saved vocabulary.")
 
     def _begin_delivery(self, operation_id, status=None):
         with self._operation_lock:
@@ -922,8 +970,11 @@ class SpeakTypeApp(rumps.App):
             try:
                 if not polish_engine.check_available():
                     raise RuntimeError(polish_engine.last_error)
-                result = (polish_engine.translate(text, target_lang=self.config.get("translate_target", "en"))
-                          if translate else polish_engine.polish(text, language=self.config.get("language", "auto")))
+                vocabulary = self._hotword_context_for_app(self._last_external_app)
+                result = (polish_engine.translate(text, target_lang=self.config.get("translate_target", "en"),
+                                                  hotwords=vocabulary.terms)
+                          if translate else polish_engine.polish(text, language=self.config.get("language", "auto"),
+                                                                 hotwords=vocabulary.terms))
                 if polish_engine.last_error:
                     raise RuntimeError(polish_engine.last_error)
                 self._commit_dictation_text(entry, result, operation_id, outcome="saved",
@@ -945,6 +996,8 @@ class SpeakTypeApp(rumps.App):
         with self._dictation_lock:
             self._latest_dictation = dict(entry)
         self._update_main_state(phase="done", raw=entry["raw"], final=entry["polished"],
+                                hotword_terms=entry.get("hotword_terms"),
+                                hotword_changes=entry.get("hotword_changes", []),
                                 status=self._desktop_text("已打开这条听写。", "Dictation opened."))
 
     def _main_select_target(self, app_info):
@@ -999,21 +1052,15 @@ class SpeakTypeApp(rumps.App):
     ) -> ActiveHotwordContext:
         if not self.config.get("hotword_context_enabled", True):
             return ActiveHotwordContext(terms=[], context="")
-        store = getattr(self, "hotwords", None)
-        if store is None or not hasattr(store, "active_context"):
-            return ActiveHotwordContext(terms=[], context="")
-        try:
-            app_info = app_info or get_active_app()
-            scene = scene_id if scene_id is not None else get_scene_for_app(app_info)
-            return store.active_context(
-                app_info=app_info,
-                scene=scene,
-                language=self.config.get("language", "auto"),
-                limit=int(self.config.get("hotword_max_context_terms", 30) or 30),
-            )
-        except Exception as e:
-            logger.debug(f"Failed to build hotword context: {e}")
-            return ActiveHotwordContext(terms=[], context="")
+        app_info = get_active_app() if app_info is None else app_info
+        scene = scene_id if scene_id is not None else get_scene_for_app(app_info)
+        return self.hotwords.active_context(
+            app_info=app_info,
+            scene=scene,
+            language=self.config.get("language", "auto"),
+            limit=self.config.get("hotword_max_context_terms", 30),
+            dictionary=load_custom_dictionary(),
+        )
 
     def _start_edit_observation(
         self,
@@ -1051,7 +1098,7 @@ class SpeakTypeApp(rumps.App):
 
     def _handle_observed_edit(self, observation: EditObservation):
         with self._operation_lock:
-            if self._quitting:
+            if self._quitting or not self.config.get("hotword_learning_enabled", True):
                 return
             if threading.current_thread() is not threading.main_thread():
                 self._model_workers.add(threading.current_thread())
@@ -1073,29 +1120,27 @@ class SpeakTypeApp(rumps.App):
             scene=observation.scene,
             language=observation.language,
         )
-        store = getattr(self, "hotwords", None)
-        learned = []
-        if store is not None and hasattr(store, "learn_from_payload"):
-            learned = store.learn_from_payload(
-                payload,
+        with self._operation_lock:
+            if self._quitting or not self.config.get("hotword_learning_enabled", True):
+                return
+            candidates = {item["term"].casefold(): dict(item) for item in payload.get("hotwords", [])}
+            if self.config.get("hotword_auto_corrections_enabled", True):
+                for correction in extract_confident_corrections(
+                    payload, raw_text=observation.raw_text, inserted_text=observation.inserted_text,
+                    edited_text=observation.edited_text,
+                ):
+                    key = correction["right"].casefold()
+                    item = candidates.setdefault(key, {"term": correction["right"], "aliases": [], "confidence": 0})
+                    item["aliases"] = list(dict.fromkeys([*item.get("aliases", []), correction["wrong"]]))
+                    item["confidence"] = max(item.get("confidence", 0), correction["confidence"])
+            learned = self.hotwords.learn_from_payload(
+                {**payload, "hotwords": list(candidates.values())},
                 app_info=observation.app_info,
                 scene=observation.scene,
                 language=observation.language,
                 raw_text=observation.raw_text,
                 edited_text=observation.edited_text,
             )
-
-        if self.config.get("hotword_auto_corrections_enabled", True):
-            for correction in extract_confident_corrections(
-                payload,
-                raw_text=observation.raw_text,
-                inserted_text=observation.inserted_text,
-                edited_text=observation.edited_text,
-            ):
-                try:
-                    self.corrections.add(correction["wrong"], correction["right"])
-                except Exception as e:
-                    logger.debug(f"Failed to add learned correction: {e}")
 
         if learned:
             logger.info(
@@ -1105,16 +1150,11 @@ class SpeakTypeApp(rumps.App):
             self._refresh_hotword_menu_on_main()
 
     def _transcribe_with_hotwords(self, audio_input, hotword_context: str = "") -> str:
-        try:
-            return self.asr.transcribe(
-                audio_input,
-                language=self.config["language"],
-                hotword_context=hotword_context,
-            )
-        except TypeError as e:
-            if "hotword_context" not in str(e):
-                raise
-            return self.asr.transcribe(audio_input, language=self.config["language"])
+        return self.asr.transcribe(
+            audio_input,
+            language=self.config["language"],
+            hotword_context=hotword_context,
+        )
 
     def _start_streaming_preview(self) -> bool:
         with self._operation_lock:
@@ -1612,9 +1652,21 @@ class SpeakTypeApp(rumps.App):
 
     # --- Common recording logic ---
 
-    def _start_recording(self, preview_only=False):
+    def _start_recording(self, preview_only=False, active_app=None, request_cancel=None):
+        if threading.current_thread() is threading.main_thread():
+            self._flush_main_edits()
+            with self._operation_lock:
+                if self._recording_request_cancel is not None:
+                    self._recording_request_cancel.set()
+                request_cancel = threading.Event()
+                self._recording_request_cancel = request_cancel
+            return self._start_model_worker(
+                self._start_recording, name="SpeakTypeDeviceStart",
+                kwargs={"preview_only": preview_only, "active_app": get_active_app(),
+                        "request_cancel": request_cancel})
         with self._operation_lock:
-            if self._quitting:
+            if (self._quitting or request_cancel is not None
+                    and (request_cancel.is_set() or request_cancel is not self._recording_request_cancel)):
                 return
             if threading.current_thread() is not threading.main_thread():
                 self._model_workers.add(threading.current_thread())
@@ -1633,7 +1685,7 @@ class SpeakTypeApp(rumps.App):
                                                               "Speech model is not ready. Open Permissions and Models."))
             self._refresh_main_readiness()
             return
-        current = get_active_app()
+        current = dict(active_app) if active_app is not None else get_active_app()
         own_app = current.get("pid") == os.getpid() or current.get("bundle_id") == BUNDLE_IDENTIFIER
         recording_preview_only = bool(preview_only or own_app)
         recording_target = dict(self._last_external_app if own_app else current)
@@ -1644,10 +1696,13 @@ class SpeakTypeApp(rumps.App):
             self._update_main_state(phase="error", status=str(error))
             return
         with self._operation_lock:
-            if self._starting_operation_id is not None or self._quitting or self.recorder.is_recording:
+            if (self._starting_operation_id is not None or self._quitting or self.recorder.is_recording
+                    or request_cancel is not None
+                    and (request_cancel.is_set() or request_cancel is not self._recording_request_cancel)):
                 self._reset_hotkey_recording_state()
                 return
             operation_id = self._new_operation()
+            operation_cancel = self._operation_cancel
             self._recording_operation_id = operation_id
             self._starting_operation_id = operation_id
             self._recording_preview_only = recording_preview_only
@@ -1657,14 +1712,12 @@ class SpeakTypeApp(rumps.App):
                 self._last_external_app = dict(current)
             with self._recording_stop_lock:
                 self._recording_stop_requested = False
+            self._update_main_state(phase="loading", busy=True, level=0,
+                                    status=self._desktop_text("正在启动麦克风…", "Starting the microphone…"))
         self._cancel_edit_observation()
         streamer = None
-        self.recorder.set_whisper_state_callback(self._on_whisper_state_change)
-
         if self.config.get("streaming_preview", True) and self.asr._loaded:
             streamer = self._build_streaming_transcriber()
-        else:
-            self.recorder.set_stream_callback(None)
 
         max_seconds = self.config.get("max_recording_seconds")
         try:
@@ -1674,15 +1727,19 @@ class SpeakTypeApp(rumps.App):
         except (TypeError, ValueError):
             max_seconds = None
 
-        # Set this before opening PortAudio. AudioRecorder marks itself as
-        # recording while opening the stream, so a fast hotkey release can race
-        # into _stop_recording before recorder.start() returns.
-        self._recording_start_time = time.time()
+        with self._operation_lock:
+            if not self._operation_current(operation_id):
+                return
+            self.recorder.set_whisper_state_callback(self._on_whisper_state_change)
+            self.recorder.set_stream_callback(None)
+            self._recording_start_time = time.time()
 
         try:
             started = self.recorder.start(
                 max_seconds=max_seconds,
-                on_max_duration=self._on_max_duration_reached,
+                on_max_duration=lambda: self._on_max_duration_reached(operation_id),
+                cancel_event=operation_cancel,
+                on_error=lambda error: self._on_audio_device_error(operation_id, error),
             )
         except Exception as e:
             started = False
@@ -1691,8 +1748,7 @@ class SpeakTypeApp(rumps.App):
         with self._operation_lock:
             abandoned = not self._operation_current(operation_id) or self._quitting
         if abandoned:
-            if self.recorder.is_recording:
-                self.recorder.stop_audio()
+            self.recorder.cancel_start(cancel_event=operation_cancel)
             with self._operation_lock:
                 if self._starting_operation_id == operation_id:
                     self._starting_operation_id = None
@@ -1712,13 +1768,17 @@ class SpeakTypeApp(rumps.App):
                     self._recording_stop_requested = False
                 self._recording_start_time = 0
                 err = self.recorder.last_start_error
-                message = str(err) if err else "Could not open microphone."
-                logger.error(f"Recording failed to start: {message}")
+                detail = str(err) if err else "Could not open microphone."
+                message = self._desktop_text(
+                    f"麦克风未能在 {self.recorder.start_timeout_seconds:g} 秒内开始采集，请检查系统声音输入后重试。",
+                    detail) if isinstance(err, TimeoutError) else detail
+                logger.error("Recording failed to start: %s", detail)
                 self._show_overlay_error(t("overlay_mic_start_failed"), auto_hide_after=3.0)
-                rumps.notification("SpeakType", t("notif_error"), message)
                 self._update_main_state(phase="error", busy=False, status=message)
                 if self._starting_operation_id == operation_id:
                     self._starting_operation_id = None
+                if self._main_controller is None or not self._main_controller.window.isVisible():
+                    rumps.notification("SpeakType", t("notif_error"), message)
             return
 
         with self._recording_stop_lock:
@@ -1735,6 +1795,7 @@ class SpeakTypeApp(rumps.App):
             if not self._operation_current(operation_id):
                 return
             logger.info("Recording started")
+            self._recording_start_time = time.time()
             if self.hotkey_listener and self.hotkey_listener.mode == "toggle":
                 self.hotkey_listener._toggle_active = True
             self._update_main_state(phase="recording", busy=True, raw="", final="", partial="", elapsed=0,
@@ -1749,6 +1810,7 @@ class SpeakTypeApp(rumps.App):
             return
         self._prime_pipeline_for_recording()
         context = self._hotword_context_for_app(self._recording_target)
+        self._update_operation_state(operation_id, hotword_terms=context.terms, hotword_changes=[])
         recording_note = ""
         if context.terms:
             recording_note = t("overlay_hotwords_active", count=len(context.terms))
@@ -1756,7 +1818,7 @@ class SpeakTypeApp(rumps.App):
             if not self._operation_current(operation_id):
                 return
             self._status_overlay.show_recording(recording_note)
-        self._start_level_monitor()
+        self._start_level_monitor(operation_id)
 
         if streamer is not None:
             try:
@@ -1775,7 +1837,34 @@ class SpeakTypeApp(rumps.App):
             self._streaming_transcriber = None
 
         if not self._recording_preview_only:
-            self._start_hotkey_release_guard()
+            self._start_hotkey_release_guard(operation_id)
+
+    def _on_audio_device_error(self, operation_id, error):
+        with self._operation_lock:
+            if not self._operation_current(operation_id):
+                return
+            self._operation_cancel.set()
+            if self._recording_request_cancel is not None:
+                self._recording_request_cancel.set()
+            if self._starting_operation_id == operation_id:
+                self._starting_operation_id = None
+            if self._stopping_operation_id == operation_id:
+                self._stopping_operation_id = None
+            self.recorder.set_stream_callback(None)
+            if self._streaming_transcriber is not None:
+                self._streaming_transcriber.stop(wait=False)
+                self._streaming_transcriber = None
+            self._release_guard_stop.set()
+            self._stop_level_monitor(operation_id)
+            self._reset_hotkey_recording_state()
+            self._is_processing = False
+            with self._main_state_lock:
+                partial = str(self._main_state.get("partial") or "")
+            message = self._desktop_text(f"麦克风采集已停止：{error}", f"Microphone capture stopped: {error}")
+            if partial:
+                message += self._desktop_text("。实时转写已保留在原始转写中。", ". Live transcription is retained in the original text.")
+            self._show_overlay_error(self._desktop_text("麦克风采集已停止", "Microphone capture stopped"), auto_hide_after=3.0)
+            self._update_main_state(phase="error", busy=False, level=0, raw=partial, partial="", status=message)
 
     def _on_whisper_state_change(self, new_state: str):
         """Forward whisper detector state into the overlay (any thread)."""
@@ -1784,17 +1873,19 @@ class SpeakTypeApp(rumps.App):
         except Exception as e:
             logger.debug(f"Failed to update overlay whisper indicator: {e}")
 
-    def _on_max_duration_reached(self):
+    def _on_max_duration_reached(self, operation_id=None):
         """Audio thread fired the watchdog — bounce the stop onto the main thread."""
         logger.info("max_recording_seconds reached; auto-stopping")
         try:
             self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"handleMaxDurationReached:", None, False
+                b"handleMaxDurationReached:", operation_id, False
             )
         except Exception as e:
             logger.debug(f"max_duration main-thread dispatch failed: {e}")
 
-    def _handle_max_duration_reached_main(self):
+    def _handle_max_duration_reached_main(self, operation_id=None):
+        if operation_id is not None and not self._operation_current(operation_id):
+            return
         try:
             if self.hotkey_listener and self.hotkey_listener.mode == "toggle":
                 if self.hotkey_listener._toggle_active:
@@ -1803,7 +1894,10 @@ class SpeakTypeApp(rumps.App):
         except Exception as e:
             logger.debug(f"max_duration auto-stop failed: {e}")
 
-    def _stop_recording(self):
+    def _stop_recording(self, requested_operation_id=None):
+        if threading.current_thread() is threading.main_thread():
+            return self._start_model_worker(self._stop_recording, name="SpeakTypeDeviceStop",
+                                            kwargs={"requested_operation_id": self._recording_operation_id})
         stop_started = time.perf_counter()
         with self._operation_lock:
             if self._quitting:
@@ -1811,8 +1905,13 @@ class SpeakTypeApp(rumps.App):
             if threading.current_thread() is not threading.main_thread():
                 self._model_workers.add(threading.current_thread())
             operation_id = self._recording_operation_id
-            if not self._operation_current(operation_id):
+            if (requested_operation_id is not None and requested_operation_id != operation_id
+                    or not self._operation_current(operation_id)):
                 return
+            if self._starting_operation_id == operation_id:
+                self._main_cancel()
+                return
+            operation_cancel = self._operation_cancel
             with self._recording_stop_lock:
                 if self._recording_stop_requested or not self.recorder.is_recording:
                     return
@@ -1829,22 +1928,26 @@ class SpeakTypeApp(rumps.App):
             self._update_main_state(phase="transcribing", busy=True, level=0,
                                     status=self._desktop_text("正在识别语音…", "Transcribing…"))
         try:
-            self._reset_hotkey_recording_state()
-            self._release_guard_stop.set()
-            logger.info(f"Recording stopped after {duration:.1f}s")
-            if self.config["sound_feedback"]:
-                _play_sound("Pop")
-            if self.config.get("plugins_enabled"):
-                self._plugin_manager.run_hook("on_recording_stop")
-            self._stop_level_monitor()
-            preview_text = ""
-            preview_snapshot = None
-            if streamer is not None:
-                preview_snapshot = streamer.snapshot()
-                preview_text = streamer.stop(wait=False) or ""
-            recorder.set_stream_callback(None)
+            with self._operation_lock:
+                if not self._operation_current(operation_id):
+                    return
+                self._reset_hotkey_recording_state()
+                self._release_guard_stop.set()
+                logger.info(f"Recording stopped after {duration:.1f}s")
+                if self.config["sound_feedback"]:
+                    _play_sound("Pop")
+                if self.config.get("plugins_enabled"):
+                    self._plugin_manager.run_hook("on_recording_stop")
+                self._stop_level_monitor(operation_id)
+                preview_text = ""
+                preview_snapshot = None
+                if streamer is not None:
+                    preview_snapshot = streamer.snapshot()
+                    preview_text = streamer.stop(wait=False) or ""
+                recorder.set_stream_callback(None)
             can_use_in_memory_audio = self.asr.backend == "qwen" and not self.config.get("plugins_enabled")
-            audio_input = recorder.stop_audio() if can_use_in_memory_audio else recorder.stop()
+            audio_input = (recorder.stop_audio(cancel_event=operation_cancel) if can_use_in_memory_audio
+                           else recorder.stop(cancel_event=operation_cancel))
             audio_ready_at = time.perf_counter()
             with self._operation_lock:
                 if not self._operation_current(operation_id):
@@ -1872,26 +1975,30 @@ class SpeakTypeApp(rumps.App):
                 if self._stopping_operation_id == operation_id:
                     self._stopping_operation_id = None
 
-    def _start_hotkey_release_guard(self):
-        if self.config.get("dictation_mode", "push_to_talk") != "push_to_talk":
-            return
-        listener = self.hotkey_listener
-        if listener is None or not hasattr(listener, "is_physically_pressed"):
-            return
-        self._release_guard_stop.set()
-        self._release_guard_stop = threading.Event()
-        self._release_guard_thread = self._start_model_worker(
-            self._hotkey_release_guard_loop,
-            args=(self._release_guard_stop,),
-            name="SpeakTypeHotkeyReleaseGuard",
-        )
+    def _start_hotkey_release_guard(self, operation_id=None):
+        with self._operation_lock:
+            operation_id = self._recording_operation_id if operation_id is None else operation_id
+            if not self._operation_current(operation_id):
+                return
+            if self.config.get("dictation_mode", "push_to_talk") != "push_to_talk":
+                return
+            listener = self.hotkey_listener
+            if listener is None or not hasattr(listener, "is_physically_pressed"):
+                return
+            self._release_guard_stop.set()
+            self._release_guard_stop = threading.Event()
+            self._release_guard_thread = self._start_model_worker(
+                self._hotkey_release_guard_loop,
+                args=(self._release_guard_stop, operation_id),
+                name="SpeakTypeHotkeyReleaseGuard",
+            )
 
-    def _hotkey_release_guard_loop(self, stop_event: threading.Event):
+    def _hotkey_release_guard_loop(self, stop_event: threading.Event, operation_id):
         if stop_event.wait(HOTKEY_RELEASE_GUARD_GRACE_SECONDS):
             return
         missed_release_count = 0
         while not stop_event.wait(HOTKEY_RELEASE_GUARD_INTERVAL_SECONDS):
-            if not getattr(self.recorder, "is_recording", False):
+            if not self._operation_current(operation_id) or not self.recorder.is_recording:
                 return
             listener = self.hotkey_listener
             if listener is None or not hasattr(listener, "is_physically_pressed"):
@@ -1908,25 +2015,25 @@ class SpeakTypeApp(rumps.App):
                 continue
 
             logger.warning("Hotkey release appears to have been missed; auto-stopping recording")
-            try:
+            with self._operation_lock:
+                if stop_event.is_set() or not self._operation_current(operation_id):
+                    return
                 if hasattr(listener, "clear_pressed_state"):
                     listener.clear_pressed_state()
-            except Exception as e:
-                logger.debug(f"Failed to clear stale hotkey state: {e}")
-            self._stop_recording()
+            self._stop_recording(requested_operation_id=operation_id)
             return
 
-    def _start_level_monitor(self):
-        try:
+    def _start_level_monitor(self, operation_id=None):
+        if threading.current_thread() is threading.main_thread():
+            self._start_level_monitor_main(operation_id)
+        else:
             self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"startLevelMonitor:", None, True
-            )
-        except Exception as e:
-            logger.debug(f"Failed to dispatch level monitor start: {e}")
-            self._level_timer = None
+                b"startLevelMonitor:", operation_id, False)
 
-    def _start_level_monitor_main(self):
+    def _start_level_monitor_main(self, operation_id=None):
         """Poll the recorder's audio level and feed it into the overlay."""
+        if operation_id is not None and operation_id != self._recording_operation_id:
+            return
         if not self.recorder.is_recording or not self._operation_current(self._recording_operation_id) or self._quitting:
             return
         if self._level_timer is not None:
@@ -1942,19 +2049,17 @@ class SpeakTypeApp(rumps.App):
             logger.debug(f"Failed to start level monitor: {e}")
             self._level_timer = None
 
-    def _stop_level_monitor(self):
-        try:
+    def _stop_level_monitor(self, operation_id=None):
+        if threading.current_thread() is threading.main_thread():
+            self._stop_level_monitor_main(operation_id)
+        else:
             self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"stopLevelMonitor:", None, True
-            )
-        except Exception as e:
-            logger.debug(f"Failed to dispatch level monitor stop: {e}")
-        try:
-            self._status_overlay.update_audio_level(0.0)
-        except Exception:
-            pass
+                b"stopLevelMonitor:", operation_id, False)
 
-    def _stop_level_monitor_main(self):
+    def _stop_level_monitor_main(self, operation_id=None):
+        if operation_id is not None and operation_id != self._recording_operation_id:
+            return
+        self._status_overlay.update_audio_level(0.0)
         if self._level_timer is not None:
             try:
                 self._level_timer.stop()
@@ -2101,11 +2206,13 @@ class SpeakTypeApp(rumps.App):
                     return
                 self._is_processing = True
                 self._update_main_state(phase="transcribing", busy=True,
+                                        hotword_changes=[],
                                         status=self._desktop_text("正在识别语音…", "Transcribing…"))
             app_info = dict(app_info) if app_info is not None else get_active_app()
             tone = get_tone_for_app(app_info) if self.config["context_aware_tone"] else "neutral"
             active_scene_id = get_scene_for_app(app_info)
             active_hotwords = self._hotword_context_for_app(app_info, active_scene_id)
+            self._update_operation_state(operation_id, hotword_terms=active_hotwords.terms)
 
             # Plugin: pre_transcribe
             if self.config.get("plugins_enabled"):
@@ -2140,11 +2247,10 @@ class SpeakTypeApp(rumps.App):
             if self.config.get("plugins_enabled"):
                 raw_text = self._plugin_manager.run_hook("post_transcribe", raw_text) or raw_text
 
-            # Apply user-defined corrections (e.g. "PI thon" -> "Python")
-            try:
-                raw_text = self.corrections.apply(raw_text)
-            except Exception as e:
-                logger.debug(f"Correction store apply failed: {e}")
+            corrected = self._apply_vocabulary_corrections(raw_text, app_info, active_scene_id)
+            raw_text = corrected.text
+            hotword_changes = [asdict(change) for change in corrected.changes]
+            self._update_operation_state(operation_id, hotword_changes=hotword_changes)
 
             # Local action commands (undo last dictation, etc.)
             if not self._operation_current(operation_id):
@@ -2168,7 +2274,9 @@ class SpeakTypeApp(rumps.App):
             snippet_text = self.snippets.match(raw_text)
             if snippet_text:
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
-                entry = self._retain_dictation(original_transcription, snippet_text, app_info, duration, operation_id=operation_id)
+                entry = self._retain_dictation(original_transcription, snippet_text, app_info, duration,
+                                               operation_id=operation_id, hotword_changes=hotword_changes,
+                                               hotword_terms=active_hotwords.terms)
                 if entry is None:
                     return
                 if not insert_result:
@@ -2234,7 +2342,9 @@ class SpeakTypeApp(rumps.App):
                     text = result
 
             combined_llm_path = self.config["polish_enabled"] and self.config.get("translate_enabled", False) and not self.config.get("plugins_enabled")
-            entry = self._retain_dictation(original_transcription, text, app_info, duration, operation_id=operation_id)
+            entry = self._retain_dictation(original_transcription, text, app_info, duration,
+                                           operation_id=operation_id, hotword_changes=hotword_changes,
+                                           hotword_terms=active_hotwords.terms)
             if entry is None:
                 return
 
@@ -2413,19 +2523,23 @@ class SpeakTypeApp(rumps.App):
             if recording_path is not None:
                 Path(recording_path).unlink(missing_ok=True)
 
-    def _retain_dictation(self, raw_text, final_text, app_info, duration=0, *, operation_id=None):
+    def _retain_dictation(self, raw_text, final_text, app_info, duration=0, *, operation_id=None,
+                          hotword_changes=None, hotword_terms=None):
         with self._operation_lock:
             if operation_id is not None and not self._operation_current(operation_id):
                 return None
             entry = {"raw": raw_text, "polished": final_text, "outcome": "pending",
-                     "operation_id": self._operation_id if operation_id is None else operation_id}
+                     "operation_id": self._operation_id if operation_id is None else operation_id,
+                     "hotword_changes": list(hotword_changes or []), "hotword_terms": hotword_terms}
             with self._dictation_lock:
                 self._latest_dictation = entry
-            self._update_main_state(raw=raw_text, final=final_text)
+            self._update_main_state(raw=raw_text, final=final_text, hotword_changes=entry["hotword_changes"],
+                                    hotword_terms=hotword_terms)
             if self.config.get("history_enabled", True):
                 entry["id"] = self.history.add(
                     raw_text=raw_text, polished_text=final_text,
-                    app_name=app_info.get("name", ""), duration_sec=duration, outcome="pending")
+                    app_name=app_info.get("name", ""), duration_sec=duration, outcome="pending",
+                    hotword_changes=entry["hotword_changes"], hotword_terms=hotword_terms)
             return entry
 
     def _commit_dictation_text(self, entry, text, operation_id, *, outcome=None, status=None, show_done=False):
@@ -2648,7 +2762,7 @@ class SpeakTypeApp(rumps.App):
 
         self._dict_controller = _show_or_create_window_controller(
             getattr(self, "_dict_controller", None),
-            lambda: DictWindowController(self.snippets, self.corrections),
+            lambda: DictWindowController(self.snippets, self.corrections, on_save=self._vocabulary_changed),
         )
 
     def _apply_settings(self, new_config: dict):
@@ -2668,8 +2782,11 @@ class SpeakTypeApp(rumps.App):
         old_plugins_enabled = self.config.get("plugins_enabled", False)
         old_plugins_dir = self.config.get("plugins_dir", "")
 
-        self.config.update(new_config)
-        save_config(self.config)
+        with self._operation_lock:
+            self.config.update(new_config)
+            save_config(self.config)
+            if not self.config.get("hotword_learning_enabled", True):
+                self._cancel_edit_observation()
         self.history.max_entries = self.config["history_max_entries"]
 
         # Update UI language if changed
@@ -2783,8 +2900,16 @@ class SpeakTypeApp(rumps.App):
         from .history_window import HistoryWindowController
         self._history_controller = _show_or_create_window_controller(
             self._history_controller,
-            lambda: HistoryWindowController(self.history),
+            lambda: HistoryWindowController(self.history, on_open=self._open_history_in_editor),
         )
+
+    def _open_history_in_editor(self, entry_id):
+        if self._is_processing or self.recorder.is_recording:
+            self._update_main_state(status=self._desktop_text("请先结束当前听写，再打开历史记录。", "Finish the current dictation before opening a record."))
+            return False
+        self._show_main_window()
+        self._main_select_recent(entry_id)
+        return True
 
     def _show_diagnostics(self, _):
         if self._quitting:
@@ -2809,7 +2934,10 @@ class SpeakTypeApp(rumps.App):
                 sample_rate=self.config["sample_rate"],
                 device=device,
             )
-            test_recorder.start()
+            if not test_recorder.start():
+                rumps.notification("SpeakType", t("notif_mic_test"),
+                                   str(test_recorder.last_start_error) or t("notif_mic_fail"))
+                return
             time.sleep(2)
             path = test_recorder.stop()
             if path:
@@ -2829,11 +2957,11 @@ class SpeakTypeApp(rumps.App):
 
     def _open_hotwords_window(self, _):
         from .hotwords_window import HotwordsWindowController
-
-        self._hotwords_controller = _show_or_create_window_controller(
-            getattr(self, "_hotwords_controller", None),
-            lambda: HotwordsWindowController(self.hotwords),
-        )
+        if getattr(self, "_hotwords_controller", None) is None:
+            self._hotwords_controller = HotwordsWindowController(
+                self.hotwords, on_change=self._vocabulary_changed,
+                on_test=self._apply_vocabulary_corrections, test_status=self._vocabulary_test_status)
+        self._hotwords_controller.show()
 
     def _check_updates(self, _):
         def _do_check():
@@ -2895,6 +3023,18 @@ class SpeakTypeApp(rumps.App):
         self._refresh_main_readiness()
 
     def _prepare_to_quit(self, timeout=60.0):
+        vocabulary = getattr(self, "_hotwords_controller", None)
+        if vocabulary is not None and vocabulary.has_unsaved_changes():
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_(self._desktop_text("词库中还有未保存的修改", "You have unsaved vocabulary changes"))
+            alert.setInformativeText_(self._desktop_text(
+                "返回词库可以继续编辑和保存。舍弃草稿后退出会删除这些未保存的修改。",
+                "Return to Vocabulary to edit and save. Discarding drafts will remove these unsaved changes."))
+            alert.addButtonWithTitle_(self._desktop_text("返回词库", "Return to Vocabulary"))
+            alert.addButtonWithTitle_(self._desktop_text("舍弃草稿并退出", "Discard drafts and quit"))
+            if alert.runModal() != AppKit.NSAlertSecondButtonReturn:
+                vocabulary.show()
+                return False
         deadline = time.monotonic() + timeout
         self._flush_main_edits()
         with self._operation_lock:

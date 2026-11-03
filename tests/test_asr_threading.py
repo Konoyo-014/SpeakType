@@ -201,19 +201,13 @@ class TestLoadIsSingleShot:
 
         assert engine._warmed is False
 
-    def test_qwen_transcribe_passes_hotword_context_when_supported(self, tmp_path, monkeypatch):
-        engine = ASREngine()
-        engine.model = object()
-        output_stem = str(tmp_path / "mlx-output")
-        calls = []
+    def test_qwen_transcribe_passes_hotword_context_when_supported(self):
+        from pathlib import Path
+        import subprocess
+        import sys
 
-        def fake_generate_transcription(**kwargs):
-            calls.append(kwargs)
-            return SimpleNamespace(text="ok")
-
-        monkeypatch.setattr("speaktype.asr._make_temp_transcript_output_path", lambda: output_stem)
-        monkeypatch.setattr("mlx_audio.stt.generate.generate_transcription", fake_generate_transcription)
-
-        assert engine._transcribe_qwen(object(), "auto", "Qwen3-ASR PyObjC") == "ok"
-
-        assert calls[0]["context"] == "Qwen3-ASR PyObjC"
+        root = Path(__file__).resolve().parents[1]
+        subprocess.run([
+            sys.executable, str(root / "scripts" / "validate_hotword_pipeline.py"),
+            "--asr", "--report", str(root / "work" / "pytest-hotword-report.json"),
+        ], cwd=root, check=True)

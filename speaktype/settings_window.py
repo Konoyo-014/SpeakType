@@ -7,6 +7,7 @@ import objc
 from Foundation import NSObject, NSMakeRect
 from .i18n import t
 from .runtime import get_launch_program_args
+from .design import apply_window, style_button
 
 
 class _SettingsFlippedView(AppKit.NSView):
@@ -214,6 +215,7 @@ class SettingsWindowController:
         )
         self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(t("settings_title"))
+        apply_window(self.window)
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -254,6 +256,7 @@ class SettingsWindowController:
         save_btn.setKeyEquivalent_("\r")
         save_btn.setTarget_(self._delegate)
         save_btn.setAction_(b"onSave:")
+        style_button(save_btn, primary=True)
         save_btn.setAutoresizingMask_(AppKit.NSViewMinXMargin | AppKit.NSViewMaxYMargin)
         content.addSubview_(save_btn)
 
@@ -263,6 +266,7 @@ class SettingsWindowController:
         cancel_btn.setKeyEquivalent_("\x1b")
         cancel_btn.setTarget_(self._delegate)
         cancel_btn.setAction_(b"onCancel:")
+        style_button(cancel_btn)
         cancel_btn.setAutoresizingMask_(AppKit.NSViewMinXMargin | AppKit.NSViewMaxYMargin)
         content.addSubview_(cancel_btn)
 

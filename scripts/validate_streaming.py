@@ -30,7 +30,8 @@ for name, language, expected in (("english", "en", "meeting"), ("chinese", "zh",
     assert rate == 16000
     partials = []
     streaming = StreamingTranscriber(engine, on_partial_text=partials.append)
-    streaming.start(language=language)
+    hotword_context = "Vocabulary: SpeakType, Qwen3-ASR."
+    streaming.start(language=language, hotword_context=hotword_context)
     for start in range(0, len(samples), 4800):
         streaming.feed_audio(samples[start:start + 4800])
         time.sleep(0.3)
@@ -41,7 +42,7 @@ for name, language, expected in (("english", "en", "meeting"), ("chinese", "zh",
     final = []
 
     def transcribe_final():
-        final.append(engine.transcribe(samples, language=language))
+        final.append(engine.transcribe(samples, language=language, hotword_context=hotword_context))
 
     worker = threading.Thread(target=transcribe_final)
     worker.start()
@@ -57,6 +58,7 @@ for name, language, expected in (("english", "en", "meeting"), ("chinese", "zh",
     time.sleep(0.2)
     assert len(partials) == count
     report["cases"].append({"language": language, "partials": partials, "preview": preview,
+                            "hotword_context": hotword_context,
                             "final": final[0], "covered_samples": snapshot.covered_samples,
                             "concurrent_final_completed": True, "stopped_callbacks": True})
 destination = root / "work" / ("bundle-streaming-report.json" if bundle else "streaming-report.json")

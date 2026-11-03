@@ -8,8 +8,8 @@
 class Speaktype < Formula
   desc "AI-powered voice input method for macOS with push-to-talk dictation"
   homepage "https://github.com/Konoyo-014/SpeakType"
-  url "https://github.com/Konoyo-014/SpeakType.git", tag: "v3.0.0"
-  version "3.0.0"
+  url "https://github.com/Konoyo-014/SpeakType.git", tag: "v3.0.1"
+  version "3.0.1"
   license "MIT"
 
   depends_on "python@3.10"

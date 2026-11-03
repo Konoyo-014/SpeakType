@@ -327,8 +327,10 @@ def validate_hotwords(run_dir):
     assert store.active_context(app_info=codex, scene="code", limit=1).terms == ["PyObjC"]
     assert store.active_context(app_info=mail, scene="email", limit=1).terms == ["QuarterlyClose"]
     assert store.active_context(limit=0).terms == []
-    context = store.active_context(max_chars=12)
-    assert len(context.context) <= 12 and context.context == " ".join(context.terms)
+    assert store.active_context(max_chars=12).context == ""
+    context = store.active_context(max_chars=24)
+    assert context.terms and len(context.context) <= 24
+    assert context.context == f"Vocabulary: {', '.join(context.terms)}."
     for term in ("", "a", "这是完整句子。", "some sentence, with punctuation"):
         assert store.add_or_reinforce(term, confidence=1) is None, term
     payload = {"learn": True, "hotwords": [{"term": "mlx-audio", "aliases": ["em el ex audio"],

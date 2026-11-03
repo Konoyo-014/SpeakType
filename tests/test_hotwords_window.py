@@ -1,6 +1,11 @@
-from speaktype import hotwords_window
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from uuid import uuid4
+
 from speaktype.hotwords_window import (
-    HotwordsWindowController,
     active_hotword_context_copy_state,
     active_hotword_context_text,
     hotword_reveal_feedback,
@@ -40,10 +45,13 @@ def test_hotword_window_rows_sort_active_terms_first():
     assert rows[0]["updated"] == "2026-05-06"
 
 
-def test_hotword_window_rows_skip_empty_terms():
-    rows = hotword_window_rows([{"term": ""}, {"term": "mlx-audio", "confidence": 0.9}])
+def test_hotword_window_rows_filter_learning_state_and_alias():
+    entries = [{"term": "CandidateTerm", "active": False, "aliases": ["candidate term"]},
+               {"term": "DisabledTerm", "active": False, "user_disabled": True}]
+    rows = hotword_window_rows(entries, query="candidate term", filter_id="pending")
 
-    assert [row["term"] for row in rows] == ["mlx-audio"]
+    assert [row["term"] for row in rows] == ["CandidateTerm"]
+    assert hotword_window_rows(entries, filter_id="disabled")[0]["term"] == "DisabledTerm"
 
 
 def test_hotword_row_metrics_expand_for_long_detail():
@@ -74,7 +82,7 @@ def test_active_hotword_context_text_copies_active_terms_only():
         ]
     )
 
-    assert text == "Qwen3-ASR mlx-audio"
+    assert text == "mlx-audio Qwen3-ASR"
 
 
 def test_active_hotword_context_copy_state_skips_empty_clipboard_write():
@@ -101,7 +109,7 @@ def test_active_hotword_context_copy_state_copies_active_terms():
     )
 
     assert state["should_copy"] is True
-    assert state["text"] == "Qwen3-ASR mlx-audio"
+    assert state["text"] == "mlx-audio Qwen3-ASR"
     assert state["count"] == 2
 
 
@@ -122,55 +130,24 @@ def test_hotword_rows_document_height_resets_for_empty_rows():
     assert hotword_rows_document_height([]) == 368
 
 
-class _FakeFeedbackField:
-    def __init__(self):
-        self.value = "stale copy feedback"
-        self.color = None
-
-    def setStringValue_(self, value):
-        self.value = value
-
-    def setTextColor_(self, value):
-        self.color = value
-
-
-def test_hotwords_refresh_clears_stale_copy_feedback(monkeypatch):
-    class EmptyStore:
-        def get_all(self):
-            return []
-
-    controller = HotwordsWindowController(EmptyStore())
-    controller._copy_feedback_field = _FakeFeedbackField()
-    rendered = []
-    controller._render = lambda: rendered.append(list(controller._last_entries))
-
-    controller.refresh()
-
-    assert controller._copy_feedback_field.value == ""
-    assert controller._copy_feedback_field.color is not None
-    assert rendered == [[]]
-
-
 def test_hotword_reveal_feedback_distinguishes_file_and_folder():
     assert hotword_reveal_feedback(True) != hotword_reveal_feedback(False)
     assert hotword_reveal_feedback(True)
     assert hotword_reveal_feedback(False)
 
 
-def test_hotwords_reveal_store_reports_config_folder_when_file_missing(monkeypatch, tmp_path):
-    calls = []
-    missing_file = tmp_path / "hotwords.json"
-
-    monkeypatch.setattr(hotwords_window, "HOTWORDS_FILE", missing_file)
-    monkeypatch.setattr(hotwords_window, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(hotwords_window, "ensure_config_dir", lambda: calls.append(("ensure",)))
-    monkeypatch.setattr(hotwords_window.subprocess, "run", lambda cmd: calls.append(tuple(cmd)))
-
-    controller = HotwordsWindowController()
-    controller._copy_feedback_field = _FakeFeedbackField()
-
-    controller.reveal_store()
-
-    assert ("ensure",) in calls
-    assert ("open", str(tmp_path)) in calls
-    assert controller._copy_feedback_field.value == hotword_reveal_feedback(False)
+def test_native_vocabulary_workspace_uses_real_controls_and_persistence():
+    root = Path(__file__).resolve().parents[1]
+    run_dir = root / "work" / "pytest-vocabulary" / uuid4().hex
+    temporary = run_dir / "temporary"
+    temporary.mkdir(parents=True)
+    environment = {**os.environ, "SPEAKTYPE_CONFIG_DIR": str(run_dir / "config"),
+                   "TMPDIR": str(temporary), "PYTHONDONTWRITEBYTECODE": "1"}
+    subprocess.run([sys.executable, str(root / "scripts" / "validate_vocabulary_workspace.py")],
+                   cwd=root, env=environment, check=True, capture_output=True, text=True, timeout=180)
+    report_path = root / "work" / "vocabulary-validation" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["runtime"] == "source"
+    assert report["callback_count"] > 0
+    assert report["checks"]
+    assert all(Path(path).is_file() for path in report["artifacts"])

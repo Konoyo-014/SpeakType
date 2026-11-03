@@ -85,6 +85,13 @@ def wait_for(worker):
     assert not application._main_state["busy"]
 
 
+def wait_for_recording():
+    wait_until(lambda: application._starting_operation_id is None
+               and application._main_state["phase"] in {"recording", "error"}, timeout=20)
+    assert application._main_state["phase"] == "recording", application._main_state["status"]
+    assert application.recorder.is_recording and application.hotkey_listener.is_active
+
+
 def preview(operation_id=None):
     worker = threading.Thread(target=application._process_audio,
                               args=(samples.copy(), len(samples) / rate),
@@ -190,7 +197,7 @@ try:
     checked("native_translate_same_record", entry=entry)
 
     application._main_controller._record_button.performClick_(None)
-    assert application.recorder.is_recording and application.hotkey_listener.is_active
+    wait_for_recording()
     advance(0.4)
     application._main_controller._cancel_button.performClick_(None)
     assert not application.recorder.is_recording and not application.hotkey_listener.is_active
@@ -212,7 +219,7 @@ try:
             if command in {"capture", "toggle"}:
                 application._show_main_window(None)
                 application._main_controller._record_button.performClick_(None)
-                assert application.recorder.is_recording and application.hotkey_listener.is_active
+                wait_for_recording()
                 advance(0.3)
                 subprocess.run(["afplay", str(root / "work/audio-validation/english.wav")], check=True)
                 advance(0.5)

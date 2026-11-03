@@ -37,9 +37,6 @@ def ensure_sounddevice_data_dir(package_module, data_getter=None, extract_root: 
 
 
 def prepare_sounddevice_import():
-    """Preload _sounddevice_data onto a real filesystem path when bundled."""
-    try:
-        import _sounddevice_data
-    except Exception:
-        return ""
+    import _sounddevice_data
+
     return ensure_sounddevice_data_dir(_sounddevice_data)

@@ -6,6 +6,7 @@ from Foundation import NSObject, NSMakeRect
 
 from .i18n import t
 from .diagnostics import run_readiness_checks, render_diagnostics_text
+from .design import apply_window, style_button
 
 _diagnostics_workers = set()
 _diagnostics_worker_lock = threading.Lock()
@@ -167,6 +168,7 @@ class DiagnosticsWindowController:
         )
         self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(t("diag_window_title"))
+        apply_window(self.window)
         self.window.center()
         self.window.setLevel_(AppKit.NSFloatingWindowLevel)
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
@@ -222,6 +224,7 @@ class DiagnosticsWindowController:
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)
         button.setTarget_(self._delegate)
         button.setAction_(action)
+        style_button(button)
         view.addSubview_(button)
         return button
 

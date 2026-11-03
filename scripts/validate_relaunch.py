@@ -36,10 +36,12 @@ if args.verify_after:
                if app.executableURL() and str(app.executableURL().path()) == expected]
     assert len(running) == 1, [int(app.processIdentifier()) for app in running]
     config = load_config()
-    assert config["ui_language"] == "en" and config["last_seen_version"] == "3.0.0"
+    from speaktype import __version__
+
+    assert config["ui_language"] == "en" and config["last_seen_version"] == __version__
     assert not config["permission_restart_pending_after_refresh"]
     log = (CONFIG_DIR / "speaktype.log").read_text(encoding="utf-8")
-    assert "Starting SpeakType v3.0.0" in log and "ASR engine loaded" in log
+    assert f"Starting SpeakType v{__version__}" in log and "ASR engine loaded" in log
     assert "Hotkey backend active: nsevent" in log
     assert args.report.with_suffix(".fault.log").stat().st_size == 0, "The original process reported a native failure"
     report.update(new_pid=int(running[0].processIdentifier()), original_process_exited=True,

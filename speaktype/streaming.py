@@ -118,11 +118,7 @@ class StreamingTranscriber:
 
     def _stream_loop(self, language: str, hotword_context: str = ""):
         """Background loop that runs partial transcriptions periodically."""
-        try:
-            import numpy as np  # local import; avoids module-load cost on cold paths
-        except Exception as e:
-            logger.error(f"numpy import failed in streaming loop: {e}")
-            return
+        import numpy as np
 
         if not getattr(self._asr, "_loaded", False):
             logger.debug("Streaming aborted: ASR engine not loaded")
@@ -195,12 +191,9 @@ class StreamingTranscriber:
         if language and language != "auto":
             kwargs["language"] = language
         if hotword_context:
-            try:
-                from .asr import _call_accepts_keyword
-                if _call_accepts_keyword(model.stream_transcribe, "context"):
-                    kwargs["context"] = hotword_context
-            except Exception:
-                pass
+            from .asr import hotword_generation_kwargs
+
+            kwargs.update(hotword_generation_kwargs(model, hotword_context, method="stream_transcribe"))
 
         if not self._acquire_preview_slot():
             return
@@ -234,32 +227,27 @@ class StreamingTranscriber:
             )
             return
 
-        try:
-            from mlx_audio.stt.generate import generate_transcription
-            from .asr import _call_accepts_keyword, _cleanup_transcript_outputs, _make_temp_transcript_output_path
-        except Exception as e:
-            logger.debug(f"mlx_audio not available for chunked streaming: {e}")
-            return
+        from mlx_audio.stt.generate import generate_transcription
+        from .asr import hotword_generation_kwargs, _cleanup_transcript_outputs, _make_temp_transcript_output_path
 
-        if not self._acquire_preview_slot():
-            return
-
-        output_path = _make_temp_transcript_output_path()
         kwargs = {
             "model": self._asr.model,
             "audio": audio_data,
-            "output_path": output_path,
             "verbose": False,
         }
         if language and language != "auto":
             kwargs["language"] = language
-        if hotword_context and _call_accepts_keyword(generate_transcription, "context"):
-            kwargs["context"] = hotword_context
-
+        kwargs.update(hotword_generation_kwargs(self._asr.model, hotword_context))
+        if not self._acquire_preview_slot():
+            return
+        output_path = None
         try:
+            output_path = _make_temp_transcript_output_path()
+            kwargs["output_path"] = output_path
             result = generate_transcription(**kwargs)
         finally:
-            _cleanup_transcript_outputs(output_path)
+            if output_path is not None:
+                _cleanup_transcript_outputs(output_path)
             self._release_preview_slot()
         text = _extract_text(result)
         if text:

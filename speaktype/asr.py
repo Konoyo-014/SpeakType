@@ -1,5 +1,3 @@
-"""ASR engine with Qwen3-ASR (mlx-audio) and Whisper compatibility."""
-
 import os
 import logging
 import tempfile
@@ -45,6 +43,19 @@ def _call_accepts_keyword(func, keyword: str) -> bool:
     if keyword in signature.parameters:
         return True
     return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+
+
+def hotword_generation_kwargs(model, context: str, method: str = "generate") -> dict:
+    if not context:
+        return {}
+    parameters = inspect.signature(getattr(model, method)).parameters
+    for keyword in ("system_prompt", "context"):
+        parameter = parameters.get(keyword)
+        if parameter is not None and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return {keyword: context}
+    raise RuntimeError(f"The ASR model's {method} method does not support hotword context")
 
 
 class ASREngine:
@@ -251,8 +262,7 @@ class ASREngine:
         }
         if language and language != "auto":
             kwargs["language"] = language
-        if hotword_context and _call_accepts_keyword(generate_transcription, "context"):
-            kwargs["context"] = hotword_context
+        kwargs.update(hotword_generation_kwargs(self.model, hotword_context))
 
         try:
             result = generate_transcription(**kwargs)

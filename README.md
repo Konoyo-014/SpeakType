@@ -97,7 +97,11 @@ To edit a selection, select the text and dictate a complete command such as `mak
 
 **Adaptive Hotwords** learns reusable terms from immediate edits to text inserted by SpeakType. It observes the recently inserted span in the focused field for a short period. App changes end observation; password fields, unreadable inputs, unrelated typing, and simple appended text are excluded. The local Ollama model proposes terminology, and validation checks each proposal against the edited text before saving it in `~/.speaktype/hotwords.json`.
 
-Later dictations receive a compact set of relevant terms selected by app, scene, language, confidence, and recent use. Qwen3-ASR receives this context when its installed API supports it; local polishing and translation also receive the terms. Open **Adaptive Hotwords** to inspect learned terms and their active state.
+Open **Vocabulary** in the main window to manage names, products, acronyms and technical terms. Each entry has a preferred spelling, up to eight common misspellings, and optional application and context limits. Search, edit, pause or delete entries, and review learned candidates separately. JSON import and export preserve enabled, paused and pending states; imports validate every entry before writing the collection.
+
+Each dictation selects a bounded set of applicable terms, prioritizes manual entries, and sends a `Vocabulary` prompt through Qwen3-ASR's actual model input. The existing custom dictionary also supplies recognition hints. Explicit misspellings are corrected locally after recognition, with exact preferred casing, longer phrases first, English boundaries next to Chinese text, and a single replacement pass. Paused entries remain paused when new learning arrives.
+
+The main window retains the original recognition, selected hints and applied corrections. Select a term in the final text and choose **Remember this word** to save its spelling and common misspelling. **Test your correction rules** checks replacement behavior on typed text; new dictations check recognition behavior. Unsaved vocabulary drafts survive navigation and closing the vocabulary window during the current session. Quitting offers a return to the unsaved drafts.
 
 Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phrases that expand into saved text. Corrections preserve literal backslashes in replacement text and apply longer matching terms first. Snippets support `{date}`, `{time}`, `{datetime}`, `{clipboard}`, and `{env:NAME}`. Clipboard and environment placeholders expand only for exact trigger matches.
 
@@ -110,7 +114,17 @@ Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phra
 - **Local Diagnostics** checks input permissions, microphones, model availability, Ollama, hotwords, and focused-input readiness. It provides commands and local repair steps.
 - **Preferences** includes Chinese and English UI choices, push-to-talk or toggle recording, microphone selection, and a six-minute default recording limit.
 
-## What's new in v3.0.0
+## What's new in v3.0.1
+
+- A compact native dictation window with a macOS material background, a system toolbar, an editable writing area, expandable original transcription and concise readiness information. Its colors follow the system appearance.
+- A complete vocabulary editor with search, status filters, editing, pause/delete controls, app and context limits, JSON import/export and text replacement checks.
+- Actual Qwen3-ASR `system_prompt` support and the `Vocabulary` prompt format shared by recognition and live preview, including the existing custom dictionary.
+- Local misspelling corrections with longer-phrase priority, Chinese/English boundaries, contraction protection and an independent switch for learned corrections.
+- Direct vocabulary capture from selected final text, and per-record recognition hints and correction details that survive history reloads and manual edits.
+
+See the [v3.0.1 release notes](docs/releases/v3.0.1.md) for behavior, research sources and validation scope.
+
+## Features introduced in v3.0.0
 
 - A native main window with recording controls, readiness checks, original and editable final text, target-app selection, local polish/translation, recent records, and keyboard shortcuts.
 - A single setup window for permissions, complete ASR downloads and repair, Ollama installation/startup, installed-model selection, actual progress, cancellation, and retry.
@@ -203,7 +217,7 @@ PYTHONPATH=. ./venv/bin/python scripts/validate_history_ui.py
 ./build_dmg.sh
 ```
 
-Install `requirements-build.txt` in the build environment. `SPEAKTYPE_PYTHON` selects an absolute path to a Python 3.10 interpreter built for macOS 14 or earlier, with a shared zlib extension. The release uses conda-forge Python 3.10.19 and the official macOS 14 MLX wheels pinned in `requirements-build.txt`. The build checks the interpreter before packaging. Builds write intermediate files and complete logs under `work/`, produce `dist/SpeakType.app` and `dist/SpeakType-3.0.0.dmg`, apply ad hoc code signing, verify strict bundle signatures, and execute embedded-runtime dependency checks. The DMG includes an Applications shortcut for installation.
+Install `requirements-build.txt` in the build environment. `SPEAKTYPE_PYTHON` selects an absolute path to a Python 3.10 interpreter built for macOS 14 or earlier, with a shared zlib extension. The release uses conda-forge Python 3.10.19 and the official macOS 14 MLX wheels pinned in `requirements-build.txt`. The build checks the interpreter before packaging. Builds write intermediate files and complete logs under `work/`, produce `dist/SpeakType.app` and `dist/SpeakType-3.0.1.dmg`, apply ad hoc code signing, verify strict bundle signatures, and execute embedded-runtime dependency checks. The DMG includes an Applications shortcut for installation.
 
 ### Python plugins
 

@@ -27,6 +27,13 @@ def advance():
     NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
 
 
+def show_recent(controller):
+    controller._navigation_control.setSelectedSegment_(2)
+    controller._navigation_control.sendAction_to_(controller._navigation_control.action(), controller._navigation_control.target())
+    advance()
+    assert controller._recent_popover.isShown()
+
+
 save_config({**DEFAULT_CONFIG, "setup_completed": True, "polish_enabled": False,
              "translate_enabled": False, "sound_feedback": False,
              "hotword_learning_enabled": False, "hotword_context_enabled": False})
@@ -80,7 +87,8 @@ try:
     controller.show()
     advance()
     assert controller.window.isVisible()
-    assert controller.window.contentView().frame().size == NSMakeSize(1000, 720)
+    assert controller.window.contentView().frame().size == NSMakeSize(controller.WIDTH, controller.HEIGHT)
+    assert controller.window.toolbar() is not None
     assert controller._record_button.isEnabled()
     assert not controller._cancel_button.isEnabled()
     assert not controller._copy_button.isEnabled()
@@ -91,9 +99,17 @@ try:
     assert not controller._raw_placeholder.isHidden() and not controller._final_placeholder.isHidden()
     assert controller._target_picker.numberOfItems() == len(targets) + 1
     assert controller._translation_picker.numberOfItems() == len(TRANSLATION_LANGUAGES)
-    assert all(card["status"].stringValue() for card in controller._readiness_cards.values())
-    report["checks"].append("Native window, empty text, five readiness items, actual running target applications")
+    assert {item["key"] for item in controller._readiness_details} == {"microphone", "asr", "llm", "accessibility", "hotkey"}
+    assert controller._readiness_summary.stringValue() == "听写已就绪"
+    assert all(item["detail"] in controller._readiness_summary.toolTip() for item in controller._readiness_details)
+    assert controller._raw_scroll.isHidden() and not controller._raw_expanded
+    controller._setup_button.performClick_(None)
+    advance()
+    assert application._setup_center.window.isVisible()
+    application._setup_center.close()
+    report["checks"].append("Native window, empty text, actual five-item readiness tooltip and setup entry, collapsed source text, running target applications")
 
+    show_recent(controller)
     controller._recent_table.selectRowIndexes_byExtendingSelection_(NSIndexSet.indexSetWithIndex_(0), False)
     advance()
     selected_id = controller._recent[0]["id"]
@@ -124,7 +140,6 @@ try:
     assert next(item for item in application.history.snapshot() if item["id"] == selected_id)["polished"] == selected["polished"]
     controller.update_state({**controller._snapshot, "level": 0.63, "elapsed": 65.5})
     assert controller.get_final_text() == edited
-    assert controller._level.doubleValue() == 63
     assert "01:05" in controller._elapsed_label.stringValue()
     assert controller._copy_button.isEnabled()
     NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.5))
@@ -150,12 +165,14 @@ try:
     assert next(item for item in json.loads(application.history.path.read_text(encoding="utf-8")) if item["id"] == selected_id)["polished"] == edited
     controller._final_view.insertText_replacementRange_("\n切换记录之前的编辑。", controller._final_view.selectedRange())
     edited = controller.get_final_text()
+    show_recent(controller)
     controller._recent_table.selectRowIndexes_byExtendingSelection_(NSIndexSet.indexSetWithIndex_(1), False)
     advance()
     assert controller._pending_edit is None
     assert next(item for item in application.history.snapshot() if item["id"] == selected_id)["polished"] == edited
     assert application._latest_dictation["id"] == first_id
     assert controller._recent_table.selectedRow() == 1
+    show_recent(controller)
     controller._recent_table.selectRowIndexes_byExtendingSelection_(NSIndexSet.indexSetWithIndex_(0), False)
     advance()
     assert controller.get_final_text() == edited
@@ -194,6 +211,7 @@ try:
     for phase in sorted(PHASES):
         busy = phase in {"loading", "transcribing", "polishing", "translating", "delivering"}
         controller.update_state({**baseline, "phase": phase, "busy": busy,
+                                 "level": 0.63,
                                  "partial": "真正显示在原生控件中的状态验证文本" if phase == "recording" else ""})
         blocked = busy or phase == "recording"
         assert bool(controller._record_button.isEnabled()) == (phase == "recording" or not busy), phase
@@ -207,6 +225,12 @@ try:
         assert bool(controller._target_picker.isEnabled()) == (not blocked), phase
         assert bool(controller._translation_picker.isEnabled()) == (not blocked), phase
         assert controller._raw_view.string() == ("真正显示在原生控件中的状态验证文本" if phase == "recording" else selected["raw"]), phase
+        assert bool(controller._live_scroll.isHidden()) == (phase != "recording"), phase
+        assert bool(controller._final_scroll.isHidden()) == (phase == "recording"), phase
+        if phase == "recording":
+            assert controller._live_view.string() == "真正显示在原生控件中的状态验证文本"
+            assert controller._indicator._state == "recording"
+            assert controller._indicator._waveform._level == 0.63
         assert controller.get_final_text() == edited, phase
         assert controller._phase_label.stringValue() == LABELS["zh"][phase]
         report["phases"].append(phase)
@@ -227,10 +251,19 @@ try:
     long_text = "\n".join(f"第 {index} 行：真实 NSTextView 中的 Unicode 🙂 文本。" for index in range(1, 81))
     controller.update_state({**baseline, "phase": "done", "raw": long_text, "final": long_text})
     advance()
+    original_collapsed_height = controller._final_scroll.frame().size.height
+    controller._raw_disclosure.performClick_(None)
+    advance()
+    assert controller._raw_expanded and not controller._raw_scroll.isHidden()
+    assert controller._final_scroll.frame().size.height == original_collapsed_height - 96
     controller._raw_view.layoutManager().ensureLayoutForTextContainer_(controller._raw_view.textContainer())
     controller._final_view.layoutManager().ensureLayoutForTextContainer_(controller._final_view.textContainer())
     assert controller._raw_view.layoutManager().usedRectForTextContainer_(controller._raw_view.textContainer()).size.height > controller._raw_scroll.contentSize().height
     assert controller._final_view.layoutManager().usedRectForTextContainer_(controller._final_view.textContainer()).size.height > controller._final_scroll.contentSize().height
+    controller._raw_disclosure.performClick_(None)
+    advance()
+    assert controller._raw_scroll.isHidden() and not controller._raw_expanded
+    assert controller._final_scroll.frame().size.height == original_collapsed_height
     original_width = controller._final_view.frame().size.width
     original_height = controller._final_scroll.frame().size.height
     original_content_height = controller.window.contentView().frame().size.height
@@ -242,9 +275,19 @@ try:
     report["resize"] = {"requested": [1240, 900], "actual": [actual_size.width, actual_size.height],
                         "screen_visible_height": controller.window.screen().visibleFrame().size.height}
     assert controller.get_final_text() == long_text
-    controller.window.setContentSize_(NSMakeSize(1000, 720))
+    controller.window.setContentSize_(NSMakeSize(controller.WIDTH, controller.HEIGHT))
     controller.update_state({**baseline, "phase": "done"})
     advance()
+    controller.update_state({**baseline, "phase": "done", "hotword_count": 2,
+                             "hotword_terms": ["Qwen3-ASR", "SpeakType"], "hotword_changes": []})
+    assert "Qwen3-ASR" in controller._hotword_summary.stringValue()
+    assert "SpeakType" in controller._hotword_summary.stringValue()
+    controller.update_state({**baseline, "phase": "done", "hotword_count": 2,
+                             "hotword_terms": ["Qwen3-ASR"],
+                             "hotword_changes": [{"original": "千问", "replacement": "Qwen3-ASR", "term": "Qwen3-ASR"}]})
+    assert "本次已修正" in controller._hotword_summary.stringValue()
+    assert "Qwen3-ASR" in controller._hotword_summary.toolTip()
+    report["checks"].append("Native vocabulary summary displays selected terms and per-dictation spelling changes")
     identity = controller.window.windowNumber()
     controller._final_view.insertText_replacementRange_("\n关闭之前的编辑。", controller._final_view.selectedRange())
     closed_text = controller.get_final_text()
@@ -261,6 +304,7 @@ try:
     assert controller._final_view.accessibilityLabel() == "最终文本"
     report["checks"].append("Long raw/final scrolling, window resizing, close/reopen reuse, keyboard equivalents and accessibility labels")
 
+    show_recent(controller)
     controller._history_button.performClick_(None)
     advance()
     assert application._history_controller.window.isVisible()
@@ -269,7 +313,7 @@ try:
     advance()
     assert application._settings_controller.window.isVisible()
     application._settings_controller._do_cancel()
-    controller._dictionary_button.performClick_(None)
+    controller._more_button.menu().performActionForItemAtIndex_(1)
     advance()
     assert application._dict_controller.window.isVisible()
     application._dict_controller.window.close()
