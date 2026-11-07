@@ -2287,7 +2287,7 @@ class SpeakTypeApp(rumps.App):
                 logger.info(f"Snippet matched: {raw_text} -> {snippet_text[:40]}")
                 entry = self._retain_dictation(original_transcription, snippet_text, app_info, duration,
                                                operation_id=operation_id, hotword_changes=hotword_changes,
-                                               hotword_terms=active_hotwords.terms)
+                                               hotword_terms=active_hotwords.terms, vocabulary_text=corrected.text)
                 if entry is None:
                     return
                 if not insert_result:
@@ -2355,7 +2355,7 @@ class SpeakTypeApp(rumps.App):
             combined_llm_path = self.config["polish_enabled"] and self.config.get("translate_enabled", False) and not self.config.get("plugins_enabled")
             entry = self._retain_dictation(original_transcription, text, app_info, duration,
                                            operation_id=operation_id, hotword_changes=hotword_changes,
-                                           hotword_terms=active_hotwords.terms)
+                                           hotword_terms=active_hotwords.terms, vocabulary_text=corrected.text)
             if entry is None:
                 return
 
@@ -2535,7 +2535,7 @@ class SpeakTypeApp(rumps.App):
                 Path(recording_path).unlink(missing_ok=True)
 
     def _retain_dictation(self, raw_text, final_text, app_info, duration=0, *, operation_id=None,
-                          hotword_changes=None, hotword_terms=None):
+                          hotword_changes=None, hotword_terms=None, vocabulary_text=None):
         with self._operation_lock:
             if operation_id is not None and not self._operation_current(operation_id):
                 return None
@@ -2551,6 +2551,10 @@ class SpeakTypeApp(rumps.App):
                     raw_text=raw_text, polished_text=final_text,
                     app_name=app_info.get("name", ""), duration_sec=duration, outcome="pending",
                     hotword_changes=entry["hotword_changes"], hotword_terms=hotword_terms)
+            if vocabulary_text is not None and self.config.get("hotword_context_enabled", True):
+                self.hotwords.record_usage(
+                    vocabulary_text, app_info=app_info, scene=get_scene_for_app(app_info),
+                    language=self.config.get("language", "auto"), dictionary=load_custom_dictionary())
             return entry
 
     def _commit_dictation_text(self, entry, text, operation_id, *, outcome=None, status=None, show_done=False):
@@ -2971,7 +2975,8 @@ class SpeakTypeApp(rumps.App):
         if getattr(self, "_hotwords_controller", None) is None:
             self._hotwords_controller = HotwordsWindowController(
                 self.hotwords, on_change=self._vocabulary_changed,
-                on_test=self._apply_vocabulary_corrections, test_status=self._vocabulary_test_status)
+                on_test=self._apply_vocabulary_corrections, test_status=self._vocabulary_test_status,
+                on_context=lambda app_info, scene: self._hotword_context_for_app(app_info, scene_id=scene))
         self._hotwords_controller.show()
 
     def _check_updates(self, _):

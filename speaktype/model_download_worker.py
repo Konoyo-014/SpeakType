@@ -16,7 +16,7 @@ os.environ["HF_HUB_DISABLE_XET"] = "1"
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.utils.tqdm import tqdm
 
-from speaktype.model_download import get_cached_model_path, model_snapshot_is_complete
+from speaktype.model_download import download_error_message, get_cached_model_path, model_snapshot_is_complete
 
 
 def emit(state: str, completed: int, total: int, message: str, **values):
@@ -108,16 +108,7 @@ def main():
     try:
         download(args.model, force=args.force)
     except Exception as error:
-        messages = []
-        visited = set()
-        cause = error
-        while cause is not None and id(cause) not in visited:
-            visited.add(id(cause))
-            message = str(cause)
-            if message and message not in messages:
-                messages.append(message)
-            cause = cause.__cause__
-        emit("error", 0, 0, "\n".join(messages))
+        emit("error", 0, 0, download_error_message(error))
         raise
 
 

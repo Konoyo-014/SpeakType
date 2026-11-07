@@ -10,7 +10,7 @@ if not bundle:
     sys.path.insert(0, str(root))
 
 import AppKit
-from Foundation import NSDate, NSRunLoop
+from Foundation import NSDate, NSMakeSize, NSRunLoop
 
 from speaktype.app import SpeakTypeApp
 from speaktype.config import CONFIG_DIR, DEFAULT_CONFIG, save_config
@@ -132,13 +132,24 @@ controller._raw_disclosure.performClick_(None)
 advance()
 assert not controller._raw_expanded and controller._raw_scroll.isHidden()
 assert controller._final_scroll.frame().size.height == height
-controller._navigation_control.setSelectedSegment_(1)
-controller._navigation_control.sendAction_to_(controller._navigation_control.action(), controller._navigation_control.target())
+controller._vocabulary_nav.performClick_(None)
 advance()
 assert application._hotwords_controller.window.isVisible()
 application._hotwords_controller.window.close()
 controller.window.makeKeyAndOrderFront_(None)
 zh_render = render("studio-v301-zh.png")
+controller.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameDarkAqua))
+dark_render = render("studio-v301-zh-dark.png")
+controller.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua))
+controller.window.setContentSize_(NSMakeSize(controller.MIN_WIDTH, controller.MIN_HEIGHT))
+advance()
+controller._raw_disclosure.performClick_(None)
+advance()
+assert controller._final_scroll.frame().size.height >= 150
+assert controller._editor_material.frame().origin.x >= 0
+assert controller._editor_material.frame().origin.x + controller._editor_material.frame().size.width <= controller._workspace.bounds().size.width
+assert controller._insert_button.frame().origin.x + controller._insert_button.frame().size.width <= controller._footer.bounds().size.width
+compact_render = render("studio-v301-compact.png")
 controller.dispose()
 application._main_controller = None
 application.config["ui_language"] = "en"
@@ -147,7 +158,7 @@ application._show_main_window()
 controller = application._main_controller
 wait_for_models()
 assert controller._learn_button.title() == "Remember this word"
-assert controller._navigation_control.labelForSegment_(1) == "Vocabulary"
+assert controller._vocabulary_nav.title() == "Vocabulary"
 assert controller._final_view.accessibilityLabel() == "Final text"
 en_render = render("studio-v301-en.png")
 controller.dispose()
@@ -162,8 +173,9 @@ report = {"runtime": bundle or "source", "checks": ["Real app callback saved pre
                      "Clearing selection disables vocabulary action",
                      "Actual vocabulary window opens from studio navigation",
                      "Per-dictation vocabulary changes are visible",
-                     "Chinese and English native view rendering"],
-          "renders": [empty_render, zh_render, en_render], "config": str(CONFIG_DIR)}
+                     "Chinese and English native view rendering",
+                     "Dark appearance and minimum window size with expanded original transcription"],
+          "renders": [empty_render, zh_render, en_render, dark_render, compact_render], "config": str(CONFIG_DIR)}
 destination = root / "work" / "studio-v301-report.json"
 destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"REPORT {destination}")

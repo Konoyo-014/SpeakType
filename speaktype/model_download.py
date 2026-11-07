@@ -1,12 +1,64 @@
-"""Model download with progress tracking for SpeakType."""
-
 import logging
 import json
 from pathlib import Path
+import socket
+import ssl
+
+import httpx2
 from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.errors import DryRunError, HfHubHTTPError, OfflineModeIsEnabled
 from safetensors import safe_open
 
 logger = logging.getLogger("speaktype.model_download")
+
+
+def download_error_message(error: Exception) -> str:
+    causes = []
+    visited = set()
+    cause = error
+    while cause is not None and id(cause) not in visited:
+        visited.add(id(cause))
+        causes.append(cause)
+        cause = cause.__cause__ if cause.__cause__ is not None else cause.__context__
+
+    status = next((cause.response.status_code for cause in causes
+                   if isinstance(cause, (httpx2.HTTPStatusError, HfHubHTTPError))
+                   and cause.response is not None), None)
+    if any(isinstance(cause, OfflineModeIsEnabled) for cause in causes):
+        guidance = "模型下载处于离线模式。请关闭 Hugging Face 离线模式后重试。"
+    elif any(isinstance(cause, ssl.SSLCertVerificationError) for cause in causes):
+        guidance = "无法验证模型下载服务的安全证书。请检查系统时间、系统证书和网络代理设置后重试。"
+    elif any(isinstance(cause, socket.gaierror) for cause in causes):
+        guidance = "无法解析模型下载服务的网络地址。请检查网络连接、DNS 或系统代理设置后重试。"
+    elif any(isinstance(cause, httpx2.ConnectTimeout) for cause in causes):
+        guidance = "连接模型下载服务超时。请检查网络连接或系统代理设置后重试。"
+    elif any(isinstance(cause, httpx2.ReadTimeout) for cause in causes):
+        guidance = "等待模型下载数据超时。已下载的缓存仍然保留，请检查网络连接后重试。"
+    elif any(isinstance(cause, (httpx2.TimeoutException, TimeoutError)) for cause in causes):
+        guidance = "模型下载连接超时。请检查网络连接后重试。"
+    elif any(isinstance(cause, httpx2.ProxyError) for cause in causes):
+        guidance = "无法通过网络代理连接模型下载服务。请检查系统代理是否正常运行后重试。"
+    elif any(isinstance(cause, (httpx2.ConnectError, ConnectionError)) for cause in causes):
+        guidance = "无法连接模型下载服务。请检查网络连接或系统代理设置后重试。"
+    elif status == 404:
+        guidance = "模型下载服务找不到所需模型或文件（HTTP 404）。请检查模型名称和下载地址后重试。"
+    elif status in (401, 403):
+        guidance = f"模型下载服务拒绝了访问（HTTP {status}）。请检查模型访问权限和网络访问限制后重试。"
+    elif status == 429:
+        guidance = "模型下载服务限制了请求频率（HTTP 429）。请稍后重试。"
+    elif status is not None and status >= 500:
+        guidance = f"模型下载服务返回错误（HTTP {status}）。已下载的缓存仍然保留，请检查下载地址或稍后重试。"
+    else:
+        guidance = "模型下载失败。请根据详细原因处理后重试。"
+
+    messages = []
+    for cause in causes:
+        if isinstance(cause, DryRunError) and len(causes) > 1:
+            continue
+        message = str(cause).strip() or type(cause).__name__
+        if message not in messages:
+            messages.append(message)
+    return guidance + "\n\n详细原因：\n" + "\n".join(messages)
 
 
 def format_progress_status(done_bytes: float, total_bytes: float) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import csv
 import json
 import math
 from pathlib import Path
@@ -11,17 +12,24 @@ import AppKit
 import objc
 from Foundation import NSObject, NSIndexSet, NSMakeRect, NSMakeSize
 
-from .config import ensure_config_dir, load_custom_dictionary
+from .config import ensure_config_dir, load_config, load_custom_dictionary
+from .design import apply_window, color, style_button, style_panel, symbol
 from .hotwords import (
-    HotwordStore, MAX_ALIASES_PER_TERM, MAX_ALIAS_CHARS, MAX_TERM_CHARS,
+    ActiveHotwordContext, HotwordStore, MAX_ALIASES_PER_TERM, MAX_ALIAS_CHARS, MAX_TERM_CHARS,
     _entry_applies, _match_key, _replacement_pattern,
 )
 from .i18n import get_language, t
 
 
 FILTERS = ("all", "active", "pending", "disabled")
+VIEW_FILTERS = (*FILTERS, "pinned")
 SCENES = ("", "email", "chat", "code", "notes", "default")
 EXPORT_SCHEMA = "speaktype.hotwords"
+CSV_FIELDS = ("term", "aliases", "enabled", "scope_app", "scope_scene", "pinned", "state", "confidence",
+              "observations", "source", "user_confirmed", "approved_aliases", "alias_confidences",
+              "usage_count", "last_used_at", "usage_apps")
+CSV_JSON_FIELDS = {"aliases", "approved_aliases", "alias_confidences", "usage_apps", "enabled", "pinned",
+                   "user_confirmed", "confidence", "observations", "usage_count"}
 
 
 def _w(zh, en):
@@ -42,8 +50,8 @@ def _top_counter_keys(mapping: dict, limit: int = 2) -> str:
     return ", ".join(str(key) for key, _ in pairs[:limit] if key)
 
 
-def hotword_window_rows(entries: list[dict], query: str = "", filter_id: str = "all") -> list[dict]:
-    if filter_id not in FILTERS:
+def hotword_window_rows(entries: list[dict], query: str = "", filter_id: str = "all", sort_by: str = "priority") -> list[dict]:
+    if filter_id not in VIEW_FILTERS:
         raise ValueError(f"Unknown hotword filter: {filter_id}")
     query = query.strip().casefold()
     rows = []
@@ -51,7 +59,9 @@ def hotword_window_rows(entries: list[dict], query: str = "", filter_id: str = "
         active = bool(entry.get("active"))
         disabled = bool(entry.get("user_disabled"))
         state = "active" if active else "disabled" if disabled else "pending"
-        if filter_id != "all" and state != filter_id:
+        if filter_id == "pinned" and not entry.get("pinned"):
+            continue
+        if filter_id not in ("all", "pinned") and state != filter_id:
             continue
         searchable = " ".join([entry["term"], *entry.get("aliases", []),
                                entry.get("scope_app", ""), entry.get("scope_scene", "")]).casefold()
@@ -66,7 +76,14 @@ def hotword_window_rows(entries: list[dict], query: str = "", filter_id: str = "
             "aliases": ", ".join(entry.get("aliases", [])),
             "apps": _top_counter_keys(entry.get("apps", {})),
         })
-    return sorted(rows, key=lambda row: (FILTERS.index(row["state"]), -row["observations"], row["term"].casefold()))
+    if sort_by == "name":
+        return sorted(rows, key=lambda row: row["term"].casefold())
+    if sort_by == "usage":
+        return sorted(rows, key=lambda row: (-int(row.get("usage_count", 0)), row["term"].casefold()))
+    if sort_by != "priority":
+        raise ValueError(f"Unknown vocabulary sort: {sort_by}")
+    return sorted(rows, key=lambda row: (FILTERS.index(row["state"]), not row.get("pinned", False),
+                                        -int(row.get("usage_count", 0)), -row["observations"], row["term"].casefold()))
 
 
 def active_hotword_context_text(entries: list[dict]) -> str:
@@ -118,10 +135,10 @@ def validate_hotword_import(payload) -> list[dict]:
     if payload["schema"] != EXPORT_SCHEMA or type(payload["version"]) is not int or payload["version"] != 1:
         raise ValueError(_w("文件格式应为 speaktype.hotwords，版本应为 1。", "Expected schema speaktype.hotwords, version 1."))
     entries = payload["entries"]
-    if not isinstance(entries, list) or len(entries) > 1000:
-        raise ValueError(_w("entries 应为数组，最多包含 1000 条词语。", "entries must be an array with at most 1,000 words."))
+    if not isinstance(entries, list):
+        raise ValueError(_w("entries 应为数组。", "entries must be an array."))
     allowed = {"term", "aliases", "enabled", "scope_app", "scope_scene", "state", "confidence", "observations", "source", "user_confirmed",
-               "approved_aliases", "alias_confidences"}
+               "approved_aliases", "alias_confidences", "pinned", "usage_count", "last_used_at", "usage_apps"}
     seen = set()
     validated = []
     for index, entry in enumerate(entries, 1):
@@ -158,6 +175,26 @@ def validate_hotword_import(payload) -> list[dict]:
         if scope_scene not in SCENES:
             raise ValueError(prefix + _w("场景需要留空或使用 email、chat、code、notes、default。", "scope_scene must be empty or email, chat, code, notes, default."))
         metadata = {}
+        if "pinned" in entry:
+            if not isinstance(entry["pinned"], bool):
+                raise ValueError(prefix + _w("pinned 需要为 true 或 false。", "pinned must be true or false."))
+            metadata["pinned"] = entry["pinned"]
+        if "usage_count" in entry:
+            if type(entry["usage_count"]) is not int or entry["usage_count"] < 0:
+                raise ValueError(prefix + _w("usage_count 需要为非负整数。", "usage_count must be a nonnegative integer."))
+            metadata["usage_count"] = entry["usage_count"]
+        if "last_used_at" in entry:
+            value = entry["last_used_at"]
+            if not isinstance(value, str):
+                raise ValueError(prefix + _w("last_used_at 需要为日期文字或空值。", "last_used_at must be a date string or empty."))
+            if value:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            metadata["last_used_at"] = value
+        if "usage_apps" in entry:
+            values = entry["usage_apps"]
+            if not isinstance(values, dict) or any(not isinstance(key, str) or type(count) is not int or count < 0 for key, count in values.items()):
+                raise ValueError(prefix + _w("usage_apps 需要使用应用名称和非负整数。", "usage_apps must map app names to nonnegative integers."))
+            metadata["usage_apps"] = dict(values)
         alias_names = {alias.strip() for alias in aliases}
         if "approved_aliases" in entry:
             approved = entry["approved_aliases"]
@@ -207,12 +244,37 @@ def hotword_export_payload(entries: list[dict]) -> dict:
         {"term": entry["term"], "aliases": list(entry.get("aliases", [])), "enabled": bool(entry.get("active")),
          "state": "active" if entry.get("active") else "disabled" if entry.get("user_disabled") else "pending",
          "scope_app": entry.get("scope_app", ""), "scope_scene": entry.get("scope_scene", ""),
+         "pinned": bool(entry.get("pinned", False)), "usage_count": int(entry.get("usage_count", 0)),
+         "last_used_at": entry.get("last_used_at", ""),
+         "usage_apps": dict(entry.get("usage_apps", {})),
          "source": "manual" if entry.get("source") == "dictionary" else entry.get("source", "post_edit"), "confidence": entry.get("confidence", 0.5),
          "observations": entry.get("observations", 0), "user_confirmed": entry.get("user_confirmed", False),
          "approved_aliases": list(entry.get("approved_aliases", entry.get("aliases", []) if entry.get("source") == "manual" or entry.get("user_confirmed") else [])),
          "alias_confidences": dict(entry.get("alias_confidences", {alias: entry.get("confidence", 0.5) for alias in entry.get("aliases", [])}))}
         for entry in entries
     ]}
+
+
+def read_vocabulary_csv(source, *, existing_terms=()):
+    reader = csv.DictReader(source, strict=True)
+    fields = reader.fieldnames
+    if not fields or "term" not in fields or set(fields) - set(CSV_FIELDS) or len(fields) != len(set(fields)):
+        raise ValueError(_w("CSV 需要 term 列，其他列请使用 SpeakType 导出的列名。", "CSV needs a term column. Use SpeakType export column names for optional fields."))
+    entries = []
+    for row_number, row in enumerate(reader, 2):
+        if None in row or any(value is None for value in row.values()):
+            raise ValueError(_w(f"CSV 第 {row_number} 行的列数与标题不同。", f"CSV row {row_number} has a different number of columns than its header."))
+        entry = {}
+        for key, value in row.items():
+            if not value and key != "term":
+                continue
+            entry[key] = json.loads(value) if key in CSV_JSON_FIELDS else value
+        entries.append(entry)
+    validated = validate_hotword_import({"schema": EXPORT_SCHEMA, "version": 1, "entries": entries})
+    if fields == ["term"]:
+        existing = {" ".join(term.split()).casefold() for term in existing_terms}
+        return [entry for entry in validated if " ".join(entry["term"].split()).casefold() not in existing]
+    return validated
 
 
 def _running_application_names():
@@ -295,7 +357,7 @@ def _conflict_message(conflicts):
 
 class _VocabularyBackgroundView(AppKit.NSView):
     def drawRect_(self, rect):
-        AppKit.NSColor.windowBackgroundColor().setFill()
+        color("background").setFill()
         AppKit.NSRectFill(rect)
 
 
@@ -327,6 +389,9 @@ class _HotwordsDelegate(NSObject):
         self._controller._capture_draft()
 
     def onFilter_(self, sender):
+        self._controller.set_filter(VIEW_FILTERS[sender.tag()])
+
+    def onSort_(self, sender):
         self._controller._render_rows()
 
     def onSelect_(self, sender):
@@ -338,7 +403,9 @@ class _HotwordsDelegate(NSObject):
     def tableView_objectValueForTableColumn_row_(self, table, column, row):
         entry = self._controller._visible_rows[row]
         if column.identifier() == "term":
-            return entry["term"] + (" •" if entry["term"] in self._controller._drafts else "")
+            return ("★  " if entry.get("pinned") else "") + entry["term"] + (" •" if entry["term"] in self._controller._drafts else "")
+        if column.identifier() == "usage":
+            return str(entry.get("usage_count", 0))
         return {"active": _w("已启用", "Enabled"), "pending": _w("待确认", "Review"),
                 "disabled": _w("已停用", "Disabled")}[entry["state"]]
 
@@ -384,18 +451,19 @@ class _HotwordsDelegate(NSObject):
 
 
 class HotwordsWindowController:
-    WIDTH = 840
-    HEIGHT = 650
-    ROW_WIDTH = 236
+    WIDTH = 1120
+    HEIGHT = 760
+    ROW_WIDTH = 282
 
     def __init__(self, hotwords: HotwordStore | None = None, on_change=None, on_test=None, test_status=None,
-                 dictionary_loader=load_custom_dictionary):
+                 dictionary_loader=load_custom_dictionary, on_context=None):
         if not callable(dictionary_loader):
             raise TypeError("dictionary_loader must be callable")
         self.hotwords = hotwords if hotwords is not None else HotwordStore()
         self.on_change = on_change
         self.on_test = on_test
         self.test_status = test_status
+        self.on_context = on_context
         self.dictionary_loader = dictionary_loader
         self.window = None
         self._delegate = None
@@ -409,6 +477,7 @@ class HotwordsWindowController:
         self._form_baseline = None
         self._form_ready = False
         self._updating_table = False
+        self._filter_id = "all"
 
     def show(self):
         if self.window is None:
@@ -467,75 +536,108 @@ class HotwordsWindowController:
         self.window.setReleasedWhenClosed_(False)
         self.window.setTitle_(_w("SpeakType · 热词词典", "SpeakType · Vocabulary"))
         self.window.setTabbingMode_(AppKit.NSWindowTabbingModeDisallowed)
-        self.window.setBackgroundColor_(AppKit.NSColor.windowBackgroundColor())
+        apply_window(self.window)
         self.window.center()
         self._delegate = _HotwordsDelegate.alloc().initWithController_(self)
         self.window.setDelegate_(self._delegate)
         root = _VocabularyBackgroundView.alloc().initWithFrame_(NSMakeRect(0, 0, self.WIDTH, self.HEIGHT))
         self.window.setContentView_(root)
-        self._sidebar = AppKit.NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 260, self.HEIGHT))
-        self._sidebar.setMaterial_(AppKit.NSVisualEffectMaterialSidebar)
-        self._sidebar.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
-        self._sidebar.setState_(AppKit.NSVisualEffectStateActive)
+        self._sidebar = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 190, self.HEIGHT))
+        style_panel(self._sidebar, "sidebar")
         root.addSubview_(self._sidebar)
-        self._separator(root, 260, 0, 1, self.HEIGHT)
-        self._search_field = AppKit.NSSearchField.alloc().initWithFrame_(NSMakeRect(12, 602, 236, 28))
+        brand = self._label(self._sidebar, "SpeakType", 24, 699, 146, 30, 21, bold=True)
+        brand.setFont_(AppKit.NSFont.fontWithName_size_("Georgia-Bold", 24))
+        brand.setTextColor_(color("sidebar_text"))
+        eyebrow = self._label(self._sidebar, _w("个人词库", "YOUR VOCABULARY"), 24, 664, 146, 22, 11)
+        eyebrow.setTextColor_(color("sidebar_muted"))
+        self._filter_buttons = {}
+        filters = [(_w("全部词语", "All words"), "text.book.closed"),
+                   (_w("已启用", "Enabled"), "checkmark.circle"),
+                   (_w("学习候选", "Review learned"), "sparkles"),
+                   (_w("已停用", "Paused"), "pause.circle"),
+                   (_w("优先识别", "Prioritized"), "star")]
+        for index, (title, icon) in enumerate(filters):
+            button = self._button(self._sidebar, title, b"onFilter:", 14, 594 - index * 46, 162)
+            button.setFrameSize_(NSMakeSize(162, 38))
+            button.setTag_(index)
+            button.setImage_(symbol(icon, title, 15))
+            button.setImagePosition_(AppKit.NSImageLeft)
+            style_button(button, sidebar=True, selected=index == 0)
+            self._filter_buttons[VIEW_FILTERS[index]] = button
+        self._new_button = self._button(self._sidebar, _w("添加词语", "Add word"), b"onNew:", 20, 325, 150, primary=True)
+        self._new_button.setFrameSize_(NSMakeSize(150, 34))
+        self._new_button.setImage_(symbol("plus", _w("添加词语", "Add word")))
+        self._new_button.setImagePosition_(AppKit.NSImageLeft)
+        self._new_button.setKeyEquivalent_("n")
+        self._new_button.setKeyEquivalentModifierMask_(AppKit.NSEventModifierFlagCommand)
+        self._budget_field = self._label(self._sidebar, "", 24, 184, 142, 116, 11, wraps=True)
+        self._budget_field.setTextColor_(color("sidebar_muted"))
+        self._summary_field = self._label(self._sidebar, "", 24, 116, 142, 58, 12, wraps=True)
+        self._summary_field.setTextColor_(color("sidebar_muted"))
+        for title, action, y, icon in [(_w("导入词库", "Import vocabulary"), b"onImport:", 68, "square.and.arrow.down"),
+                                      (_w("导出词库", "Export vocabulary"), b"onExport:", 28, "square.and.arrow.up")]:
+            button = self._button(self._sidebar, title, action, 14, y, 162)
+            button.setFrameSize_(NSMakeSize(162, 34))
+            button.setImage_(symbol(icon, title, 14))
+            button.setImagePosition_(AppKit.NSImageLeft)
+            style_button(button, sidebar=True)
+        library = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(190, 0, 310, self.HEIGHT))
+        style_panel(library, "surface")
+        root.addSubview_(library)
+        self._separator(root, 500, 0, 1, self.HEIGHT)
+        self._library_title = self._label(library, _w("全部词语", "All words"), 20, 700, 270, 30, 23, bold=True)
+        self._library_count = self._label(library, "", 20, 675, 270, 20, 12, muted=True)
+        self._search_field = AppKit.NSSearchField.alloc().initWithFrame_(NSMakeRect(18, 626, 274, 32))
         self._search_field.setPlaceholderString_(_w("搜索词语或错误写法", "Search words or misspellings"))
         self._search_field.setDelegate_(self._delegate)
         self._search_field.setFont_(AppKit.NSFont.systemFontOfSize_(13))
-        self._search_field.setControlSize_(AppKit.NSControlSizeSmall)
-        self._sidebar.addSubview_(self._search_field)
-        self._filter = AppKit.NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(12, 568, 236, 26))
-        self._filter.setSegmentCount_(4)
-        for index, label in enumerate((_w("全部", "All"), _w("已启用", "Enabled"), _w("待确认", "Review"), _w("已停用", "Disabled"))):
-            self._filter.setLabel_forSegment_(label, index)
-            self._filter.setWidth_forSegment_(56, index)
-        self._filter.setFont_(AppKit.NSFont.systemFontOfSize_(11))
-        self._filter.setControlSize_(AppKit.NSControlSizeSmall)
-        self._filter.setSelectedSegment_(0)
-        self._filter.setTarget_(self._delegate)
-        self._filter.setAction_(b"onFilter:")
-        self._sidebar.addSubview_(self._filter)
-        scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(8, 80, 244, 476))
+        library.addSubview_(self._search_field)
+        self._sort_picker = AppKit.NSPopUpButton.alloc().initWithFrame_(NSMakeRect(16, 586, 278, 28))
+        self._sort_picker.addItemsWithTitles_([_w("排序：优先识别", "Sort: priority"), _w("排序：名称", "Sort: name"), _w("排序：使用次数", "Sort: usage")])
+        self._sort_picker.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+        self._sort_picker.setTarget_(self._delegate)
+        self._sort_picker.setAction_(b"onSort:")
+        library.addSubview_(self._sort_picker)
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(12, 32, 286, 538))
         scroll.setHasVerticalScroller_(True)
         scroll.setAutohidesScrollers_(True)
         scroll.setDrawsBackground_(False)
         scroll.setBorderType_(AppKit.NSNoBorder)
-        self._sidebar.addSubview_(scroll)
-        self._table = AppKit.NSTableView.alloc().initWithFrame_(NSMakeRect(0, 0, self.ROW_WIDTH, 476))
-        self._table.setHeaderView_(None)
-        self._table.setRowHeight_(28)
-        self._table.setIntercellSpacing_(NSMakeSize(6, 4))
-        self._table.setBackgroundColor_(AppKit.NSColor.clearColor())
+        library.addSubview_(scroll)
+        self._table = AppKit.NSTableView.alloc().initWithFrame_(NSMakeRect(0, 0, self.ROW_WIDTH, 538))
+        self._table.setRowHeight_(40)
+        self._table.setIntercellSpacing_(NSMakeSize(6, 3))
+        self._table.setBackgroundColor_(color("surface"))
         self._table.setSelectionHighlightStyle_(AppKit.NSTableViewSelectionHighlightStyleSourceList)
-        self._table.setStyle_(AppKit.NSTableViewStyleSourceList)
+        self._table.setStyle_(AppKit.NSTableViewStyleFullWidth)
         self._table.setAllowsEmptySelection_(True)
         self._table.setAllowsMultipleSelection_(False)
         self._table.setDelegate_(self._delegate)
         self._table.setDataSource_(self._delegate)
         self._table.setAccessibilityLabel_(_w("热词列表", "Vocabulary list"))
-        for identifier, width, size in (("term", 142, 13), ("state", 82, 11)):
+        for identifier, title, width, size in (("term", _w("词语", "Word"), 154, 13),
+                                             ("state", _w("状态", "Status"), 60, 11),
+                                             ("usage", _w("使用", "Uses"), 44, 11)):
             column = AppKit.NSTableColumn.alloc().initWithIdentifier_(identifier)
+            column.setTitle_(title)
+            column.headerCell().setFont_(AppKit.NSFont.systemFontOfSize_(11))
             column.setWidth_(width)
             column.setEditable_(False)
             column.dataCell().setFont_(AppKit.NSFont.systemFontOfSize_(size))
+            column.dataCell().setTextColor_(AppKit.NSColor.labelColor())
             column.dataCell().setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
             self._table.addTableColumn_(column)
         scroll.setDocumentView_(self._table)
         self._rows_view = self._table
-        self._empty_view = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(12, 370, 236, 150))
-        self._sidebar.addSubview_(self._empty_view)
-        self._empty_title = self._label(self._empty_view, "", 0, 114, 236, 22, 13, bold=True)
-        self._empty_detail = self._label(self._empty_view, "", 0, 0, 236, 108, 12, muted=True, wraps=True)
-        self._summary_field = self._label(self._sidebar, "", 12, 49, 236, 20, 11, muted=True)
-        self._button(self._sidebar, _w("添加词语", "Add word"), b"onNew:", 10, 10, 82)
-        self._button(self._sidebar, _w("导入", "Import"), b"onImport:", 98, 10, 70)
-        self._button(self._sidebar, _w("导出", "Export"), b"onExport:", 174, 10, 70)
-        editor = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(280, 318, 540, 312))
+        self._empty_view = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(24, 338, 262, 150))
+        library.addSubview_(self._empty_view)
+        self._empty_title = self._label(self._empty_view, "", 0, 114, 262, 22, 14, bold=True)
+        self._empty_detail = self._label(self._empty_view, "", 0, 0, 262, 108, 13, muted=True, wraps=True)
+        editor = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(528, 332, 564, 402))
         root.addSubview_(editor)
-        self._editor_title = self._label(editor, _w("添加词语", "Add a word"), 0, 282, 400, 22, 13, bold=True)
-        self._entry_meta_field = self._label(editor, "", 0, 258, 540, 18, 11, muted=True)
-        self._enabled_check = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(422, 280, 118, 24))
+        self._editor_title = self._label(editor, _w("添加词语", "Add a word"), 0, 368, 430, 30, 23, bold=True)
+        self._entry_meta_field = self._label(editor, "", 0, 340, 564, 20, 12, muted=True)
+        self._enabled_check = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(446, 371, 118, 24))
         self._enabled_check.setButtonType_(AppKit.NSButtonTypeSwitch)
         self._enabled_check.setTitle_(_w("启用词语", "Enabled"))
         self._enabled_check.setState_(AppKit.NSControlStateValueOn)
@@ -544,41 +646,54 @@ class HotwordsWindowController:
         self._enabled_check.setFont_(AppKit.NSFont.systemFontOfSize_(12))
         self._enabled_check.setControlSize_(AppKit.NSControlSizeSmall)
         editor.addSubview_(self._enabled_check)
-        self._label(editor, _w("标准拼写", "Correct spelling"), 0, 225, 540, 20, 12, muted=True)
-        self._term_field = self._field(editor, 0, 195, 540, _w("例如 Qwen3-ASR、NeurIPS、张明远", "e.g. Qwen3-ASR, NeurIPS, a person's name"))
+        self._label(editor, _w("标准拼写", "Correct spelling"), 0, 302, 564, 20, 12, bold=True)
+        self._term_field = self._field(editor, 0, 267, 564, _w("例如 Qwen3-ASR、NeurIPS、张明远", "e.g. Qwen3-ASR, NeurIPS, a person's name"))
+        self._term_field.setFont_(AppKit.NSFont.systemFontOfSize_(16))
+        self._term_field.setFrameSize_(NSMakeSize(564, 30))
         self._term_field.setAccessibilityLabel_(_w("标准拼写", "Correct spelling"))
         self._term_field.setDelegate_(self._delegate)
-        self._label(editor, _w("误识别写法 · 每行一个", "Misspellings · one per line"), 0, 165, 252, 20, 12, muted=True)
-        self._aliases_view = self._text_area(editor, NSMakeRect(0, 65, 252, 94), editable=True)
+        self._pinned_check = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(0, 227, 164, 26))
+        self._pinned_check.setButtonType_(AppKit.NSButtonTypeSwitch)
+        self._pinned_check.setTitle_(_w("优先识别这个词语", "Prioritize this word"))
+        self._pinned_check.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+        self._pinned_check.setTarget_(self._delegate)
+        self._pinned_check.setAction_(b"onDraftChanged:")
+        self._pinned_check.setToolTip_(_w("在识别提示数量有限时优先选择。停用状态和应用范围继续生效。", "Prioritize when recognition hints are limited. Pause and app scope still apply."))
+        editor.addSubview_(self._pinned_check)
+        self._usage_field = self._label(editor, "", 180, 230, 384, 20, 11, muted=True)
+        self._label(editor, _w("常见误识别 · 每行一种", "Common misspellings · one per line"), 0, 194, 264, 20, 12, bold=True)
+        self._aliases_view = self._text_area(editor, NSMakeRect(0, 78, 264, 109), editable=True)
         self._aliases_view.setAccessibilityLabel_(_w("误识别写法，每行一个", "Misspellings, one per line"))
         self._aliases_view.setDelegate_(self._delegate)
-        self._label(editor, _w("应用范围（可选）", "App scope (optional)"), 276, 165, 264, 20, 12, muted=True)
-        self._app_field = self._field(editor, 276, 132, 264, _w("留空用于全部应用", "Empty for all apps"))
+        self._label(editor, _w("使用范围", "Use in"), 288, 194, 276, 20, 12, bold=True)
+        self._app_field = self._field(editor, 288, 156, 276, _w("全部应用，或填写应用名称", "All apps, or enter an app name"))
         self._app_field.setDelegate_(self._delegate)
-        self._scene_picker = self._scene_popup(editor, 276, 93, 264, include_all=True)
+        self._scene_picker = self._scene_popup(editor, 288, 114, 276, include_all=True)
         self._scene_picker.setTarget_(self._delegate)
         self._scene_picker.setAction_(b"onDraftChanged:")
-        self._delete_button = self._button(editor, _w("删除词语", "Delete"), b"onDelete:", 0, 12, 84)
-        self._toggle_button = self._button(editor, _w("停用词语", "Disable"), b"onToggle:", 92, 12, 92)
-        self._save_button = self._button(editor, _w("保存词语", "Save word"), b"onSave:", 432, 12, 108, primary=True)
+        self._label(editor, _w("用于识别后的文字纠正，最多八种。", "Used after transcription. Up to eight variants."), 0, 53, 564, 18, 11, muted=True)
+        self._delete_button = self._button(editor, _w("删除词语", "Delete"), b"onDelete:", 0, 10, 84)
+        self._toggle_button = self._button(editor, _w("停用词语", "Disable"), b"onToggle:", 94, 10, 92)
+        self._save_button = self._button(editor, _w("保存词语", "Save word"), b"onSave:", 444, 8, 120, primary=True)
+        self._save_button.setFrameSize_(NSMakeSize(120, 32))
         self._save_button.setKeyEquivalent_("s")
         self._save_button.setKeyEquivalentModifierMask_(AppKit.NSEventModifierFlagCommand)
-        self._separator(root, 280, 306, 540)
-        test_panel = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(280, 78, 540, 218))
+        test_panel = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(516, 76, 588, 238))
+        style_panel(test_panel, "surface", radius=12, border=True)
         root.addSubview_(test_panel)
-        self._label(test_panel, _w("纠错测试", "Test corrections"), 0, 194, 540, 22, 13, bold=True)
-        self._test_status_field = self._label(test_panel, "", 0, 163, 540, 27, 11, muted=True, wraps=True)
-        self._label(test_panel, _w("转写文字", "Transcript text"), 0, 140, 252, 20, 12, muted=True)
-        self._label(test_panel, _w("替换结果", "Replacement result"), 276, 140, 264, 20, 12, muted=True)
-        self._test_input = self._text_area(test_panel, NSMakeRect(0, 82, 252, 54), editable=True)
-        self._test_output = self._text_area(test_panel, NSMakeRect(276, 82, 264, 54), editable=False)
+        self._label(test_panel, _w("试试纠错效果", "Try your corrections"), 16, 200, 556, 24, 15, bold=True)
+        self._test_status_field = self._label(test_panel, "", 16, 171, 556, 26, 11, muted=True, wraps=True)
+        self._label(test_panel, _w("转写文字", "Transcript text"), 16, 147, 264, 20, 12, muted=True)
+        self._label(test_panel, _w("替换结果", "Replacement result"), 304, 147, 268, 20, 12, muted=True)
+        self._test_input = self._text_area(test_panel, NSMakeRect(16, 83, 264, 60), editable=True)
+        self._test_output = self._text_area(test_panel, NSMakeRect(304, 83, 268, 60), editable=False)
         self._test_input.setAccessibilityLabel_(_w("测试转写文字", "Test transcript text"))
         self._test_output.setAccessibilityLabel_(_w("替换结果", "Replacement result"))
-        self._test_app_field = self._field(test_panel, 0, 40, 178, _w("测试应用（可留空）", "Test app (optional)"))
-        self._test_scene_picker = self._scene_popup(test_panel, 188, 40, 172, include_all=False)
-        self._button(test_panel, _w("测试替换", "Run test"), b"onTest:", 424, 40, 116)
-        self._changes_field = self._label(test_panel, _w("输入包含误识别写法的句子。", "Enter a sentence containing a misspelling."), 0, 3, 540, 30, 11, muted=True, wraps=True)
-        self._copy_feedback_field = self._label(root, _w("保存在本机，保存后立即生效。", "Stored on this Mac. Saved changes apply immediately."), 280, 18, 540, 42, 11, muted=True, wraps=True)
+        self._test_app_field = self._field(test_panel, 16, 45, 190, _w("测试应用（可留空）", "Test app (optional)"))
+        self._test_scene_picker = self._scene_popup(test_panel, 216, 45, 190, include_all=False)
+        self._test_button = self._button(test_panel, _w("测试替换", "Run test"), b"onTest:", 456, 45, 116)
+        self._changes_field = self._label(test_panel, _w("输入包含误识别写法的句子。", "Enter a sentence containing a misspelling."), 16, 6, 556, 32, 11, muted=True, wraps=True)
+        self._copy_feedback_field = self._label(root, _w("词典保存在本机。识别提示按当前范围和优先顺序选择。", "Stored on this Mac. Recognition hints follow the current scope and priority."), 528, 18, 564, 42, 11, muted=True, wraps=True)
         self.new_entry()
 
     def _separator(self, view, x, y, width, height=1):
@@ -599,7 +714,8 @@ class HotwordsWindowController:
         field = AppKit.NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, width, 26))
         field.setPlaceholderString_(placeholder)
         field.setFont_(AppKit.NSFont.systemFontOfSize_(13))
-        field.setControlSize_(AppKit.NSControlSizeSmall)
+        field.setControlSize_(AppKit.NSControlSizeRegular)
+        field.setBezelStyle_(AppKit.NSTextFieldRoundedBezel)
         field.setTextColor_(AppKit.NSColor.labelColor())
         view.addSubview_(field)
         return field
@@ -635,10 +751,12 @@ class HotwordsWindowController:
         button.setTarget_(self._delegate)
         button.setAction_(action)
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        button.setControlSize_(AppKit.NSControlSizeSmall)
+        button.setControlSize_(AppKit.NSControlSizeRegular)
         button.setFont_(AppKit.NSFont.systemFontOfSize_(12))
         if primary:
-            button.setBezelColor_(AppKit.NSColor.controlAccentColor())
+            button.setBordered_(False)
+            style_panel(button, "accent", radius=7)
+            button.setContentTintColor_(color("background"))
         view.addSubview_(button)
         return button
 
@@ -660,8 +778,11 @@ class HotwordsWindowController:
     def _render_rows(self):
         active = sum(1 for entry in self._last_entries if entry.get("active"))
         pending = sum(1 for entry in self._last_entries if not entry.get("active") and not entry.get("user_disabled"))
-        self._summary_field.setStringValue_(_w(f"{len(self._last_entries)} 个词语 · {active} 已启用 · {pending} 待确认", f"{len(self._last_entries)} words · {active} enabled · {pending} review"))
-        self._visible_rows = hotword_window_rows(self._last_entries, self._search_field.stringValue(), FILTERS[self._filter.selectedSegment()])
+        self._summary_field.setStringValue_(_w(f"{active} 个词语已启用\n{pending} 个学习候选待确认\n词库保存在本机", f"{active} words enabled\n{pending} awaiting review\nStored on this Mac"))
+        self._visible_rows = hotword_window_rows(self._last_entries, self._search_field.stringValue(), self._filter_id,
+                                                ("priority", "name", "usage")[self._sort_picker.indexOfSelectedItem()])
+        self._library_count.setStringValue_(_w(f"显示 {len(self._visible_rows)} 个，共 {len(self._last_entries)} 个", f"Showing {len(self._visible_rows)} of {len(self._last_entries)} words"))
+        self._update_selection_info()
         self._updating_table = True
         self._table.reloadData()
         index = next((index for index, row in enumerate(self._visible_rows) if row["term"] == self._selected_term), None)
@@ -677,6 +798,45 @@ class HotwordsWindowController:
             self._empty_title.setStringValue_(title)
             self._empty_detail.setStringValue_(detail)
 
+    def set_filter(self, filter_id):
+        if filter_id not in VIEW_FILTERS:
+            raise ValueError(f"Unknown vocabulary filter: {filter_id}")
+        self._filter_id = filter_id
+        self._library_title.setStringValue_(self._filter_buttons[filter_id].title())
+        for name, button in self._filter_buttons.items():
+            style_button(button, sidebar=True, selected=name == filter_id)
+        self._render_rows()
+
+    def _test_context(self):
+        app = self._test_app_field.stringValue().strip()
+        app_info = {"name": app, "bundle_id": app}
+        if app:
+            application = next((application for application in _running_application_names()
+                                if app.casefold() in (application["name"].casefold(), application["bundle_id"].casefold())), None)
+            if application is not None:
+                app_info = application
+        return app_info, SCENES[self._test_scene_picker.indexOfSelectedItem()]
+
+    def _update_selection_info(self):
+        config = load_config()
+        limit = config.get("hotword_max_context_terms", 30)
+        app_info, scene = self._test_context()
+        if self.on_context is not None:
+            selected = self.on_context(app_info, scene)
+        elif config.get("hotword_context_enabled", True):
+            selected = self.hotwords.active_context(app_info=app_info, scene=scene, language=config.get("language", "auto"),
+                                                    limit=limit, dictionary=self.dictionary_loader())
+        else:
+            selected = ActiveHotwordContext(terms=[], context="")
+        description = _w(f"每次识别最多提示 {limit} 个词语。\n测试范围内：{len(selected.terms)} / {selected.eligible_count} 个入选。\n优先词语与实际使用记录影响选择。",
+                         f"Up to {limit} hints per dictation.\nIn test scope: {len(selected.terms)} / {selected.eligible_count} selected.\nPriority and actual usage guide selection.")
+        self._budget_field.setStringValue_(description)
+        details = _w("识别提示：", "Recognition hints: ") + ", ".join(selected.terms)
+        if selected.omitted_terms:
+            details += _w("\n超过提示数量或长度：", "\nOutside hint count or length: ") + ", ".join(selected.omitted_terms)
+        self._budget_field.setToolTip_(details)
+        self._context_selection = selected
+
     def new_entry(self):
         self._capture_draft()
         self._load_form(None)
@@ -689,7 +849,7 @@ class HotwordsWindowController:
     def _form_values(self):
         return {"term": str(self._term_field.stringValue()), "aliases": str(self._aliases_view.string()),
                 "scope_app": str(self._app_field.stringValue()), "scene_index": self._scene_picker.indexOfSelectedItem(),
-                "enabled": bool(self._enabled_check.state())}
+                "enabled": bool(self._enabled_check.state()), "pinned": bool(self._pinned_check.state())}
 
     def _capture_draft(self):
         if not self._form_ready:
@@ -711,13 +871,14 @@ class HotwordsWindowController:
         self._form_baseline = {"term": entry.get("term", ""), "aliases": "\n".join(entry.get("aliases", [])),
                                "scope_app": entry.get("scope_app", ""),
                                "scene_index": SCENES.index(entry.get("scope_scene", "")),
-                               "enabled": bool(entry.get("active", True))}
+                               "enabled": bool(entry.get("active", True)), "pinned": bool(entry.get("pinned", False))}
         values = self._drafts.get(term, self._form_baseline)
         self._term_field.setStringValue_(values["term"])
         self._aliases_view.setString_(values["aliases"])
         self._app_field.setStringValue_(values["scope_app"])
         self._scene_picker.selectItemAtIndex_(values["scene_index"])
         self._enabled_check.setState_(AppKit.NSControlStateValueOn if values["enabled"] else AppKit.NSControlStateValueOff)
+        self._pinned_check.setState_(AppKit.NSControlStateValueOn if values["pinned"] else AppKit.NSControlStateValueOff)
         self._toggle_button.setTitle_(_w("停用词语", "Disable") if entry.get("active") else _w("启用词语", "Enable"))
         self._toggle_button.setEnabled_(bool(entry))
         self._delete_button.setEnabled_(bool(entry))
@@ -728,9 +889,18 @@ class HotwordsWindowController:
         if observations:
             source += _w(f" · 观察 {observations} 次", f" · {observations} {'observation' if observations == 1 else 'observations'}")
         self._entry_meta_field.setStringValue_(source)
+        usage = int(entry.get("usage_count", 0))
+        last_used = _short_date(entry.get("last_used_at", ""))
+        usage_text = _w(f"实际听写中使用 {usage} 次", f"Used in {usage} dictations")
+        if last_used:
+            usage_text += _w(f" · 最近 {last_used}", f" · Last {last_used}")
+        self._usage_field.setStringValue_(usage_text)
         self._form_ready = True
         self._editor_changed()
         self._render_rows()
+        index = next((index for index, row in enumerate(self._visible_rows) if row["term"] == term), None)
+        if index is not None:
+            self._table.scrollRowToVisible_(index)
 
     def _editor_changed(self):
         if not self._form_ready:
@@ -742,7 +912,7 @@ class HotwordsWindowController:
         if self._drafts:
             self._set_status(_w(f"有 {len(self._drafts)} 个未保存的词条，切换词语和关闭窗口会保留本次草稿。", f"{len(self._drafts)} unsaved drafts. Switching words or closing this window keeps them for this session."))
         else:
-            self._set_status(_w("词典保存在本机，保存后立即生效。", "Stored on this Mac. Changes apply as soon as you save."))
+            self._set_status(_w("词典保存在本机。识别提示按当前范围和优先顺序选择。", "Stored on this Mac. Recognition hints follow the current scope and priority."))
 
     def _set_status(self, text, *, error=False):
         if self._copy_feedback_field is not None:
@@ -754,7 +924,7 @@ class HotwordsWindowController:
         entry = {"term": self._term_field.stringValue().strip(),
                  "aliases": [line.strip() for line in self._aliases_view.string().splitlines() if line.strip()],
                  "enabled": bool(self._enabled_check.state()), "scope_app": self._app_field.stringValue().strip(),
-                 "scope_scene": SCENES[self._scene_picker.indexOfSelectedItem()]}
+                 "scope_scene": SCENES[self._scene_picker.indexOfSelectedItem()], "pinned": bool(self._pinned_check.state())}
         try:
             validate_hotword_import({"schema": EXPORT_SCHEMA, "version": 1, "entries": [entry]})
             merged = self._merged_entries()
@@ -770,7 +940,7 @@ class HotwordsWindowController:
                 raise ValueError(_conflict_message(conflicts))
             stored = self.hotwords.upsert_manual(entry["term"], entry["aliases"], original_term=self._selected_term,
                                                 enabled=entry["enabled"], scope_app=entry["scope_app"], scope_scene=entry["scope_scene"],
-                                                dictionary=self.dictionary_loader())
+                                                pinned=entry["pinned"], dictionary=self.dictionary_loader())
         except (ValueError, TypeError, KeyError, OSError) as error:
             self._editor_changed()
             self._set_status(str(error), error=True)
@@ -781,7 +951,7 @@ class HotwordsWindowController:
         self._notify_change()
         self.refresh()
         self.select_entry(stored["term"])
-        self._set_status(_w(f"已保存 {stored['term']}，下次识别立即使用。", f"Saved {stored['term']}. Ready for your next dictation."))
+        self._set_status(_w(f"已保存词语 {stored['term']}。", f"Saved word: {stored['term']}."))
         return True
 
     def toggle_entry(self):
@@ -824,14 +994,8 @@ class HotwordsWindowController:
         return True
 
     def test_text(self):
-        app = self._test_app_field.stringValue().strip()
-        app_info = {"name": app, "bundle_id": app}
-        if app:
-            application = next((application for application in _running_application_names()
-                                if app.casefold() in (application["name"].casefold(), application["bundle_id"].casefold())), None)
-            if application is not None:
-                app_info = application
-        scene = SCENES[self._test_scene_picker.indexOfSelectedItem()]
+        app_info, scene = self._test_context()
+        self._update_selection_info()
         text = str(self._test_input.string())
         if self.on_test is not None:
             result = self.on_test(text, app_info, scene)
@@ -854,39 +1018,57 @@ class HotwordsWindowController:
         return result
 
     def import_file(self, path):
-        if Path(path).stat().st_size > 3 * 1024 * 1024:
-            raise ValueError(_w("词典文件超过 3 MB，请分成多个文件导入。", "Dictionary file exceeds 3 MB. Split it into smaller files."))
-        with open(path, encoding="utf-8") as source:
-            entries = validate_hotword_import(json.load(source))
+        with open(path, encoding="utf-8-sig", newline="") as source:
+            extension = Path(path).suffix.lower()
+            existing_terms = [entry["term"] for entry in self._merged_entries()]
+            if extension == ".csv":
+                entries = read_vocabulary_csv(source, existing_terms=existing_terms)
+            elif extension == ".txt":
+                entries = validate_hotword_import({"schema": EXPORT_SCHEMA, "version": 1,
+                                                   "entries": [{"term": line.strip()} for line in source.read().splitlines() if line.strip()]})
+                existing = {" ".join(term.split()).casefold() for term in existing_terms}
+                entries = [entry for entry in entries if " ".join(entry["term"].split()).casefold() not in existing]
+            else:
+                entries = validate_hotword_import(json.load(source))
         count = self.hotwords.import_manual(entries)
         if count:
             self._notify_change()
         self.refresh()
-        self._set_status(_w(f"已导入 {len(entries)} 个词语；相同标准拼写的条目已更新。", f"Imported {len(entries)} words. Matching spellings were updated."))
+        self._set_status(_w(f"已导入 {len(entries)} 个词语。纯词语列表保留已有词条的设置。", f"Imported {len(entries)} words. Word-only lists preserve existing entry settings."))
         return count
 
     def export_file(self, path):
-        with open(path, "w", encoding="utf-8") as destination:
-            json.dump(hotword_export_payload(self._merged_entries()), destination, ensure_ascii=False, indent=2)
-            destination.write("\n")
-        self._set_status(_w("词典已导出为 JSON 文件。", "Vocabulary exported as JSON."))
+        payload = hotword_export_payload(self._merged_entries())
+        is_csv = Path(path).suffix.lower() == ".csv"
+        with open(path, "w", encoding="utf-8", newline="") as destination:
+            if is_csv:
+                writer = csv.DictWriter(destination, fieldnames=CSV_FIELDS)
+                writer.writeheader()
+                writer.writerows({key: json.dumps(value, ensure_ascii=False) if key in CSV_JSON_FIELDS else value
+                                  for key, value in entry.items()} for entry in payload["entries"])
+            else:
+                json.dump(payload, destination, ensure_ascii=False, indent=2)
+                destination.write("\n")
+        self._set_status(_w(f"词典已导出为 {'CSV' if is_csv else 'JSON'} 文件。", f"Vocabulary exported as {'CSV' if is_csv else 'JSON'}."))
 
     def choose_import(self):
         panel = AppKit.NSOpenPanel.openPanel()
-        panel.setAllowedFileTypes_(["json"])
+        panel.setAllowedFileTypes_(["json", "csv", "txt"])
         panel.setAllowsMultipleSelection_(False)
         panel.setCanChooseDirectories_(False)
-        panel.setMessage_(_w("选择 SpeakType 导出的 JSON 词典。相同标准拼写的条目会更新。", "Choose an exported SpeakType JSON dictionary. Matching spellings will be updated."))
+        panel.setMessage_(_w("TXT 每行一个词语；CSV 至少需要 term 列。纯词语列表只添加新词；包含完整设置的 JSON/CSV 更新同名词条。导出 CSV 可查看全部可用列。", "TXT uses one word per line; CSV needs a term column. Word-only lists add new words. JSON/CSV with settings update matching entries. Export CSV to see all columns."))
         if panel.runModal() != AppKit.NSModalResponseOK:
             return
         try:
             self.import_file(Path(panel.URL().path()))
-        except (ValueError, TypeError, KeyError, OSError) as error:
+        except (ValueError, TypeError, KeyError, OSError, csv.Error) as error:
             self._set_status(_w("导入失败：", "Import failed: ") + str(error), error=True)
 
     def choose_export(self):
         panel = AppKit.NSSavePanel.savePanel()
-        panel.setAllowedFileTypes_(["json"])
+        panel.setAllowedFileTypes_(["json", "csv"])
+        panel.setAllowsOtherFileTypes_(False)
+        panel.setMessage_(_w("文件名使用 .json 或 .csv。两种格式均保留词语状态、优先识别和使用记录。", "Use .json or .csv in the file name. Both preserve state, priority and usage history."))
         panel.setNameFieldStringValue_("SpeakType-vocabulary.json")
         if panel.runModal() != AppKit.NSModalResponseOK:
             return

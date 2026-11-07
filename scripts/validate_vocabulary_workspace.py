@@ -54,12 +54,12 @@ def snapshot(name, active):
 controller.show()
 advance()
 assert controller.window.isVisible()
-assert controller.window.contentView().frame().size == NSMakeSize(840, 650)
+assert controller.window.contentView().frame().size == NSMakeSize(1120, 760)
 assert controller.window.appearance() is None
-assert isinstance(controller._sidebar, AppKit.NSVisualEffectView)
-assert controller._sidebar.material() == AppKit.NSVisualEffectMaterialSidebar
+assert isinstance(controller._sidebar, AppKit.NSView)
+assert controller._sidebar.frame().size.width == 190
 assert isinstance(controller._table, AppKit.NSTableView)
-assert controller._table.headerView() is None
+assert controller._table.headerView() is not None
 controller.window.setAppearance_(AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua))
 assert controller._visible_rows == []
 assert not controller._toggle_button.isEnabled() and not controller._delete_button.isEnabled()
@@ -80,13 +80,11 @@ assert controller._test_output.string() == result.text
 assert "千问三 ASR → Qwen3-ASR" in controller._changes_field.stringValue()
 controller._toggle_button.performClick_(None)
 assert not store.get_all()[0]["active"] and store.get_all()[0]["user_disabled"]
-controller._filter.setSelectedSegment_(3)
-controller._filter.sendAction_to_(controller._filter.action(), controller._filter.target())
+controller._filter_buttons["disabled"].performClick_(None)
 assert [row["term"] for row in controller._visible_rows] == ["Qwen3-ASR"]
 controller._toggle_button.performClick_(None)
 assert store.get_all()[0]["active"]
-controller._filter.setSelectedSegment_(1)
-controller._filter.sendAction_to_(controller._filter.action(), controller._filter.target())
+controller._filter_buttons["active"].performClick_(None)
 assert len(controller._visible_rows) == 1
 assert len(changes) == 3
 report["checks"].append("Actual replacement output and changes, enabled/disabled filters, persistent toggles and change callback")
@@ -109,10 +107,9 @@ controller._save_button.performClick_(None)
 store.add_or_reinforce("NeurIPS", aliases=["NIPS"], confidence=0.2)
 controller.refresh()
 assert len(hotword_window_rows(store.get_all(), filter_id="pending")) == 1
-controller._filter.setSelectedSegment_(2)
-controller._filter.sendAction_to_(controller._filter.action(), controller._filter.target())
+controller._filter_buttons["pending"].performClick_(None)
 assert [row["term"] for row in controller._visible_rows] == ["NeurIPS"]
-controller._filter.setSelectedSegment_(0)
+controller._filter_buttons["all"].performClick_(None)
 controller._search_field.setStringValue_("奥米")
 controller._render_rows()
 assert [row["term"] for row in controller._visible_rows] == ["OmniEcho"]

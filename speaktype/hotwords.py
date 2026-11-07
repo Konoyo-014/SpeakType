@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import lru_cache
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ _TECH_SIGNAL_RE = re.compile(r"[A-Z]{2,}|[a-z][A-Z]|[A-Za-z]+[0-9]|[0-9][A-Za-z]
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _SENTENCE_PUNCT_RE = re.compile(r"[，。！？；：、,!?;:]")
 _ASCII_ACRONYM_RE = re.compile(r"^[A-Za-z]{2,12}$")
+_IGNORECASE_EQUIVALENTS = str.maketrans({"İ": "i", "ı": "i", "ſ": "s", "K": "k"})
 _MISSING = object()
 
 
@@ -41,6 +43,9 @@ class ActiveHotwordContext:
     terms: list[str]
     context: str
     entries: list[dict] = field(default_factory=list)
+    eligible_count: int = 0
+    omitted_terms: list[str] = field(default_factory=list)
+    selection_reasons: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,10 @@ def _term_key(term: str) -> str:
 def _match_key(text: str) -> str:
     text = _CONTROL_RE.sub("", str(text or "")).casefold()
     return _SPACE_RE.sub("", text)
+
+
+def _candidate_match_key(text: str) -> str:
+    return _match_key(text.translate(_IGNORECASE_EQUIVALENTS))
 
 
 def _text_contains_term(text: str, term: str) -> bool:
@@ -182,6 +191,36 @@ def _replacement_pattern(value: str, *, canonical: bool) -> str:
     return expression
 
 
+@lru_cache(maxsize=32)
+def _compiled_replacements(values: tuple[tuple[str, str, bool], ...]):
+    pattern = re.compile("|".join(
+        f"(?P<h{index}>{_replacement_pattern(value, canonical=canonical)})"
+        for index, (value, _, canonical) in enumerate(values)
+    ), re.IGNORECASE)
+    return pattern, {f"h{index}": term for index, (_, term, _) in enumerate(values)}
+
+
+def _validate_usage_metadata(entry: dict) -> dict:
+    usage_count = entry.get("usage_count", 0)
+    if isinstance(usage_count, bool) or not isinstance(usage_count, int) or usage_count < 0:
+        raise ValueError("Hotword usage_count must be a nonnegative integer")
+    last_used_at = entry.get("last_used_at", "")
+    if not isinstance(last_used_at, str):
+        raise ValueError("Hotword last_used_at must be a string")
+    if last_used_at:
+        timestamp = datetime.fromisoformat(last_used_at.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("Hotword last_used_at must include a timezone")
+        last_used_at = timestamp.astimezone(timezone.utc).isoformat()
+    usage_apps = entry.get("usage_apps", {})
+    if not isinstance(usage_apps, dict) or any(
+        not isinstance(key, str) or isinstance(count, bool)
+        or not isinstance(count, int) or count < 0 for key, count in usage_apps.items()
+    ):
+        raise ValueError("Hotword usage_apps must contain nonnegative integer counts")
+    return {"usage_count": usage_count, "last_used_at": last_used_at, "usage_apps": dict(usage_apps)}
+
+
 def _alias_metadata(aliases: list[str], *, confidence: float, source: str,
                     user_confirmed: bool, approved_aliases=_MISSING,
                     alias_confidences=_MISSING) -> tuple[list[str], dict[str, float]]:
@@ -212,13 +251,15 @@ def _alias_metadata(aliases: list[str], *, confidence: float, source: str,
 
 
 def validate_manual_hotword(term: str, aliases: Iterable[str] = (), *, enabled: bool = True,
-                            scope_app: str = "", scope_scene: str = "") -> dict:
+                            scope_app: str = "", scope_scene: str = "", pinned: bool = False) -> dict:
     if not isinstance(term, str) or not 2 <= len(term.strip()) <= MAX_TERM_CHARS:
         raise ValueError(f"Hotword term must contain 2 to {MAX_TERM_CHARS} characters")
     if _CONTROL_RE.search(term) or "\n" in term or "\r" in term or _is_sentence_like_term(term):
         raise ValueError("Hotword term must be a word or short name")
     if not isinstance(enabled, bool):
         raise TypeError("Hotword enabled must be true or false")
+    if not isinstance(pinned, bool):
+        raise TypeError("Hotword pinned must be true or false")
     if isinstance(aliases, str):
         raise TypeError("Hotword aliases must be a collection of strings")
     aliases = list(aliases)
@@ -242,7 +283,7 @@ def validate_manual_hotword(term: str, aliases: Iterable[str] = (), *, enabled: 
             "approved_aliases": list(cleaned_aliases),
             "alias_confidences": {alias: 1.0 for alias in cleaned_aliases},
             "scope_app": scope_app.strip(), "scope_scene": scope_scene.strip(),
-            "confidence": 1.0, "source": "manual"}
+            "confidence": 1.0, "source": "manual", "pinned": pinned}
 
 
 class HotwordStore:
@@ -286,6 +327,9 @@ class HotwordStore:
             raise ValueError("Hotword user_confirmed must be true or false")
         if not isinstance(entry.get("user_deleted", False), bool):
             raise ValueError("Hotword user_deleted must be true or false")
+        if not isinstance(entry.get("pinned", False), bool):
+            raise ValueError("Hotword pinned must be true or false")
+        usage = _validate_usage_metadata(entry)
         for scope_field in ("scope_app", "scope_scene"):
             if not isinstance(entry.get(scope_field, ""), str):
                 raise ValueError(f"Hotword {scope_field} must be a string")
@@ -323,6 +367,8 @@ class HotwordStore:
             "user_disabled": entry.get("user_disabled", False) or deleted,
             "user_confirmed": entry.get("user_confirmed", False),
             "user_deleted": deleted,
+            "pinned": entry.get("pinned", False),
+            **usage,
             "approved_aliases": approved_aliases,
             "alias_confidences": alias_confidences,
             "scope_app": _clean_text(entry.get("scope_app", ""), 200),
@@ -384,9 +430,13 @@ class HotwordStore:
 
     def upsert_manual(self, term: str, aliases: Iterable[str] = (), *,
                       original_term: str | None = None, enabled: bool = True,
-                      scope_app: str = "", scope_scene: str = "", dictionary: Iterable[str] = ()) -> dict:
+                      scope_app: str = "", scope_scene: str = "", dictionary: Iterable[str] = (),
+                      pinned: bool | None = None) -> dict:
         values = validate_manual_hotword(term, aliases, enabled=enabled,
-                                         scope_app=scope_app, scope_scene=scope_scene)
+                                         scope_app=scope_app, scope_scene=scope_scene,
+                                         pinned=False if pinned is None else pinned)
+        if pinned is None:
+            values.pop("pinned")
         term, key = values["term"], values["key"]
         original_key = _term_key(original_term) if original_term is not None else key
         now = _now_iso()
@@ -440,7 +490,10 @@ class HotwordStore:
                 entry.get("term"), entry.get("aliases", []),
                 enabled=(state == "active") if state is not None else entry.get("enabled", entry.get("active", True)),
                 scope_app=entry.get("scope_app", ""), scope_scene=entry.get("scope_scene", ""),
+                pinned=entry.get("pinned", False),
             )
+            if "pinned" not in entry:
+                values.pop("pinned")
             if state == "pending":
                 values["user_disabled"] = False
                 values["user_confirmed"] = False
@@ -449,6 +502,8 @@ class HotwordStore:
                 values["approved_aliases"] = []
                 values["alias_confidences"] = {alias: 0.5 for alias in values["aliases"]}
             metadata = {}
+            usage = _validate_usage_metadata(entry)
+            metadata.update({key: value for key, value in usage.items() if key in entry})
             if "user_confirmed" in entry:
                 if not isinstance(entry["user_confirmed"], bool):
                     raise TypeError("Hotword user_confirmed must be true or false")
@@ -555,11 +610,11 @@ class HotwordStore:
             raise TypeError("Learned corrections enabled must be true or false")
         if not text:
             return HotwordApplication(text=text)
-        context = self.active_context(app_info=app_info, scene=scene, dictionary=dictionary,
-                                      limit=10000, max_chars=1000000)
+        entries = self._applicable_entries(app_info or {}, scene, dictionary)
         candidates: dict[str, list[tuple[str, str, bool]]] = {}
-        canonical_keys = {_match_key(entry["term"]): entry["term"] for entry in context.entries}
-        for entry in context.entries:
+        canonical_keys = {_match_key(entry["term"]): entry["term"] for entry in entries}
+        text_key = _candidate_match_key(text)
+        for entry in entries:
             term = entry["term"]
             approved_keys = {_term_key(alias) for alias in entry.get("approved_aliases", [])}
             values = [(term, True)] + [
@@ -569,6 +624,8 @@ class HotwordStore:
                 )
             ]
             for value, canonical in values:
+                if _candidate_match_key(value) not in text_key:
+                    continue
                 key = _match_key(value)
                 if key in canonical_keys and canonical_keys[key] != term:
                     continue
@@ -586,11 +643,7 @@ class HotwordStore:
         unique.sort(key=lambda item: len(item[0]), reverse=True)
         if not unique:
             return HotwordApplication(text=text)
-        pattern = re.compile("|".join(
-            f"(?P<h{index}>{_replacement_pattern(value, canonical=canonical)})"
-            for index, (value, _, canonical) in enumerate(unique)
-        ), re.IGNORECASE)
-        replacements = {f"h{index}": term for index, (_, term, _) in enumerate(unique)}
+        pattern, replacements = _compiled_replacements(tuple(unique))
         changes: list[HotwordChange] = []
 
         def replace(match):
@@ -601,6 +654,49 @@ class HotwordStore:
             return term
 
         return HotwordApplication(text=pattern.sub(replace, text), changes=changes)
+
+    def record_usage(self, text: str, *, app_info: Optional[dict] = None, scene: str = "",
+                     language: str = "", dictionary: Iterable[str] = ()) -> list[str]:
+        if not isinstance(text, str):
+            raise TypeError("Hotword usage text must be a string")
+        if not text:
+            return []
+        app_info = app_info or {}
+        dictionary = tuple(dictionary)
+        now = _now_iso()
+        app_key = str(app_info.get("bundle_id") or app_info.get("name") or "").casefold()
+        with self._lock:
+            entries = deepcopy(self._entries)
+            candidates = [entry for entry in entries if entry.get("active")
+                          and not entry.get("user_deleted") and _entry_applies(entry, app_info, scene)]
+            candidates.extend(self._dictionary_entries(dictionary, {entry["key"] for entry in entries}))
+            text_key = _candidate_match_key(text)
+            candidates = [entry for entry in candidates if _candidate_match_key(entry["term"]) in text_key]
+            if not candidates:
+                return []
+            values = tuple((entry["term"], entry["term"], True)
+                           for entry in sorted(candidates, key=lambda item: len(item["term"]), reverse=True))
+            pattern, replacements = _compiled_replacements(values)
+            matched = {replacements[match.lastgroup] for match in pattern.finditer(text)}
+            if not matched:
+                return []
+            stored_keys = {entry["key"] for entry in entries}
+            used = []
+            for entry in candidates:
+                if entry["term"] not in matched:
+                    continue
+                if entry["key"] not in stored_keys:
+                    entry = self._normalize_entry(entry)
+                    entries.append(entry)
+                    stored_keys.add(entry["key"])
+                entry["usage_count"] = entry.get("usage_count", 0) + 1
+                entry["last_used_at"] = now
+                _increment_counter(entry.setdefault("usage_apps", {}), app_key)
+                _increment_counter(entry.setdefault("scenes", {}), scene)
+                _increment_counter(entry.setdefault("languages", {}), language)
+                used.append(entry["term"])
+            self._save(entries)
+            return used
 
     def add_or_reinforce(
         self,
@@ -652,6 +748,10 @@ class HotwordStore:
                     "user_disabled": False,
                     "user_confirmed": False,
                     "user_deleted": False,
+                    "pinned": False,
+                    "usage_count": 0,
+                    "last_used_at": "",
+                    "usage_apps": {},
                     "approved_aliases": [],
                     "alias_confidences": {alias: confidence for alias in aliases},
                     "scope_app": "",
@@ -749,10 +849,7 @@ class HotwordStore:
     ) -> ActiveHotwordContext:
         """Build a compact context string for the next ASR request."""
         app_info = app_info or {}
-        app_keys = {
-            str(app_info.get("bundle_id", "") or ""),
-            str(app_info.get("name", "") or ""),
-        }
+        app_keys = {str(app_info.get(key) or "").casefold() for key in ("bundle_id", "name")}
         app_keys.discard("")
         scene = str(scene or "")
         language = str(language or "")
@@ -760,12 +857,17 @@ class HotwordStore:
             raise ValueError("Hotword context limit must be a nonnegative integer")
         if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 0:
             raise ValueError("Hotword context budget must be a nonnegative integer")
-        with self._lock:
-            all_entries = deepcopy(self._entries)
-        entries = [e for e in all_entries if e.get("active") and e.get("term") and not e.get("user_deleted")
-                   and _entry_applies(e, app_info, scene)]
-        stored_keys = {e["key"] for e in all_entries}
-        entries.extend(self._dictionary_entries(dictionary, stored_keys))
+        entries = self._applicable_entries(app_info, scene, dictionary)
+        now = datetime.now(timezone.utc)
+
+        def app_usage(entry):
+            return sum(count for key, count in entry.get("usage_apps", {}).items() if key.casefold() in app_keys)
+
+        def recent_usage(entry):
+            if not entry.get("last_used_at"):
+                return 0.0
+            age_days = max(0.0, (now - datetime.fromisoformat(entry["last_used_at"])).total_seconds() / 86400)
+            return max(0.0, 1.0 - age_days / 30.0)
 
         def score(entry: dict) -> float:
             value = _bounded_confidence(entry.get("confidence"), default=0.5)
@@ -777,18 +879,34 @@ class HotwordStore:
             apps = entry.get("apps") or {}
             scenes = entry.get("scenes") or {}
             languages = entry.get("languages") or {}
-            if any(apps.get(k) for k in app_keys):
+            if any(count for key, count in apps.items() if key.casefold() in app_keys):
                 value += 0.25
             if scene and scenes.get(scene):
                 value += 0.18
             if language and language != "auto" and languages.get(language):
                 value += 0.08
+            value += min(math.log2(1 + entry.get("usage_count", 0)), 4.0) * 0.3
+            value += min(math.log2(1 + app_usage(entry)), 3.0) * 0.5
+            value += recent_usage(entry) * 2.0
             return value
+
+        def reason(entry):
+            if entry.get("pinned"):
+                return "pinned"
+            if entry.get("scope_app") or entry.get("scope_scene"):
+                return "scoped"
+            if app_usage(entry):
+                return "app_usage"
+            if recent_usage(entry):
+                return "recent_usage"
+            return "manual" if entry.get("source") in ("manual", "dictionary") else "learned"
 
         terms: list[str] = []
         selected: list[dict] = []
         total_chars = len(CONTEXT_PREFIX) + len(CONTEXT_SUFFIX)
-        for entry in sorted(entries, key=score, reverse=True):
+        ranked = sorted(entries, key=lambda entry: (bool(entry.get("pinned")), score(entry),
+                                                     entry.get("updated_at", "")), reverse=True)
+        for entry in ranked:
             term = str(entry.get("term") or "").strip()
             if not term:
                 continue
@@ -801,7 +919,20 @@ class HotwordStore:
             selected.append(entry)
             total_chars += extra
         context = CONTEXT_PREFIX + ", ".join(terms) + CONTEXT_SUFFIX if terms else ""
-        return ActiveHotwordContext(terms=terms, context=context, entries=selected)
+        selected_keys = {entry["key"] for entry in selected}
+        return ActiveHotwordContext(
+            terms=terms, context=context, entries=selected, eligible_count=len(entries),
+            omitted_terms=[entry["term"] for entry in ranked if entry["key"] not in selected_keys],
+            selection_reasons={entry["term"]: reason(entry) for entry in selected},
+        )
+
+    def _applicable_entries(self, app_info: dict, scene: str, dictionary: Iterable[str]) -> list[dict]:
+        with self._lock:
+            all_entries = deepcopy(self._entries)
+        entries = [entry for entry in all_entries if entry.get("active") and entry.get("term")
+                   and not entry.get("user_deleted") and _entry_applies(entry, app_info, scene)]
+        entries.extend(self._dictionary_entries(dictionary, {entry["key"] for entry in all_entries}))
+        return entries
 
 
 def extract_confident_corrections(

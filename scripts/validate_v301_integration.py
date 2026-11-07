@@ -57,6 +57,11 @@ def advance():
     NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.04))
 
 
+def usage_snapshot():
+    return {entry["term"]: (entry["usage_count"], entry["last_used_at"], dict(entry["usage_apps"]))
+            for entry in application.hotwords.get_all()}
+
+
 def process(samples, rate, app_info):
     operation = application._new_operation()
     worker = threading.Thread(target=application._process_audio,
@@ -81,6 +86,7 @@ try:
                     "--channels=1", "-o", str(path), sentence], check=True)
     samples, rate = sf.read(path, dtype="float32")
     assert rate == 16000
+    usage_before = usage_snapshot()
     first = process(samples, rate, {})
     assert "SpeakType" in first["polished"], first
     assert first["hotword_terms"] == context.terms
@@ -88,10 +94,14 @@ try:
     loaded = DictationHistory(path=application.history.path).get_recent(1)[0]
     assert loaded["hotword_terms"] == first["hotword_terms"]
     assert loaded["hotword_changes"] == first["hotword_changes"]
+    assert usage_snapshot()["SpeakType"][0] == usage_before["SpeakType"][0] + 1
+    assert HotwordStore().get_all() == application.hotwords.get_all()
+    first_usage = usage_snapshot()
     report["audio"].append({"source": "macOS built-in speech synthesis", "sentence": sentence,
                             "original": first["raw"], "final": first["polished"],
                             "hints": first["hotword_terms"], "changes": first["hotword_changes"]})
     report["checks"].append("Actual Qwen ASR flows through the application into persisted original/final text and vocabulary metadata")
+    report["checks"].append("Actual successful Qwen recognition increments the recognized word usage once and persists it")
 
     application.corrections.add("Speak Type", "LegacyProject")
     application.corrections.add("SpeakType", "LegacyProject")
@@ -102,12 +112,46 @@ try:
     same_input_result = application._apply_vocabulary_corrections(with_existing_rules["raw"])
     assert with_existing_rules["polished"] == same_input_result.text, (with_existing_rules, same_input_result)
     assert any(change["replacement"] == "LegacyProject" for change in with_existing_rules["hotword_changes"])
+    assert usage_snapshot() == first_usage
     application.config["hotword_context_enabled"] = False
     assert application._apply_vocabulary_corrections("Speak Type").text == "LegacyProject"
+    process(samples, rate, {})
+    assert usage_snapshot() == first_usage
     application.config["hotword_context_enabled"] = True
     application.corrections.remove("Speak Type")
     application.corrections.remove("SpeakType")
     report["checks"].append("The real ASR pipeline and vocabulary test share saved correction rules, rule order and explicit change details")
+    report["checks"].append("Usage follows explicit correction output; disabling vocabulary prevents counting in an actual ASR operation")
+
+    usage_before_cancel = usage_snapshot()
+    history_before_cancel = application.history.snapshot()
+    cancelled_operation = application._new_operation()
+    assert application.asr.acquire_inference(blocking=True)
+    cancelled_worker = threading.Thread(
+        target=application._process_audio, args=(samples.copy(), len(samples) / rate),
+        kwargs={"insert_result": False, "app_info": {}, "operation_id": cancelled_operation},
+    )
+    application._processing_thread = cancelled_worker
+    try:
+        cancelled_worker.start()
+        deadline = time.monotonic() + 10
+        while application._main_state["phase"] != "transcribing" and time.monotonic() < deadline:
+            advance()
+        assert application._main_state["phase"] == "transcribing"
+        application._main_cancel()
+        assert not application._operation_current(cancelled_operation)
+    finally:
+        application.asr.release_inference()
+    deadline = time.monotonic() + 150
+    while cancelled_worker.is_alive() and time.monotonic() < deadline:
+        advance()
+    assert not cancelled_worker.is_alive()
+    assert usage_snapshot() == usage_before_cancel
+    assert application.history.snapshot() == history_before_cancel
+    assert application._retain_dictation("SpeakType", "SpeakType", {}, operation_id=cancelled_operation,
+                                          vocabulary_text="SpeakType") is None
+    assert usage_snapshot() == usage_before_cancel
+    report["checks"].append("Cancelling while real inference waits on its engine lock prevents the completed ASR result and stale retain call from counting usage")
 
     correction = application.hotwords.apply("使用Speak Type和pytorch。", dictionary=["PyTorch"])
     assert correction.text == "使用SpeakType和PyTorch。"
@@ -125,6 +169,7 @@ try:
     loaded = next(item for item in DictationHistory(path=application.history.path).snapshot() if item["id"] == entry["id"])
     assert loaded["raw"] == "使用Speak Type和pytorch。" and loaded["hotword_changes"] == metadata
     assert loaded["hotword_terms"] == context.terms and loaded["polished"].endswith("已核对。")
+    assert usage_snapshot() == first_usage
     report["checks"].append("Real replacement metadata survives native recent-record selection, user editing and history reload")
 
     for index in range(9):
@@ -142,7 +187,9 @@ try:
     assert application._main_state["hotword_changes"] == metadata
     assert application._main_controller.get_final_text().endswith("已核对。")
     assert not history_window.window.isVisible()
+    assert usage_snapshot() == first_usage
     report["checks"].append("A record older than the recent eight opens from full history into the actual editor with its original correction details")
+    report["checks"].append("Reopening history, editing text, and selecting recent records do not repeat the usage count")
 
     application._main_learn_hotword("", "FreshTerm")
     assert "FreshTerm" in application._hotword_context_for_app({}).terms

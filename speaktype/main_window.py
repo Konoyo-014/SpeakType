@@ -9,7 +9,7 @@ from Foundation import (
     NSUndoManagerDidRedoChangeNotification, NSUndoManagerDidUndoChangeNotification,
 )
 
-from .design import apply_window, color, material_view, style_button, symbol
+from .design import apply_window, color, material_view, style_button, style_panel, symbol
 from .design import color as _theme_color
 from .hotwords import validate_manual_hotword
 from .status_overlay import _StateIndicatorView
@@ -121,7 +121,7 @@ class _MainWindowDelegate(NSObject):
         return self
 
     def toolbarAllowedItemIdentifiers_(self, toolbar):
-        return ["navigation", AppKit.NSToolbarFlexibleSpaceItemIdentifier, "settings"]
+        return [AppKit.NSToolbarFlexibleSpaceItemIdentifier, "settings"]
 
     def toolbarDefaultItemIdentifiers_(self, toolbar):
         return self.toolbarAllowedItemIdentifiers_(toolbar)
@@ -129,15 +129,8 @@ class _MainWindowDelegate(NSObject):
     def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, toolbar, identifier, inserted):
         return self._controller._toolbar_items.get(str(identifier))
 
-    def onNavigation_(self, sender):
-        index = sender.selectedSegment()
-        sender.setSelectedSegment_(0)
-        if index == 1:
-            self.onHotwords_(sender)
-        elif index == 2:
-            self._controller._show_recent()
-        else:
-            self.onFocusDictation_(sender)
+    def onRecent_(self, sender):
+        self._controller._show_recent()
 
     def onRecord_(self, sender):
         self._controller._on_record()
@@ -269,10 +262,11 @@ class _MainWindow(AppKit.NSWindow):
 
 
 class MainWindowController:
-    WIDTH = 900
-    HEIGHT = 620
-    MIN_WIDTH = 780
-    MIN_HEIGHT = 560
+    WIDTH = 1120
+    HEIGHT = 760
+    MIN_WIDTH = 1020
+    MIN_HEIGHT = 680
+    SIDEBAR_WIDTH = 204
 
     def __init__(self, on_record, on_cancel, on_copy, on_insert, on_polish, on_translate,
                  on_history, on_settings, on_setup, on_dictionary, *, on_recent=None,
@@ -405,23 +399,6 @@ class MainWindowController:
         toolbar.setAllowsUserCustomization_(False)
         toolbar.setDisplayMode_(AppKit.NSToolbarDisplayModeIconOnly)
         toolbar.setSizeMode_(AppKit.NSToolbarSizeModeSmall)
-        self._navigation_control = AppKit.NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(0, 0, 286, 28))
-        self._navigation_control.setSegmentCount_(3)
-        self._navigation_control.setSegmentStyle_(AppKit.NSSegmentStyleTexturedRounded)
-        self._navigation_control.setTrackingMode_(AppKit.NSSegmentSwitchTrackingSelectOne)
-        for index, (key, image_name) in enumerate((("nav_dictation", "waveform"), ("hotwords", "character.book.closed"), ("history_nav", "clock.arrow.circlepath"))):
-            self._navigation_control.setLabel_forSegment_(self.labels[key], index)
-            self._navigation_control.setImage_forSegment_(symbol(image_name, self.labels[key], 13), index)
-            self._navigation_control.setWidth_forSegment_((90, 106, 90)[index], index)
-        self._navigation_control.setSelectedSegment_(0)
-        self._navigation_control.setTarget_(self._delegate)
-        self._navigation_control.setAction_(b"onNavigation:")
-        self._navigation_control.setAccessibilityLabel_(self.labels["navigation"])
-        navigation = AppKit.NSToolbarItem.alloc().initWithItemIdentifier_("navigation")
-        navigation.setView_(self._navigation_control)
-        navigation.setMinSize_(NSMakeSize(286, 28))
-        navigation.setMaxSize_(NSMakeSize(286, 28))
-        self._toolbar_items["navigation"] = navigation
         host = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 70, 28))
         self._settings_button = self._button(host, "", b"onSettings:", (0, 0, 30, 28), key=",")
         self._settings_button.setImage_(symbol("gearshape", self.labels["settings"], 15))
@@ -489,7 +466,38 @@ class MainWindowController:
 
     def _show_recent(self):
         self.flush_edits()
-        self._recent_popover.showRelativeToRect_ofView_preferredEdge_(self._navigation_control.bounds(), self._navigation_control, AppKit.NSMinYEdge)
+        self._recent_popover.showRelativeToRect_ofView_preferredEdge_(self._history_nav.bounds(), self._history_nav, AppKit.NSMaxXEdge)
+
+    def _build_sidebar(self, root):
+        sidebar = material_view(NSMakeRect(0, 0, self.SIDEBAR_WIDTH, self.HEIGHT))
+        sidebar.setAutoresizingMask_(AppKit.NSViewHeightSizable)
+        root.addSubview_(sidebar)
+        brand = self._label(sidebar, "SpeakType", (24, self.HEIGHT - 76, 160, 32), size=25,
+                            bold=True, color=color("sidebar_text"), resize=AppKit.NSViewMinYMargin)
+        brand.setFont_(AppKit.NSFont.fontWithName_size_("Georgia-Bold", 24))
+        self._label(sidebar, "VOICE TO WORDS", (25, self.HEIGHT - 99, 160, 18), size=10,
+                    color=color("sidebar_muted"), resize=AppKit.NSViewMinYMargin)
+        for index, (key, icon, action) in enumerate((
+            ("nav_dictation", "waveform", b"onFocusDictation:"),
+            ("hotwords", "character.book.closed", b"onHotwords:"),
+            ("history_nav", "clock.arrow.circlepath", b"onRecent:"),
+        )):
+            button = self._button(sidebar, self.labels[key], action,
+                                  (14, self.HEIGHT - 172 - index * 46, 176, 38),
+                                  resize=AppKit.NSViewMinYMargin)
+            style_button(button, sidebar=True, selected=index == 0)
+            button.setImage_(symbol(icon, self.labels[key], 17))
+            button.setImagePosition_(AppKit.NSImageLeft)
+            button.setFont_(AppKit.NSFont.systemFontOfSize_weight_(14, AppKit.NSFontWeightMedium))
+            if index == 2:
+                self._history_nav = button
+            elif index == 1:
+                self._vocabulary_nav = button
+        preferences = self._button(sidebar, self.labels["settings"], b"onSettings:", (14, 64, 176, 36), key=",")
+        preferences.setImage_(symbol("gearshape", self.labels["settings"], 16))
+        preferences.setImagePosition_(AppKit.NSImageLeft)
+        style_button(preferences, sidebar=True)
+        self._label(sidebar, "SpeakType 3.0.1", (24, 28, 160, 18), size=11, color=color("sidebar_muted"))
 
     def _build_window(self):
         AppKit.NSApplication.sharedApplication()
@@ -505,32 +513,40 @@ class MainWindowController:
         self.window.setDelegate_(self._delegate)
         apply_window(self.window)
         self.window.center()
-        content = material_view(NSMakeRect(0, 0, self.WIDTH, self.HEIGHT), material="sidebar")
+        root = material_view(NSMakeRect(0, 0, self.WIDTH, self.HEIGHT), material="background")
+        root.setAutoresizingMask_(_FILL_RESIZE)
+        self.window.setContentView_(root)
+        self._build_sidebar(root)
+        content = material_view(NSMakeRect(self.SIDEBAR_WIDTH, 0, self.WIDTH - self.SIDEBAR_WIDTH, self.HEIGHT), material="background")
         content.setAutoresizingMask_(_FILL_RESIZE)
-        self.window.setContentView_(content)
+        root.addSubview_(content)
+        self._workspace = content
         self.window.setToolbarStyle_(AppKit.NSWindowToolbarStyleUnifiedCompact)
         self._build_toolbar()
         self.window.setContentSize_(NSMakeSize(self.WIDTH, self.HEIGHT))
         self._build_recent_popover()
-        header = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(24, 542, 852, 58))
+        header = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, self.HEIGHT - 118, 852, 96))
+        self._header = header
         header.setAutoresizingMask_(_TOP_RESIZE)
         content.addSubview_(header)
-        self._indicator = _StateIndicatorView.alloc().initWithFrame_(NSMakeRect(0, 20, 22, 22))
+        self._workspace_title = self._label(header, self.labels["workspace"], (0, 58, 460, 34), size=28, bold=True)
+        self._indicator = _StateIndicatorView.alloc().initWithFrame_(NSMakeRect(0, 30, 18, 18))
         header.addSubview_(self._indicator)
-        self._phase_label = self._label(header, "", (32, 29, 500, 21), size=14, bold=True,
+        self._phase_label = self._label(header, "", (28, 30, 500, 21), size=12, bold=True,
                                          resize=AppKit.NSViewWidthSizable)
-        self._status_label = self._label(header, "", (32, 8, 560, 18), size=11,
+        self._status_label = self._label(header, "", (0, 6, 560, 18), size=12,
                                          color=color("muted"), resize=AppKit.NSViewWidthSizable)
-        self._record_button = self._button(header, self.labels["start"], b"onRecord:", (676, 11, 176, 36), key="r",
+        self._record_button = self._button(header, self.labels["start"], b"onRecord:", (676, 52, 176, 38), key="r",
                                            resize=AppKit.NSViewMinXMargin)
         style_button(self._record_button, primary=True)
         self._record_button.setFont_(AppKit.NSFont.systemFontOfSize_weight_(15, AppKit.NSFontWeightSemibold))
         self._record_button.setImage_(symbol("mic.fill", self.labels["start"]))
         self._record_button.setImagePosition_(AppKit.NSImageLeft)
-        self._cancel_button = self._button(header, self.labels["cancel"], b"onCancel:", (604, 14, 64, 30), key="\x1b", modifiers=0,
+        self._cancel_button = self._button(header, self.labels["cancel"], b"onCancel:", (788, 12, 64, 30), key="\x1b", modifiers=0,
                                            resize=AppKit.NSViewMinXMargin)
-        self._elapsed_label = self._label(header, "", (220, 30, 190, 18), size=10, color=color("muted"))
-        metadata = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(24, 508, 852, 28))
+        self._elapsed_label = self._label(header, "", (230, 31, 190, 18), size=11, color=color("muted"))
+        metadata = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, self.HEIGHT - 162, 852, 28))
+        self._metadata = metadata
         metadata.setAutoresizingMask_(_TOP_RESIZE)
         content.addSubview_(metadata)
         self._target_label = self._label(metadata, self.labels["target_picker"], (0, 7, 80, 18), size=11, color=color("muted"))
@@ -541,6 +557,7 @@ class MainWindowController:
                                          color=color("muted"), resize=AppKit.NSViewMinXMargin)
         self._hotkey_label.setAlignment_(AppKit.NSTextAlignmentRight)
         self._editor_material = material_view(NSMakeRect(20, 164, 860, 330), material="content", radius=14)
+        style_panel(self._editor_material, "surface", radius=14, border=True)
         self._editor_material.setAutoresizingMask_(_FILL_RESIZE)
         content.addSubview_(self._editor_material)
         self._final_view, self._final_placeholder, self._final_scroll = self._text_view(
@@ -573,6 +590,9 @@ class MainWindowController:
         self._learn_button.setImage_(symbol("text.badge.plus", self.labels["learn"]))
         self._learn_button.setImagePosition_(AppKit.NSImageLeft)
         self._learn_button.setToolTip_(self.labels["learn_tip"])
+        self._vocabulary_band = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(32, 132, 852, 40))
+        style_panel(self._vocabulary_band, "accent_soft", radius=9)
+        content.addSubview_positioned_relativeTo_(self._vocabulary_band, AppKit.NSWindowBelow, self._learn_button)
         self._hotword_summary = self._label(content, "", (24, 137, 640, 18), size=11, color=color("muted"),
                                             resize=AppKit.NSViewWidthSizable)
         self._raw_disclosure = self._button(content, "", b"onToggleRaw:", (20, 106, 18, 20))
@@ -590,6 +610,7 @@ class MainWindowController:
 
         self._separator(content, (24, 88, 852, 1))
         footer = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(24, 36, 852, 52))
+        self._footer = footer
         footer.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         content.addSubview_(footer)
         self._polish_button = self._button(footer, self.labels["polish"], b"onPolish:", (0, 12, 118, 30), key="p", modifiers=_SHIFT_COMMAND)
@@ -636,24 +657,27 @@ class MainWindowController:
     def _layout_workspace(self):
         if self.window is None or not hasattr(self, "_setup_button"):
             return
-        size = self.window.contentView().bounds().size
-        width = size.width - 40
-        top = size.height - 126
+        size = self._workspace.bounds().size
+        width = size.width - 64
+        top = size.height - 180
         extra = 96 if self._raw_expanded else 0
-        bottom = 164 + extra
+        bottom = 188 + extra
         height = max(150, top - bottom)
-        self._editor_material.setFrame_(NSMakeRect(20, bottom, width, height))
-        frame = NSMakeRect(14, 12, width - 28, height - 50)
+        self._header.setFrame_(NSMakeRect(32, size.height - 118, width, 96))
+        self._metadata.setFrame_(NSMakeRect(32, size.height - 162, width, 28))
+        self._editor_material.setFrame_(NSMakeRect(32, bottom, width, height))
+        frame = NSMakeRect(22, 18, width - 44, height - 62)
         self._final_scroll.setFrame_(frame)
         self._live_scroll.setFrame_(frame)
         for placeholder in (self._final_placeholder, self._live_placeholder):
-            placeholder.setFrame_(NSMakeRect(38, top - 84, width - 44, 32))
-        self._empty_hint.setFrame_(NSMakeRect(38, top - 110, width - 44, 22))
-        self._learn_button.setFrame_(NSMakeRect(size.width - 214, 132 + extra, 190, 28))
-        self._character_label.setFrame_(NSMakeRect(width - 224, height - 28, 208, 18))
-        self._editor_heading.setFrame_(NSMakeRect(16, height - 28, width - 260, 18))
-        self._hotword_summary.setFrame_(NSMakeRect(24, 137 + extra, width - 236, 18))
-        self._raw_scroll.setFrame_(NSMakeRect(24, 132, size.width - 48, 80))
+            placeholder.setFrame_(NSMakeRect(58, top - 100, width - 52, 32))
+        self._empty_hint.setFrame_(NSMakeRect(58, top - 132, width - 52, 22))
+        self._vocabulary_band.setFrame_(NSMakeRect(32, 136 + extra, width, 40))
+        self._learn_button.setFrame_(NSMakeRect(size.width - 234, 142 + extra, 190, 28))
+        self._character_label.setFrame_(NSMakeRect(width - 234, height - 32, 208, 18))
+        self._editor_heading.setFrame_(NSMakeRect(26, height - 32, width - 270, 18))
+        self._hotword_summary.setFrame_(NSMakeRect(46, 147 + extra, width - 220, 18))
+        self._raw_scroll.setFrame_(NSMakeRect(32, 132, width, 80))
         self._raw_scroll.setHidden_(not self._raw_expanded)
         self._raw_placeholder.setFrame_(NSMakeRect(0, 46, width - 22, 22))
         self._raw_disclosure.setAccessibilityValue_(self._raw_expanded)
@@ -822,7 +846,7 @@ class MainWindowController:
         self._insert_button.setEnabled_(text and bool(target) and target != "SpeakType" and not busy and not recording)
         self._insert_button.setTitle_(self.labels["insert"].format(target=target) if target else self.labels["insert_empty"])
         self._insert_button.setAccessibilityLabel_(self._insert_button.title())
-        style_button(self._insert_button)
+        style_button(self._insert_button, primary=True)
         self._polish_button.setEnabled_(text and self._llm_ready and not busy and not recording)
         self._translate_button.setEnabled_(text and self._llm_ready and not busy and not recording)
         selection = self._selected_final_text()

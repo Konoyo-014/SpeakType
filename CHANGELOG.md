@@ -1,12 +1,15 @@
 # Changelog
 
-## [3.0.1] - 2026-11-03
+## [3.0.1] - 2026-11-07
 
-- Redesigned the native main window around dictation, editing and delivery, with macOS materials, a compact system toolbar, adaptive appearance and direct vocabulary access.
-- Added a searchable vocabulary editor with preferred spellings, multiple misspellings, app/context limits, enable/pause/delete, candidate review, atomic JSON import/export and text replacement checks.
+- Redesigned the native main window with an ink-green navigation sidebar, a warm light writing area, a teal vocabulary strip, and coordinated light/dark appearances. The editor retains native text selection, undo/redo, recording controls, original transcription, and delivery actions.
+- Added a three-column vocabulary workspace with collection filters, search, priority/name/usage sorting, preferred spellings, multiple misspellings, app/context limits, enable/pause/delete, and candidate review.
+- Import vocabulary from JSON, CSV, or one-word-per-line TXT. JSON/CSV export retains state, approved aliases, priority, scope, and usage history. Complete-file validation precedes atomic import.
+- Prioritize selected words and rank remaining recognition hints using application relevance, actual dictation usage, and recency. Show selected/applicable counts and words outside the count or character budget.
+- Count actual vocabulary use once per successfully retained dictation, retain the last-used time and application counts, and preserve this metadata across persistence and export.
 - Added session drafts for vocabulary forms and an unsaved-draft check before quitting.
-- Send bounded `Vocabulary` prompts through Qwen3-ASR's actual `system_prompt` parameter in final recognition and preview. Include the existing custom dictionary and prioritize manual entries.
-- Apply explicit hotword aliases with longer-phrase priority, exact preferred casing, Chinese/English boundaries, contraction protection, ambiguity handling and a single replacement pass.
+- Send bounded `Vocabulary` prompts through Qwen3-ASR's actual `system_prompt` parameter in final recognition and preview. Include the existing custom dictionary. The default prompt allows 30 terms within 800 characters.
+- Apply explicit hotword aliases across the complete eligible vocabulary, with longer-phrase priority, exact preferred casing, Chinese/English boundaries, contraction protection, ambiguity handling and a single replacement pass.
 - Keep paused terms paused during learning. Learned aliases obey their independent setting and confidence requirement.
 - Save vocabulary directly from selected final text. Retain recognition hints and explicit correction changes in the same history record through editing and reloading.
 - Retain the original recognition before applying corrections. Cancellation protects both text results and vocabulary metadata.
@@ -14,6 +17,7 @@
 - Commit vocabulary and correction changes to memory after successful file writes; keep memory and saved data consistent when writes fail.
 - Share saved correction rules and their execution order between dictation and text tests.
 - Keep the window responsive during microphone startup, support cancellation and immediate retry, and retain device errors in readiness details without disabling retry.
+- Describe model-download failures using their actual connection, timeout, DNS, certificate, or HTTP error, retaining detailed causes and retry guidance while the worker exits with failure.
 
 ## [3.0.0] - 2026-11-01
 

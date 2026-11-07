@@ -28,8 +28,7 @@ def advance():
 
 
 def show_recent(controller):
-    controller._navigation_control.setSelectedSegment_(2)
-    controller._navigation_control.sendAction_to_(controller._navigation_control.action(), controller._navigation_control.target())
+    controller._history_nav.performClick_(None)
     advance()
     assert controller._recent_popover.isShown()
 
@@ -87,7 +86,9 @@ try:
     controller.show()
     advance()
     assert controller.window.isVisible()
-    assert controller.window.contentView().frame().size == NSMakeSize(controller.WIDTH, controller.HEIGHT)
+    initial_size = controller.window.contentView().frame().size
+    assert controller.MIN_WIDTH <= initial_size.width <= controller.WIDTH
+    assert controller.MIN_HEIGHT <= initial_size.height <= controller.HEIGHT
     assert controller.window.toolbar() is not None
     assert controller._record_button.isEnabled()
     assert not controller._cancel_button.isEnabled()

@@ -1,5 +1,6 @@
 import AppKit
 import objc
+import Quartz
 from Foundation import NSMakeRect
 
 
@@ -16,8 +17,29 @@ _COLORS = {
     "line": AppKit.NSColor.separatorColor,
 }
 
+_PALETTE = {
+    "background": ((0.965, 0.961, 0.945), (0.105, 0.125, 0.121)),
+    "surface": ((1.0, 0.997, 0.985), (0.145, 0.169, 0.161)),
+    "sidebar": ((0.075, 0.161, 0.145), (0.060, 0.105, 0.095)),
+    "sidebar_selected": ((0.16, 0.29, 0.25), (0.15, 0.26, 0.22)),
+    "sidebar_text": ((0.94, 0.96, 0.92), (0.94, 0.96, 0.92)),
+    "sidebar_muted": ((0.65, 0.74, 0.69), (0.65, 0.74, 0.69)),
+    "text": ((0.12, 0.19, 0.17), (0.92, 0.94, 0.90)),
+    "muted": ((0.39, 0.45, 0.41), (0.65, 0.73, 0.68)),
+    "accent": ((0.10, 0.39, 0.31), (0.36, 0.75, 0.61)),
+    "accent_soft": ((0.88, 0.93, 0.88), (0.16, 0.27, 0.22)),
+    "line": ((0.85, 0.88, 0.83), (0.25, 0.32, 0.28)),
+}
+
 
 def color(name):
+    if name in _PALETTE:
+        def resolve(appearance):
+            match = appearance.bestMatchFromAppearancesWithNames_(
+                [AppKit.NSAppearanceNameAqua, AppKit.NSAppearanceNameDarkAqua])
+            values = _PALETTE[name][int(match == AppKit.NSAppearanceNameDarkAqua)]
+            return AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(*values, 1.0)
+        return AppKit.NSColor.colorWithName_dynamicProvider_("SpeakType." + name, resolve)
     return _COLORS[name]()
 
 
@@ -29,20 +51,9 @@ def apply_window(window):
 
 
 def material_view(frame, material="sidebar", radius=0):
-    materials = {
-        "sidebar": AppKit.NSVisualEffectMaterialSidebar,
-        "popover": AppKit.NSVisualEffectMaterialPopover,
-        "content": AppKit.NSVisualEffectMaterialUnderWindowBackground,
-    }
-    view = AppKit.NSVisualEffectView.alloc().initWithFrame_(frame)
-    view.setMaterial_(materials[material])
-    view.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
-    view.setState_(AppKit.NSVisualEffectStateFollowsWindowActiveState)
-    if radius:
-        view.setWantsLayer_(True)
-        view.layer().setCornerRadius_(radius)
-        view.layer().setCornerCurve_("continuous")
-        view.layer().setMasksToBounds_(True)
+    backgrounds = {"sidebar": "sidebar", "popover": "surface", "content": "surface", "background": "background"}
+    view = AppKit.NSView.alloc().initWithFrame_(frame)
+    style_panel(view, backgrounds[material], radius=radius)
     return view
 
 
@@ -95,7 +106,9 @@ def style_button(button, primary=False, sidebar=False, selected=False):
         button.setBordered_(False)
         button.setAlignment_(AppKit.NSTextAlignmentLeft)
         button.setContentTintColor_(color("sidebar_text"))
-        style_panel(button, "accent_soft" if selected else "sidebar", radius=7, border=False)
+        button.setWantsLayer_(True)
+        button.layer().setCornerRadius_(8)
+        button.layer().setBackgroundColor_((color("sidebar_selected") if selected else AppKit.NSColor.clearColor()).CGColor())
     else:
         button.setBordered_(True)
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)

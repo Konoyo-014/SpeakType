@@ -4,6 +4,8 @@
 
 Record speech in the native SpeakType window, edit the result, and copy or insert it into another app. Hold Right Command to dictate directly into a focused input field. Qwen3-ASR runs on your Mac; a local Ollama model provides optional polishing and translation.
 
+![SpeakType 3.0.1 dictation window](docs/images/dictation-en.png)
+
 ## Install
 
 Requires **macOS 14 or later and an Apple Silicon Mac**. The DMG includes the Python runtime and application dependencies.
@@ -26,6 +28,8 @@ Choose an installed model from the list, or click **Download model** to install 
 If Ollama reports that a model requires a newer server, **Update Ollama…** opens the official download page. **Error details…** displays the complete error in a scrollable window with text selection and **Copy error**. You can turn off both language features with **Use dictation only**.
 
 Setup checks the configured service and full model tag. Recognition is marked ready after configuration, tokenizer, and weight files pass complete-cache validation. A damaged cache offers **Redownload model**, which downloads and validates the complete model through the official Hugging Face client.
+
+Download failures identify connection and data timeouts, DNS resolution, certificate validation, and HTTP status errors. The error includes the underlying cause and a retry action. Downloaded cache files remain available; a failed request stays failed until a retry succeeds.
 
 If an enabled language feature becomes unavailable during dictation, SpeakType keeps the transcription and reports that processing was skipped. The main window and history retain available text for recovery.
 
@@ -97,11 +101,17 @@ To edit a selection, select the text and dictate a complete command such as `mak
 
 **Adaptive Hotwords** learns reusable terms from immediate edits to text inserted by SpeakType. It observes the recently inserted span in the focused field for a short period. App changes end observation; password fields, unreadable inputs, unrelated typing, and simple appended text are excluded. The local Ollama model proposes terminology, and validation checks each proposal against the edited text before saving it in `~/.speaktype/hotwords.json`.
 
-Open **Vocabulary** in the main window to manage names, products, acronyms and technical terms. Each entry has a preferred spelling, up to eight common misspellings, and optional application and context limits. Search, edit, pause or delete entries, and review learned candidates separately. JSON import and export preserve enabled, paused and pending states; imports validate every entry before writing the collection.
+Open **Vocabulary** in the main window to manage names, products, acronyms and technical terms. The three-column window separates collection filters, the searchable word list, and the selected word's details. Each entry has a preferred spelling, up to eight common misspellings, optional application/context limits, and a **Prioritize this word** option. Sort by priority, name, or actual dictation usage; review learned candidates separately.
 
-Each dictation selects a bounded set of applicable terms, prioritizes manual entries, and sends a `Vocabulary` prompt through Qwen3-ASR's actual model input. The existing custom dictionary also supplies recognition hints. Explicit misspellings are corrected locally after recognition, with exact preferred casing, longer phrases first, English boundaries next to Chinese text, and a single replacement pass. Paused entries remain paused when new learning arrives.
+![SpeakType 3.0.1 vocabulary](docs/images/vocabulary-en.png)
 
-The main window retains the original recognition, selected hints and applied corrections. Select a term in the final text and choose **Remember this word** to save its spelling and common misspelling. **Test your correction rules** checks replacement behavior on typed text; new dictations check recognition behavior. Unsaved vocabulary drafts survive navigation and closing the vocabulary window during the current session. Quitting offers a return to the unsaved drafts.
+Import JSON, CSV, or TXT vocabulary files. TXT contains one word per line; CSV requires a `term` column. Export JSON or CSV to preserve enabled, paused and pending states, approved misspellings, application/context limits, priority, and usage history. CSV stores list and object fields as JSON inside correctly quoted cells. Imports validate the complete file before saving. TXT and CSV containing only `term` add new words while preserving every existing word's settings. JSON and CSV containing settings update matching preferred spellings.
+
+Each dictation selects a bounded set of applicable terms and sends a `Vocabulary` prompt through Qwen3-ASR's actual model input. Prioritized terms are selected first; application relevance, actual use, and recent use help rank the remaining terms. The default is at most 30 terms within an 800-character prompt, including its prefix and separators. The vocabulary window shows how many applicable words fit and which words remain outside the prompt budget. The existing custom dictionary also supplies recognition hints.
+
+Explicit misspellings are corrected locally after recognition, with exact preferred casing, longer phrases first, English boundaries next to Chinese text, and a single replacement pass. These explicit corrections apply to the complete eligible vocabulary, independently of the smaller recognition-hint budget. Paused entries remain paused when new learning arrives; their hints and corrections both stay disabled.
+
+The main window retains the original recognition, selected hints and applied corrections. Select a term in the final text and choose **Remember this word** to save its spelling and common misspelling. **Try your corrections** checks replacement behavior on typed text; new dictations check recognition behavior. Unsaved vocabulary drafts survive navigation and closing the vocabulary window during the current session. Quitting offers a return to the unsaved drafts.
 
 Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phrases that expand into saved text. Corrections preserve literal backslashes in replacement text and apply longer matching terms first. Snippets support `{date}`, `{time}`, `{datetime}`, `{clipboard}`, and `{env:NAME}`. Clipboard and environment placeholders expand only for exact trigger matches.
 
@@ -116,13 +126,15 @@ Use **Dictionary & Snippets** to manage custom vocabulary, corrections, and phra
 
 ## What's new in v3.0.1
 
-- A compact native dictation window with a macOS material background, a system toolbar, an editable writing area, expandable original transcription and concise readiness information. Its colors follow the system appearance.
-- A complete vocabulary editor with search, status filters, editing, pause/delete controls, app and context limits, JSON import/export and text replacement checks.
+- A native writing window with an ink-green navigation sidebar, a warm light editor, a teal vocabulary strip, and coordinated light/dark appearances. Native text editing, undo/redo, expandable original transcription, recording controls, and delivery remain directly accessible.
+- A three-column vocabulary workspace with priority controls, actual usage counts, recent-use dates, search and sorting, app/context limits, JSON/CSV/TXT import, JSON/CSV export, and text replacement checks.
 - Actual Qwen3-ASR `system_prompt` support and the `Vocabulary` prompt format shared by recognition and live preview, including the existing custom dictionary.
-- Local misspelling corrections with longer-phrase priority, Chinese/English boundaries, contraction protection and an independent switch for learned corrections.
+- Recognition hints ranked by explicit priority, application relevance, and actual usage, with visible selection counts, budget limits, and omitted terms.
+- Local misspelling corrections across the eligible vocabulary, with longer-phrase priority, Chinese/English boundaries, contraction protection and an independent switch for learned corrections.
 - Direct vocabulary capture from selected final text, and per-record recognition hints and correction details that survive history reloads and manual edits.
+- Actionable model-download errors that retain the underlying network or service failure.
 
-See the [v3.0.1 release notes](docs/releases/v3.0.1.md) for behavior, research sources and validation scope.
+See the [v3.0.1 release notes](docs/releases/v3.0.1.md) and [product research with acceptance criteria](docs/product/v3.0.1-research.md).
 
 ## Features introduced in v3.0.0
 
