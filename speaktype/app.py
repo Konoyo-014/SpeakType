@@ -1469,8 +1469,8 @@ class SpeakTypeApp(rumps.App):
 
             with self._operation_lock:
                 if self._update_asr_engine_state(engine, phase="idle", ready=microphone_is_authorized(),
-                                                status=self._desktop_text("可以开始听写。点击录音按钮，或在其他应用中使用快捷键。",
-                                                                          "Ready. Click Record, or use the shortcut in another app.")):
+                                                status=self._desktop_text("语音模型已加载。录音与快捷键状态请查看下方准备信息。",
+                                                                          "Speech model loaded. Check dictation and shortcut readiness below.")):
                     self._set_status(t("status_ready"))
                     self._set_title(ICON_IDLE)
 
